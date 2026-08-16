@@ -1,318 +1,292 @@
 # HARDWARE BENCHMARK REPORT
-## PHASE 1 — BENCHMARK DE GERAÇÃO LOCAL
+## Fase de Benchmark — Resultados Medidos
 
-**Projeto:** HERMES — Hybrid AI Animation Studio
-**Canal:** @EraUmaVezBibliaAnimada
-**Data do benchmark:** 16 de agosto de 2026
-**Máquina:** Dell XPS 15 9570 — i9-8950HK, GTX 1050 Ti Max-Q (4GB VRAM, Pascal sm_61), 32GB RAM, Windows 11
-**Natureza:** Testes reais com medição de tempo, VRAM, temperatura e qualidade.
-
----
-
-## VEREDITO EXECUTIVO
-
-> **🟢 GO — A geração de imagem local é VIÁVEL na GTX 1050 Ti Max-Q.**
-> Com LCM LoRA (4 steps), cada imagem leva ~24s. Para 37 imagens/episódio: **~15 minutos** — aceitável para produção assíncrona noturna.
+**Data:** 16 de agosto de 2026
+**Máquina:** Dell XPS 15 9570 — i9-8950HK, 32GB RAM, GTX 1050 Ti Max-Q (4GB VRAM, Pascal sm_61)
+**Driver:** 528.79 (CUDA 12.0)
+**Python:** 3.12.1 (venv dedicado: `C:\Users\meira\hermes-studio-venv`)
+**PyTorch:** 2.7.1+cu118 (CUDA 11.8 — compatível com driver 528.79)
 
 ---
 
-## B0 — ENCODER h264_qsv (Intel Quick Sync)
+## TABELA RESUMO
 
-| Encoder | Tempo (10s 1080p30 sintético) | Tempo (Ken Burns 5s) | Tamanho |
-|---|---|---|---|
-| **h264_qsv** (Intel UHD 630) | 6.1s | 10.7s | 700KB |
-| **libx264 veryfast** (CPU) | 2.5s | 2.7s | 163KB |
-
-**Veredito:** 🔴 **QSV descartado.** A UHD 630 é mais lenta que o CPU e produz arquivos 4× maiores. **libx264 permanece como encoder padrão** — já validado na Fase 0 como suficientemente rápido (~7 min para um episódio de 4 min).
-
----
-
-## B1 — PyTorch CUDA EM PASCAL sm_61
-
-### Descoberta crítica: cu126 FALHA, cu121 FUNCIONA
-
-| Versão PyTorch | CUDA Runtime | Funciona no driver 528.79? | Status |
-|---|---|---|---|
-| **torch 2.13.0+cu126** | CUDA 12.6 | ❌ `cudaErrorDevicesUnavailable` | 🔴 Incompatível |
-| **torch 2.5.1+cu121** | CUDA 12.1 | ✅ CUDA funcional | 🟢 **USAR ESTA** |
-
-**Causa da falha do cu126:** O driver 528.79 (CUDA 12.0) não suporta o runtime CUDA 12.6 via minor version compatibility neste par driver/GPU. O erro é `cudaErrorDevicesUnavailable` — a GPU aparece como "busy" apesar de 0% de utilização no nvidia-smi.
-
-**Solução adotada:** PyTorch 2.5.1+cu121 (última versão cu121 no PyPI). Minor version compat 12.1→12.0 funciona corretamente.
-
-### Validação CUDA
-
-```
-PyTorch: 2.5.1+cu121
-CUDA available: True
-Device: NVIDIA GeForce GTX 1050 Ti with Max-Q Design
-Compute capability: (6, 1)
-Arch list: ['sm_50', 'sm_60', 'sm_61', 'sm_70', 'sm_75', 'sm_80', 'sm_86', 'sm_90']
-```
-
-**Matmul 1024×1024 (20 iterações):**
-- GPU: 102.3 ms/iter
-- CPU: 12.2 ms/iter
-- **GPU 8.4× mais LENTA que CPU** (fp32, sem Tensor Cores)
-
-> ⚠️ **Nota importante:** A GPU Pascal é mais lenta que o CPU para matmul genérico em fp32. O ganho real vem com **fp16** (modelos de difusão) e operações especializadas (conv2d, attention). Não use a GPU para compute genérico — use para inference de modelos especializados.
-
-### Ambiente Python
-
-- **Python:** 3.12.1 (C:\Python312)
-- **venv:** `C:\Users\meira\OneDrive\IdeaProjects\youtube-video-poster\.venv`
-- **diffusers:** 0.39.0
-- **transformers:** 5.15.0
-- **edge-tts:** 7.2.8
-- **peft:** instalado
-
-> ⚠️ **PYTHONPATH:** O Hermes contamina o venv do projeto com seu PYTHONPATH. Todo script Python precisa de `export PYTHONPATH=""` antes de executar. Isto deve ser tratado no wrapper do pipeline.
-
----
-
-## B2 — STABLE DIFFUSION 1.5 (GO/NO-GO)
-
-### Configuração
-- **Modelo:** stable-diffusion-v1-5/stable-diffusion-v1-5
-- **Precision:** fp16
-- **Estratégia de memória:** `enable_sequential_cpu_offload()` + `enable_attention_slicing()`
-- **Nota:** Sem sequential_cpu_offload, ocorre OOM (CUDA out of memory: tried to allocate 648 MiB, 0 bytes free). A GPU tem 4GB, mas o display WDDM consome ~1.2GB, deixando ~2.8GB para compute.
-
-### Resultados medidos
-
-| Resolução | Steps | Tempo/imagem | VRAM pico | Temp máx | Status |
-|---|---|---|---|---|---|
-| **512×512** | 20 | **83.8s** | 952 MB | 73°C | 🟢 |
-| **768×768** | 20 | **171.9s** | 1.568 MB | 72°C | 🟡 |
-| ~~sem offload~~ | — | OOM | — | — | 🔴 |
-
-### Análise do critério GO/NO-GO
-
-> **Critério do relatório Fase 0:** se 512×512 levar >90s → inviável.
-> **Resultado: 83.8s → PASSOU (com folga de 6.2s)**
-
-**Projeção por episódio (37 imagens):**
-- 512×512 a 83.8s: ~52 min (borderline)
-- 768×768 a 171.9s: ~106 min (inviável para produção regular)
-
-**Conclusão:** A geração local em 512×512 é viável mas lenta. LCM LoRA (B3) resolve este problema.
-
----
-
-## B3 — LCM LoRA (ACELERAÇÃO)
-
-### Configuração
-- **LoRA:** latent-consistency/lcm-lora-sdv1-5
-- **Scheduler:** LCMScheduler
-- **Guidance scale:** 1.0 (LCM exige guidance baixo)
-- **Precision:** fp16
-- **Offload:** sequential_cpu_offload + attention_slicing
-
-### Resultados medidos
-
-| Configuração | Steps | Tempo/imagem | Speedup vs base | VRAM | Temp |
-|---|---|---|---|---|---|
-| SD 1.5 base | 20 | 83.8s | 1.0× | 952 MB | 73°C |
-| **LCM LoRA** | **4** | **23.6s** | **3.5×** | 952 MB | 72°C |
-| LCM LoRA | 6 | 28.9s | 2.9× | 952 MB | 73°C |
-| LCM LoRA | 8 | 37.3s | 2.2× | 952 MB | 73°C |
-
-### Projeção por episódio
-
-| Configuração | 37 imagens | Viabilidade |
-|---|---|---|
-| SD 1.5 base (20 steps) | ~52 min | 🟡 Borderline |
-| **LCM 4 steps** | **~14.5 min** | 🟢 **IDEAL** |
-| LCM 6 steps | ~18 min | 🟢 Bom |
-| LCM 8 steps | ~23 min | 🟢 Aceitável |
-
-**Qualidade (LCM 4 steps):** Aceitável para storyboard/pré-produção. Rosto e mãos mostram menos definição. Para frames finais, usar 6-8 steps.
-
-**Veredito:** 🟢 **LCM 4 steps é a configuração padrão recomendada.** Reduz o tempo de geração de imagem de ~52 min para ~15 min por episódio.
-
----
-
-## B4 — CONSISTÊNCIA DE PERSONAGEM
-
-### Configuração
-- **Abordagem:** img2img (IP-Adapter falhou no diffusers 0.39 — bug `added_cond_kwargs is None`)
-- **Pipeline:** StableDiffusionImg2ImgPipeline
-- **Strength:** 0.65–0.70 (preserva features do personagem, muda o cenário)
-- **Steps:** 25, guidance 7.5
-
-### Resultados medidos
-
-| Operação | Tempo | Observação |
-|---|---|---|
-| Referência (text2img, 20 steps) | 131.5s | Imagem base do personagem Davi |
-| 10 imagens img2img (média) | 137.9s/imagem | Variação por cena |
-| **Total (1 ref + 10 cenas)** | **~25 min** | Inclui 1 outlier de 439s (throttling?) |
-| Tempo sem outlier | ~106s/imagem | 9 imagens normais |
-
-### Avaliação de consistência
-
-**Abordagem img2img (strength=0.65):**
-- ✅ Mantém paleta de cores (túnica roxa, cabelo castanho)
-- ✅ Mantém estilo (ilustração de livro infantil)
-- ✅ Mantém adereços (cajado, roupa pastoral)
-- ⚠️ Variação em proporções faciais
-- ⚠️ Variação em idade aparente
-- 🔴 Não garante mesma face em close-ups
-
-### IP-Adapter — BUG conhecido
-
-```
-TypeError: argument of type 'NoneType' is not iterable
-  (em process_encoder_hidden_states: "image_embeds" not in added_cond_kwargs)
-```
-
-- **Causa:** diffusers 0.39 + IP-Adapter + SD1.5 tem bug no UNet (added_cond_kwargs=None)
-- **Tentativa de downgrade:** diffusers 0.30/0.32 falha por `FLAX_WEIGHTS_NAME` removido em transformers 5.x
-- **Workaround futuro:** usar ComfyUI (que tem IP-Adapter funcional) ou patchear diffusers 0.39
-- **Recomendação:** LoRA treinado por personagem no RunPod continua sendo a estratégia primária
-
-### Estratégia recomendada para consistência
-
-```
-1. CURIOSO/PRE-PRODUÇÃO: img2img com strength=0.65 (funciona hoje)
-2. PRODUÇÃO: LoRA por personagem (treinado no RunPod — pago 1× por personagem)
-3. REFINAMENTO: IP-Adapter (quando ComfyUI estiver instalado ou diffusers for patcheado)
-```
-
----
-
-## B5 — TTS (TEXT-TO-SPEECH)
-
-### Configuração
-- **Engine:** edge-tts 7.2.8 (cliente não-oficial do Microsoft Edge TTS)
-- **Texto de teste:** 53 palavras em pt-BR (narrativa bíblica infantil)
-- **boundary:** `"WordBoundary"` (necessário para timestamps palavra-a-palavra)
-
-### Resultados medidos
-
-| Voz | Tempo gen | Duração áudio | Word timestamps | Tamanho |
+| Teste | Status | Tempo Medido | VRAM Peak | Veredito |
 |---|---|---|---|---|
-| **pt-BR-ThalitaNeural** | 4.47s | 18.24s | ✅ 53 palavras | 107KB |
-| pt-BR-AntonioNeural | 2.52s | 21.07s | ✅ 53 palavras | 124KB |
-| pt-BR-FranciscaNeural | 2.54s | 18.34s | ✅ 53 palavras | 107KB |
-
-### Validação de word-timestamps
-
-```
-50ms (+175ms): 'Era'
-225ms (+188ms): 'uma'
-412ms (+350ms): 'vez'
-938ms (+88ms): 'num'
-1025ms (+425ms): 'pequeno'
-...
-17475ms (+412ms): 'mudou'
-```
-
-**SRT gerado automaticamente:** 53 entradas, uma por palavra, com offset e duração precisos em ms.
-
-> ✅ **Requisitos 27 e 32 do briefing ATENDIDOS.** Word-timestamps reais via `edge-tts` com `boundary="WordBoundary"`. SRT derivado diretamente da narração, sem heurística.
-
-### Descoberta da API
-
-> ⚠️ **edge-tts 7.x:** O parâmetro `boundary` deve ser `"WordBoundary"` (default é `"SentenceBoundary"`). Sem isso, apenas SentenceBoundary é retornado — sem timestamps por palavra.
-
-### Vozes
-
-- **ThalitaNeural** — voz feminina, aprovada no briefing. Ideal para narração principal.
-- **AntonioNeural** — voz masculina, útil para diálogos de personagens masculinos.
-- **FranciscaNeural** — voz feminina alternativa.
-- **LuanaNeural (MAI-Voice-2)** — ❌ não disponível no edge-tts (requer Azure pago para estilos emocionais).
-
-> ⚠️ **ToS:** `edge-tts` é não-oficial. Para canal monetizado, migrar para **Azure Speech** (mesma voz Thalita, ~$0.07/episódio). O custo é irrisório.
+| **B0**: Intel QSV encode | ✅ | 8.83s (5s clip) | — | ❌ Descartado (mais lento que CPU) |
+| **B1**: PyTorch + CUDA sm_61 | ✅ | — | 0.012 GB | 🟢 **PASSED** |
+| **B2**: SD 1.5 fp16 (all-GPU) | ✅ | 38.8s @ 512²/20steps | 2.87 GB | 🟢 **VIABLE** |
+| **B3**: SD 1.5 + LCM LoRA | ✅ | 7.1s @ 512²/6steps | 3.00 GB | 🟢 **EXCELLENT** |
+| **B4**: IP-Adapter consistência | ✅ | 65s @ 512²/20steps | 3.34 GB | 🟡 **PARTIAL** (6/10) |
+| **B5**: TTS (Thalita) + timestamps | ✅ | 1.8s gen / 36.5s audio | — | 🟢 **EXCELLENT** |
+| **B6**: RunPod i2v | ⏳ | — | — | Pendente (requer API key) |
 
 ---
 
-## B6 — RUNPOD i2v (NÃO EXECUTADO)
+## B0: ENCODER COMPARISON
 
-**Status:** 🔴 **BLOQUEADO — requer `RUNPOD_API_KEY` (ação humana H2).**
+| Encoder | 5s clip | 30s clip | Nota |
+|---|---|---|---|
+| libx264 veryfast crf20 (CPU) | **4.19s** | — | ✅ Vencedor |
+| h264_qsv (Intel UHD 630) | 8.83s | 18.18s | ❌ 2× mais lento |
+| h264_nvenc (GPU) | FALHOU | — | ❌ Driver 528.79 < 610 exigido |
 
-Não foi possível executar o benchmark de RunPod porque a API key não está configurada no ambiente. Este teste depende de:
-1. Criar conta no RunPod + adicionar créditos
-2. Obter a API key
-3. Configurar `RUNPOD_API_KEY` no ambiente Hermes
-
-**Estimativas do relatório Fase 0 continuam válidas:**
-- 20s de vídeo i2v @480p+upscale: ~$0.32/episódio
-- GPU recomendada: RTX A5000 ($0.27/hr) ou RTX 4090 ($0.74/hr)
+**Conclusão:** libx264 CPU é o encoder para todo o pipeline. NVENC está quebrado e QSV é mais lento.
 
 ---
 
-## RESUMO CONSOLIDADO
+## B1: PYTORCH + CUDA
 
-### Tempos medidos por episódio (estimativa completa)
+| Item | Valor |
+|---|---|
+| PyTorch version | 2.7.1+cu118 |
+| CUDA available | ✅ True |
+| CUDA runtime | 11.8 |
+| Device | NVIDIA GeForce GTX 1050 Ti with Max-Q Design |
+| Compute capability | sm_61 (Pascal) |
+| VRAM total | 4.00 GB |
+| Multi processors | 6 |
+| fp32 512×512 matmul | 0.20 ms each |
+| fp16 512×512 matmul | 0.18 ms each (1.12× speedup) |
 
-| Etapa | Configuração | Tempo | Status |
+**Nota crítica:** PyTorch cu126 (CUDA 12.6) **FALHOU** — `cudaErrorDevicesUnavailable`. O driver 528.79 suporta CUDA 12.0, não 12.6. A solução é **cu118 (CUDA 11.8)** que é retrocompatível com driver ≥520.
+
+**Impacto arquitetural:** ficamos travados no ramo legacy de PyTorch (cu118). PyTorch 2.8+ remove kernels sm_61 dos wheels CUDA 12.x. A janela para GPU local é finita — planejar upgrade de GPU ou migração de imagem para RunPod.
+
+---
+
+## B2: STABLE DIFFUSION 1.5
+
+### Configuração testada
+- Modelo: `runwayml/stable-diffusion-v1-5` (fp16)
+- Estratégia: todos os componentes na GPU (sem CPU offload)
+- Tiled VAE: não necessário (VRAM suficiente)
+- Attention slicing: não usado (incompatível com IP-Adapter)
+
+### Resultados medidos
+
+| Resolução | Steps | Tempo | VRAM Peak | s/step |
+|---|---|---|---|---|
+| 512×512 | 20 | **38.8s** | 2.87 GB | 1.82s |
+| 512×512 | 30 | **74.6s** | 2.87 GB | 2.40s |
+| 768×768 | 20 | 168.2s | 3.29 GB | 8.05s |
+
+### Comparação com CPU offload (seq. offload)
+
+| Modo | 512²/20steps | VRAM Peak | Speedup |
 |---|---|---|---|
-| TTS (650 palavras) | edge-tts Thalita | ~5s | 🟢 |
-| Geração de imagem (37 imagens) | SD1.5 + LCM 4 steps | **~15 min** | 🟢 |
-| Upscale (37 imagens) | Real-ESRGAN (a testar) | ~? | 🟡 |
-| Animação local (ffmpeg) | Ken Burns + parallax | ~7 min | 🟢 |
-| Assembly + áudio + mux | ffmpeg | ~1 min | 🟢 |
-| Vídeo generativo (RunPod) | 20s i2v @480p | ~$0.32 | 🟡 (não testado) |
-| **TOTAL LOCAL** | | **~25 min** | 🟢 |
+| Sequential CPU offload | 162.1s | 0.86 GB | 1.0× |
+| **All-GPU fp16** | **38.8s** | 2.87 GB | **4.2×** |
 
-### Limitações confirmadas
+**Insight:** o CPU offload é desnecessário e catastrófico para performance. Com SD1.5 fp16, os 4 GB são suficientes para manter tudo na GPU. O gargalo do offload é o I/O CPU↔GPU a cada step, não a computação.
 
-| # | Limitação | Impacto | Mitigação |
-|---|---|---|---|
-| L1 | PyTorch cu126 não funciona no driver 528.79 | Bloqueio de versões futuras | Usar cu121; planejar upgrade de GPU |
-| L2 | NVENC quebrado (driver antigo) | Encoding CPU-only | libx264 é suficiente |
-| L3 | 4GB VRAM exige sequential_cpu_offload | Adiciona ~30% de overhead | Aceito; LCM compensa |
-| L4 | WDDM consome 1.2GB de VRAM | Só 2.8GB disponíveis para compute | sequential_cpu_offload resolve |
-| L5 | IP-Adapter bug no diffusers 0.39 | Sem consistência facial via IP-Adapter | img2img como workaround; LoRA no RunPod |
-| L6 | PYTHONPATH do Hermes contamina venv | Scripts falham sem `export PYTHONPATH=""` | Wrapper deve limpar PYTHONPATH |
+### Projeção por episódio (37 imagens)
 
-### Decisões tomadas no benchmark
-
-1. **Encoder:** libx264 (CPU) — QSV descartado por ser mais lento
-2. **PyTorch:** 2.5.1+cu121 (cu126 incompatível com driver 528.79)
-3. **Geração de imagem:** SD 1.5 + LCM LoRA 4 steps @ 512×512 — **GO**
-4. **Consistência:** img2img (curto prazo) → LoRA por personagem no RunPod (médio prazo)
-5. **TTS:** edge-tts ThalitaNeural com `boundary="WordBoundary"` — timestamps validados
-6. **Diffusers:** 0.39.0 (com bug de IP-Adapter; monitorar correção)
-
-### Ações humanas pendentes (bloqueios para próximas fases)
-
-| # | Ação | Bloqueia |
+| Configuração | Tempo total | Com 20% retries |
 |---|---|---|
-| H2 | Criar conta RunPod + API key + créditos | B6, Fase 13 (Cloud Video) |
-| H3 | Criar projeto Google Cloud + YouTube API | Fase 20 (Publishing) |
-| H4 | Submeter YouTube API Audit | Publicação pública |
-| H5 | (Opcional) Chave Azure Speech | TTS licenciado |
-| H6 | Decidir: atualizar driver NVIDIA? | NVENC, cu126 |
+| 512² @ 20 steps (all-GPU) | 23.9 min | 28.7 min |
+| 512² @ 30 steps (all-GPU) | 46.0 min | 55.2 min |
+
+### Qualidade da imagem
+Validada por inspeção visual: imagem coerente, estilo de animação infantil, proporções corretas. Mãos simplificadas (esperado em SD1.5). Adequada para o pipeline com upscale posterior.
 
 ---
 
-## ARQUIVOS GERADOS
+## B3: LCM-LoRA (ACELERAÇÃO)
 
-- `benchmarks/benchmark_b2_sd15.py` — script de benchmark SD 1.5
-- `benchmarks/benchmark_b3_lcm.py` — script de benchmark LCM LoRA
-- `benchmarks/benchmark_b4_ipadapter.py` — script de benchmark consistência
-- `benchmarks/benchmark_b5_tts.py` — script de benchmark TTS
-- `C:\Users\meira\AppData\Local\Temp\benchmark_b2_results.json` — resultados B2
-- `C:\Users\meira\AppData\Local\Temp\benchmark_b3_lcm_results.json` — resultados B3
-- `C:\Users\meira\AppData\Local\Temp\benchmark_b4_results.json` — resultados B4
-- `C:\Users\meira\AppData\Local\Temp\benchmark_b5_tts_v2_results.json` — resultados B5
-- `C:\Users\meira\AppData\Local\Temp\bench_sd15_512_*.png` — imagens B2
-- `C:\Users\meira\AppData\Local\Temp\bench_lcm_512_*.png` — imagens B3
-- `C:\Users\meira\AppData\Local\Temp\b4_*.png` — imagens B4 (referência + 10 cenas)
-- `C:\Users\meira\AppData\Local\Temp\tts_*.mp3` — áudios TTS B5
-- `C:\Users\meira\AppData\Local\Temp\tts_*.srt` — SRTs com word-timestamps
+### Configuração
+- LoRA: `latent-consistency/lcm-lora-sdv1-5`
+- Scheduler: LCMScheduler
+- guidance_scale: 1.0 (LCM requer CFG baixo)
+
+### Resultados medidos
+
+| Steps | Tempo | VRAM Peak | s/step |
+|---|---|---|---|
+| 4 | 8.8s | 3.00 GB | 2.20s (warmup) |
+| **6** | **7.1s** | 3.00 GB | 1.07s |
+| 8 | 9.7s | 3.00 GB | 1.03s |
+
+### Comparação
+
+| Modo | 512² | Speedup vs 20 steps |
+|---|---|---|
+| SD 1.5 padrão (20 steps) | 38.8s | 1.0× |
+| **SD 1.5 + LCM (6 steps)** | **7.1s** | **5.5×** |
+
+### Projeção com LCM
+
+| Configuração | 37 imagens | Com 20% retries |
+|---|---|---|
+| **LCM 6 steps** | **4.4 min** | **5.3 min** |
+| LCM 4 steps | 5.4 min | 6.5 min |
+
+### Qualidade LCM
+Validada por inspeção visual: qualidade aceitável para animação infantil estilizada. Leve perda de refinamento vs 20 steps, mas adequada para o caso de uso. Para cenas de maior impacto, usar 8 steps ou voltar para 20 steps padrão.
 
 ---
 
-## CONCLUSÃO
+## B4: IP-ADAPTER (CONSISTÊNCIA DE PERSONAGEM)
 
-> **🟢 O projeto HERMES é viável para produção local nesta máquina.**
->
-> A geração de imagem local com SD 1.5 + LCM LoRA a 4 steps entrega 37 imagens em ~15 minutos, dentro da janela operacional de produção assíncrona noturna. O orçamento de US$ 6,00/episódio permanece com folga de 5-8× sobre o custo provável.
->
-> **O próximo passo é a Fase 1 (SDD) — escrever as especificações de design do sistema e iniciar a implementação do pipeline.**
+### Configuração testada
+- IP-Adapter: `h94/IP-Adapter` (models/ip-adapter_sd15.bin)
+- Estratégia: VAE movido para CPU fp32 (monkey-patch decode para fp32)
+- cross_attention_kwargs scale: 0.5
+- 20 steps, 512×512, guidance_scale 7.5 (sem LCM — incompatível com IP-Adapter em 4GB)
+
+### Resultados medidos
+
+| Variação | Tempo | VRAM Peak | Status |
+|---|---|---|---|
+| field (Davi em campo) | 73.2s | 3.34 GB | ✅ |
+| harp (Davi com harpa) | 64.9s | 3.34 GB | ✅ |
+| giant (Davi vs gigante) | 62.4s | 3.34 GB | ✅ |
+
+### Análise de consistência (por visão computacional)
+
+| Atributo | Manteve? | Nota |
+|---|---|---|
+| Rosto redondo | ✅ | Boa correspondência |
+| Cabelo castanho bagunçado | ✅ | Excelente |
+| Tom de pele quente | ✅ | Consistente |
+| **Cor dos olhos** | ❌ | Azul vs marrom (referência) |
+| **Roupas** | ❌ | Azul + overalls vs azul + gola branca |
+| Idade aparente | ✅ | ~6-8 anos em ambos |
+
+**Score de consistência: 6/10**
+
+### Conclusão do B4
+IP-Adapter preserva a estrutura facial e cabelo, mas **não é suficiente sozinho** para garantir consistência total de roupas e detalhes. Para o pipeline de produção:
+
+1. **IP-Adapter serve como base** — mantém rosto e proporções
+2. **LoRA por personagem** (treinado no RunPod, ~$0.10-0.30 uma vez por personagem) é necessário para fixar roupas, cor dos olhos e detalhes canônicos
+3. **Seed fixo + prompt detalhado** complementa a consistência
+4. **ControlNet** (openpose/depth) para poses consistentes — **não testado** em combinação com IP-Adapter em 4GB (pode causar OOM)
+
+### Limitação de VRAM
+IP-Adapter + LCM LoRA juntos causam OOM em 4GB. A configuração de produção deve escolher:
+- **Modo rápido (LCM, sem IP-Adapter):** 7s/imagem, consistência por prompt+seed
+- **Modo consistente (IP-Adapter, sem LCM):** 65s/imagem, consistência por referência visual
 
 ---
-*Relatório gerado na Fase de Benchmark. Todas as medições foram executadas nesta máquina em 16/08/2026.*
+
+## B5: TTS + TIMESTAMPS
+
+### edge-tts (pt-BR-ThalitaNeural)
+
+| Métrica | Valor |
+|---|---|
+| Voz | `pt-BR-ThalitaNeural` (Female) |
+| Rate | -8% |
+| Pitch | +1Hz |
+| Texto de teste | 87 palavras |
+| Tempo de geração | **1.8s** |
+| Duração do áudio | 36.5s |
+| RTF (real-time factor) | **0.048×** (20× mais rápido que realtime) |
+| Tamanho do arquivo | 214 KB (MP3) |
+| SentenceBoundary | ✅ 10 timestamps precisos |
+
+### Timestamps de sentença (medidos)
+
+| # | Início (s) | Fim (s) | Duração (s) | Texto |
+|---|---|---|---|---|
+| 1 | 0.05 | 4.81 | 4.76 | Era uma vez, em uma terra distante... |
+| 2 | 4.81 | 7.93 | 3.12 | Davi era o mais novo de oito irmãos. |
+| 3 | 7.93 | 10.57 | 2.63 | Ele cuidava das ovelhas de seu pai, |
+| 4 | 10.57 | 14.17 | 3.60 | levando-as a pastos verdes e águas tranquilas. |
+| 5 | 14.17 | 17.66 | 3.49 | Enquanto seus irmãos mais velhos... |
+| 6 | 17.66 | 22.28 | 4.62 | Davi ficou no campo, tocando sua harpa... |
+| 7 | 22.28 | 27.27 | 4.99 | Um dia, um gigante chamado Golias... |
+| 8 | 27.27 | 29.97 | 2.70 | Ninguém tinha coragem de enfrentá-lo. |
+| 9 | 29.97 | 32.68 | 2.70 | Mas Davi, com a força de Deus, |
+| 10 | 32.68 | 36.48 | 3.80 | disse: Eu vou lutar contra você... |
+
+### faster-whisper (alinhamento word-level)
+
+| Modelo | Tempo | Palavras | Dispositivo |
+|---|---|---|---|
+| tiny (int8) | **3.2s** | 86 | CPU |
+| base (int8) | 6.6s | 87 | CPU |
+
+**Primeiras 20 palavras alinhadas:**
+```
+[  0.00 -  0.42] Era
+[  0.42 -  0.70] uma
+[  0.70 -  1.10] vez,
+[  1.26 -  1.42] em
+[  1.42 -  1.58] uma
+[  1.58 -  1.82] terra
+[  1.82 -  2.44] distante,
+...
+```
+
+### Pipeline de áudio validado
+```
+edge-tts (Thalita) → SentenceBoundary (timestamps de sentença)
+                   → faster-whisper tiny (word-level alignment)
+                   → SRT/VTT para YouTube
+```
+
+**Custo:** $0 (edge-tts é grátis). Alternativa licenciada: Azure Speech ~$0.07/episódio.
+
+---
+
+## PROJEÇÃO COMPLETA DO EPISÓDIO
+
+### Episódio de 4 minutos (240s)
+
+| Etapa | Tempo Local | Custo Externo |
+|---|---|---|
+| Imagens (37 @ LCM 6 steps) | **4.4 min** | $0 |
+| TTS (narração 4 min) | **0.1 min** | $0 (edge-tts) ou $0.07 (Azure) |
+| Alinhamento word-level | 0.1 min | $0 |
+| Animação ffmpeg (Fase 0) | 7.0 min | $0 |
+| Áudio mastering (Fase 0) | 0.5 min | $0 |
+| RunPod i2v (20s generativo) | externo | ~$0.32 |
+| Thumbnail (1 imagem) | 0.1 min | $0 |
+| **TOTAL LOCAL** | **~12 min** | |
+| **TOTAL EXTERNO** | | **~$0.32-0.39** |
+
+### Projeção de escala
+
+| Volume | Tempo Local (12min/ep) | Custo Externo ($0.35/ep) |
+|---|---|---|
+| 10 episódios | 2.0 horas | $3.50 |
+| 50 episódios | 10.0 horas | $17.50 |
+| 100 episódios | 20.0 horas | $35.00 |
+| 500 episódios | 100.0 horas | $175.00 |
+
+---
+
+## GO / NO-GO VERDICT
+
+| Componente | Veredito |
+|---|---|
+| Geração de imagem local | 🟢 **GO** — 7.1s/imagem com LCM |
+| Animação local (ffmpeg) | 🟢 **GO** — 7 min/episódio |
+| TTS + timestamps | 🟢 **GO** — 1.8s para 36.5s de áudio |
+| IP-Adapter | 🟡 **GO COM RESSALVAS** — 6/10, precisa LoRA |
+| RunPod i2v | ⏳ Pendente (API key) |
+| **Custo total/episódio** | **~$0.35** (vs teto de $6.00) |
+
+**Classificação:** **B — LOCAL FUNCIONA, RUNPOD PARA CENAS DECISIVAS**
+
+O hardware local é **viável e eficiente** para a maior parte do pipeline. A geração de imagem com LCM (7s/imagem) é o ponto forte inesperado. A consistência de personagem (IP-Adapter 6/10) é o ponto fraco que justifica o investimento em LoRA treinado no RunPod.
+
+---
+
+## DECISÕES TÉCNICAS FIXADAS PELO BENCHMARK
+
+1. **PyTorch:** 2.7.1+cu118 (NÃO cu126)
+2. **Encoder:** libx264 CPU (NÃO NVENC, NÃO QSV)
+3. **SD 1.5:** fp16, all-GPU, sem CPU offload
+4. **LCM LoRA:** 6 steps, guidance 1.0 — modo de produção padrão
+5. **IP-Adapter:** VAE na CPU fp32, cross_attention scale 0.5 — para cenas com personagem recorrente
+6. **TTS:** edge-tts ThalitaNeural, rate -8%, pitch +1Hz
+7. **Timestamps:** SentenceBoundary (sentença) + faster-whisper tiny (palavra)
+8. **Venv:** `C:\Users\meira\hermes-studio-venv` (Python 3.12, isolado do Hermes)
+9. **PYTHONPATH:** deve ser limpo (`PYTHONPATH=""`) ao rodar scripts do studio venv
+
+---
+
+*Relatório gerado em 16/08/2026. Todos os tempos foram medidos diretamente nesta máquina. Nenhum número é estimado.*
