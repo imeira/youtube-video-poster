@@ -1,0 +1,5 @@
+.venv/
+projects/episodes/
+__pycache__/
+*.pyc
+HermesStudio/
