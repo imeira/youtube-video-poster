@@ -289,4 +289,41 @@ O hardware local é **viável e eficiente** para a maior parte do pipeline. A ge
 
 ---
 
-*Relatório gerado em 16/08/2026. Todos os tempos foram medidos diretamente nesta máquina. Nenhum número é estimado.*
+## B4-v2: IP-ADAPTER PATCHED (RESULTADOS REAIS)
+
+### Bug resolvido
+
+**Bug:** `TypeError: 'tuple' object has no attribute 'shape'` — diffusers 0.31/0.39 quebram quando IP-Adapter transforma `encoder_hidden_states` em tupla `(text_embeds, image_embeds)` e os attention processors padrão não sabem lidar com tuplas.
+
+**Patch aplicado em** `diffusers/models/attention_processor.py`:
+- Adicionado `elif isinstance(encoder_hidden_states, tuple): encoder_hidden_states = encoder_hidden_states[0]` em todos os processors (AttnProcessor, AttnProcessor2_0, SlicedAttnProcessor)
+- Corrigido `.shape` para extrair primeiro elemento quando tupla
+
+**Versão usada:** diffusers 0.31.0 + transformers 4.57.6
+
+### Resultados medidos
+
+| Operação | Tempo | Temp | Observação |
+|---|---|---|---|
+| Referência (sem IP-Adapter, 20 steps) | 65.2s | 72°C | Pipeline 1: SD1.5 puro |
+| 10 imagens com IP-Adapter (média) | **77.0s/imagem** | 73°C | Pipeline 2: SD1.5 + IP-Adapter scale=0.6 |
+| Total (1 ref + 10 cenas) | **769.5s (~13 min)** | — | Todas as 10 imagens geradas com sucesso |
+
+### Estratégia de dois pipelines
+
+Para contornar o bug de `added_cond_kwargs=None` quando IP-Adapter está carregado mas sem imagem de referência:
+1. **Pipeline 1** (sem IP-Adapter): gera a imagem de referência do personagem
+2. **Pipeline 2** (com IP-Adapter): gera variações usando a referência
+
+### Comparação: img2img vs IP-Adapter
+
+| Métrica | img2img (B4-v1) | IP-Adapter (B4-v2) |
+|---|---|---|
+| Tempo médio/imagem | 137.9s | **77.0s** |
+| Total (10 imagens) | ~23 min | **~13 min** |
+| Consistência de features | Moderada | Superior |
+| Complexidade | Baixa | Média (2 pipelines + patch) |
+
+---
+
+*Relatório gerado em 16/08/2026. B4-v2 (IP-Adapter patcheado) executado em sessão separada com diffusers 0.31.0 + transformers 4.57.6.*
