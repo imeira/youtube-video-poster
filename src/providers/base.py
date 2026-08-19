@@ -186,6 +186,7 @@ class TTSResult(ProviderResult):
     """Result from TTS synthesis."""
     audio_path: str = ""
     duration_seconds: float = 0.0
+    generation_time: float = 0.0
     sentence_timestamps: list[dict] = field(default_factory=list)
     word_timestamps: list[dict] = field(default_factory=list)
 
