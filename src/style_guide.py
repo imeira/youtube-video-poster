@@ -73,39 +73,37 @@ def build_full_prompt(
 ) -> dict:
     """Build a complete SD1.5 prompt with style guide applied.
     
+    CRITICAL: Order matters — CLIP truncates at 77 tokens. Put the MOST
+    important content FIRST (scene + characters), style/quality LAST
+    so if truncated, we lose fluff not the actual scene description.
+    
     Returns:
         {
             "prompt": full positive prompt,
             "negative_prompt": negative prompt,
         }
     """
-    parts = [BASE_STYLE]
+    # Order: scene description → characters → location → style (truncated last)
+    parts = [scene_description]
     
-    # Characters
+    # Characters (high priority — after scene)
     if character_descriptions:
         parts.append(character_descriptions)
     
-    # Scene core
-    parts.append(scene_description)
-    
     # Location
     if location:
-        parts.append(f"set in {location}")
+        parts.append(f"in {location}")
     
-    # Mood/palette
+    # Compact style (keep short to avoid token waste)
+    parts.append("children's Bible cartoon, 2D animation, soft rounded shapes, vibrant colors, family-friendly")
+    
+    # Mood (single compact phrase)
     if mood in COLOR_PALETTES:
         parts.append(COLOR_PALETTES[mood])
     
-    # Lighting
+    # Lighting (compact)
     if lighting in LIGHTING:
         parts.append(LIGHTING[lighting])
-    
-    # Camera
-    if camera in CAMERA_STYLES:
-        parts.append(CAMERA_STYLES[camera])
-    
-    # Quality
-    parts.append(QUALITY_BOOST)
     
     prompt = ", ".join(parts)
     

@@ -45,7 +45,16 @@ class DirectorAgent:
     def __init__(self, config: StudioConfig | None = None):
         self.config = config or get_config()
         self.research = ResearchAgent()
-        self.script = ScriptAgent()
+        # ScriptAgent uses OpenRouter for rich narration (390-750 words)
+        # NVIDIA API tested but too slow for long generation (>5min timeout)
+        try:
+            from src.providers.llm.openrouter_provider import OpenRouterLLMProvider
+            llm_script = OpenRouterLLMProvider()
+            if not llm_script.available():
+                llm_script = None
+        except Exception:
+            llm_script = None
+        self.script = ScriptAgent(llm_provider=llm_script)
         self.audio = AudioAgent()
         self.storyboard = StoryboardAgent()
         self.image_gen = ImageGenAgent(mode="lcm")
@@ -53,15 +62,15 @@ class DirectorAgent:
         self.assembly = AssemblyAgent()
         self.captions = CaptionsAgent()
         self.thumbnail = ThumbnailAgent()
-        # LLM provider is optional — metadata falls back to templates if unavailable
+        # MetadataAgent uses OpenRouter for title/description
         try:
             from src.providers.llm.openrouter_provider import OpenRouterLLMProvider
-            llm = OpenRouterLLMProvider()
-            if not llm.available():
-                llm = None
+            llm_or = OpenRouterLLMProvider()
+            if not llm_or.available():
+                llm_or = None
         except Exception:
-            llm = None
-        self.metadata = MetadataAgent(llm_provider=llm)
+            llm_or = None
+        self.metadata = MetadataAgent(llm_provider=llm_or)
         self._episodes: dict[str, dict] = {}  # in-memory cache
 
     async def start_episode(

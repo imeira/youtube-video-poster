@@ -6,21 +6,32 @@ Output: script/narration.txt
 Constraints: Clarity, emotion, curiosity, adventure, appropriate suspense,
             simple language, rhythm, retention, biblical fidelity (§24)
             Never pad with text to increase duration (§19)
+            Target 390-750 words for 3-5 min episodes (§18)
 """
 
 from __future__ import annotations
 
-import json
+import logging
 from pathlib import Path
 
 from src.agents.base import BaseAgent, AgentResult
 
+logger = logging.getLogger(__name__)
+
 
 class ScriptAgent(BaseAgent):
-    """Generates a children's Bible narration script (§24)."""
+    """Generates a children's Bible narration script (§24).
 
-    def __init__(self):
+    Uses LLM (NVIDIA API) for rich, engaging narration.
+    Falls back to template if LLM unavailable.
+    """
+
+    # Children's narration pace: ~130 words/minute (slower than adult)
+    WORDS_PER_MINUTE = 130
+
+    def __init__(self, llm_provider=None):
         super().__init__(name="Script")
+        self._llm = llm_provider
 
     async def run(
         self,
@@ -34,7 +45,7 @@ class ScriptAgent(BaseAgent):
 
         Args:
             research_data: Output from ResearchAgent (sources.json).
-            target_duration_s: Target narration duration in seconds.
+            target_duration_s: Target narration duration in seconds (from DurationPlan).
             script_dir: Directory to save narration.txt.
 
         Returns:
@@ -43,18 +54,31 @@ class ScriptAgent(BaseAgent):
         if not research_data:
             return AgentResult(success=False, error="No research data provided")
 
-        # ~150 words per minute of narration (§19 duration rule)
-        target_words = int((target_duration_s / 60) * 150)
+        target_words = int((target_duration_s / 60) * self.WORDS_PER_MINUTE)
         summary = research_data.get("summary", "")
         facts = research_data.get("narrative_classification", {}).get("BIBLICAL_FACT", [])
+        story = research_data.get("story", "")
+        references = research_data.get("references", [])
 
-        # Build narration from biblical facts, adapted for children 6-10
-        narration = self._build_narration(
-            story=research_data.get("story", ""),
-            summary=summary,
-            facts=facts,
-            target_words=target_words,
-        )
+        # Try LLM first for rich narration
+        narration = None
+        if self._llm and getattr(self._llm, "available", lambda: False)():
+            try:
+                narration = await self._generate_llm_script(
+                    story=story,
+                    summary=summary,
+                    facts=facts,
+                    references=references,
+                    target_words=target_words,
+                )
+            except Exception as e:
+                logger.warning(f"LLM script generation failed, using template: {e}")
+
+        # Fallback to template
+        if not narration:
+            narration = self._build_template_narration(
+                story=story, summary=summary, facts=facts, target_words=target_words,
+            )
 
         word_count = len(narration.split())
 
@@ -70,29 +94,105 @@ class ScriptAgent(BaseAgent):
                 "narration": narration,
                 "word_count": word_count,
                 "target_duration_s": target_duration_s,
-                "estimated_duration_s": (word_count / 150) * 60,
+                "estimated_duration_s": (word_count / self.WORDS_PER_MINUTE) * 60,
+                "source": "llm" if narration and self._llm else "template",
             },
             next_state="SCRIPT_QA",
         )
 
-    def _build_narration(self, story: str, summary: str, facts: list[str], target_words: int) -> str:
-        """Build child-friendly narration from biblical facts.
+    async def _generate_llm_script(
+        self,
+        story: str,
+        summary: str,
+        facts: list[str],
+        references: list[dict],
+        target_words: int,
+    ) -> str:
+        """Generate rich narration using LLM (NVIDIA API)."""
+        facts_text = "\n".join(f"- {f}" for f in facts)
+        refs_text = ", ".join(
+            f"{r.get('book', '')} {r.get('chapter', '')}:{r.get('verses', '')}"
+            for r in references
+        )
+
+        system = (
+            "Você é um roteirista especialista em conteúdo bíblico infantil para YouTube. "
+            "Escreve narrações para crianças de 6 a 10 anos em português do Brasil. "
+            "Suas narrações são envolventes, emocionantes, fiéis à Bíblia, com linguagem simples "
+            "e ritmo que mantém a atenção das crianças. Nunca inventa fatos bíblicos — apenas "
+            "adapta os fatos fornecidos em linguagem infantil."
+        )
+
+        prompt = f"""Escreva a narração completa para um vídeo do YouTube infantil sobre: {story}
+
+Resumo da história: {summary}
+
+Fatos bíblicos a incluir (NÃO invente fatos adicionais):
+{facts_text}
+
+Referências bíblicas: {refs_text}
+
+REGRAS:
+- Público: crianças de 6 a 10 anos
+- Idioma: português do Brasil
+- Tom: acolhedor, emocionante, educativo, fiel à Bíblia
+- Linguagem simples e clara
+- Comece com um gancho que prenda a atenção ("Era uma vez..." ou pergunta curiosa)
+- Divida a história em momentos claros, cada fato bíblico vira uma cena narrada
+- Use pausas naturais (pontos finais, não pontos de exclamação excessivos)
+- Termine com uma lição ou mensagem de amor e fé
+- Tamanho alvo: aproximadamente {target_words} palavras
+- NÃO adicione texto de preenchimento para aumentar a duração
+- NÃO corte fatos importantes para encurtar
+- Escreva APENAS a narração, sem marcadores de cena, sem números, sem cabeçalhos
+- A narração deve ser contínua, como se fosse lida por um narrador
+
+Narração:"""
+
+        result = await self._llm.complete(
+            prompt=prompt,
+            system=system,
+            max_tokens=min(3000, target_words * 3),  # tokens ~= words * 1.5
+            temperature=0.7,
+        )
+
+        # Clean up — remove any markdown headers, scene markers, etc.
+        lines = result.strip().split("\n")
+        cleaned = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if cleaned and cleaned[-1]:
+                    cleaned.append("")  # preserve paragraph breaks
+                continue
+            # Skip markdown headers, scene markers, numbers
+            if line.startswith("#") or line.startswith("**") or line.startswith("Cena"):
+                continue
+            if line.startswith("-") or line.startswith("1.") or line.startswith("2."):
+                continue
+            cleaned.append(line)
+
+        narration = "\n".join(cleaned).strip()
+        if not narration:
+            raise ValueError("LLM returned empty narration after cleanup")
+
+        return narration
+
+    def _build_template_narration(self, story: str, summary: str, facts: list[str], target_words: int) -> str:
+        """Build child-friendly narration from biblical facts (template fallback).
 
         §24: Clarity, emotion, curiosity, adventure, simple language, rhythm.
         §25: Child safety — no graphic violence or trauma.
         §23: Never present creative addition as biblical fact.
         """
-        # For the pilot, we use a template-based approach grounded in the facts.
-        # In production, an LLM would generate this, but the facts are the constraint.
         lines = []
 
         # Opening — hook for children
         lines.append(f"Era uma vez... {summary}")
-        lines.append("")  # pause
+        lines.append("")
 
         # Story beats from biblical facts, adapted for children
-        for i, fact in enumerate(facts):
-            # Make each fact into a child-friendly sentence
+        for fact in facts:
             line = self._adapt_for_children(fact)
             lines.append(line)
 
@@ -105,7 +205,6 @@ class ScriptAgent(BaseAgent):
         # If too long, trim (§19: never pad, but also never truncate to lose comprehension)
         words = narration.split()
         if len(words) > target_words * 1.3:
-            # Keep the first and last sentences, trim middle
             words = words[:int(target_words * 1.1)]
             narration = " ".join(words)
 
@@ -113,10 +212,7 @@ class ScriptAgent(BaseAgent):
 
     def _adapt_for_children(self, fact: str) -> str:
         """Adapt a biblical fact into child-friendly language (§24)."""
-        # Simple transformations for children 6-10
-        fact = fact.replace(" Deus ", " Deus ")
-        fact = fact.replace(".", "...")  # dramatic pause for children
-        # Capitalize first letter
+        fact = fact.replace(".", "...")
         if fact:
             fact = fact[0].upper() + fact[1:]
         return fact
