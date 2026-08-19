@@ -68,12 +68,14 @@ class StoryboardAgent(BaseAgent):
                 "visual_strategy": "LOCAL_ANIMATED_STILL",
                 "references": [],
                 "camera": "slow_push_in",
-                "image_prompt": self._build_image_prompt(text, style),
-                "animation_prompt": f"gentle movement, {text[:60]}",
-                "negative_prompt": ("blurry, low quality, text, watermark, "
-                                     "deformed, extra limbs, scary, violent, adult"),
                 "qa_status": "PENDING",
             }
+            
+            # Build prompts with Character Bible + Style Guide (§56-60)
+            scene["image_prompt"] = self._build_image_prompt(scene)
+            scene["negative_prompt"] = self._build_negative_prompt()
+            scene["animation_prompt"] = f"gentle movement, {text[:60]}"
+            
             scenes.append(scene)
 
         # Save storyboard
@@ -136,6 +138,45 @@ class StoryboardAgent(BaseAgent):
             return "awe"
         return "calm"
 
-    def _build_image_prompt(self, narration: str, style: str) -> str:
-        """Build the image generation prompt (§40-41)."""
-        return f"{style}{narration[:120]}"
+    def _build_image_prompt(self, scene: dict) -> str:
+        """Build the image generation prompt with Character Bible + Style Guide (§40-41, §56-60).
+        
+        Uses character_bible.py and style_guide.py for consistent visual style.
+        """
+        from src.character_bible import build_character_prompt
+        from src.style_guide import build_full_prompt
+        
+        narration = scene.get("narration", "")
+        characters = scene.get("characters", [])
+        location = scene.get("location", "")
+        emotion = scene.get("emotion", "calm")
+        
+        # Map emotion to mood
+        mood_map = {
+            "calm": "peaceful",
+            "joy": "joyful",
+            "awe": "miraculous",
+            "suspense": "dramatic",
+        }
+        mood = mood_map.get(emotion, "peaceful")
+        
+        # Get character visual descriptions
+        char_desc = build_character_prompt(characters)
+        
+        # Build the full styled prompt
+        prompts = build_full_prompt(
+            scene_description=narration,
+            characters=characters,
+            location=location,
+            mood=mood,
+            lighting="divine" if "deus" in characters or "criou" in narration.lower() else "day",
+            camera="medium",
+            character_descriptions=char_desc,
+        )
+        
+        return prompts["prompt"]
+    
+    def _build_negative_prompt(self) -> str:
+        """Get the negative prompt from style guide."""
+        from src.style_guide import NEGATIVE_PROMPT
+        return NEGATIVE_PROMPT
