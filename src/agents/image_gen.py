@@ -75,8 +75,8 @@ class ImageGenAgent(BaseAgent):
             result = await provider.generate(
                 prompt=prompt,
                 negative_prompt=negative,
-                width=512,
-                height=512,
+                width=1024,
+                height=576,
                 seed=seed,
             )
 

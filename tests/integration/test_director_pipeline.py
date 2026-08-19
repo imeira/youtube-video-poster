@@ -41,7 +41,7 @@ class TestDirectorPreProduction:
         assert result["theme"] == "História da criação do mundo"
         assert result["state"] == "WAITING_PLAN_APPROVAL"
         assert "references" in result["plan"]
-        assert "cost_estimate" in result["plan"]
+        assert "budget_check" in result["plan"]
         assert result["plan"]["references"][0]["book"] == "Gênesis"
         assert result["budget_remaining"] > 5.0  # should have most of $6 left
 

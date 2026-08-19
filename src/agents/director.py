@@ -24,6 +24,8 @@ from src.agents.assembly import AssemblyAgent
 from src.agents.captions import CaptionsAgent
 from src.agents.thumbnail import ThumbnailAgent
 from src.agents.metadata import MetadataAgent
+from src.agents.duration_planner import DurationPlannerAgent
+from src.telegram.approval_gate import TelegramApprovalGate, format_decision_message
 from src.budget.guard import BudgetGuard, CostLedger
 from src.config.loader import StudioConfig, get_config
 from src.state.machine import EpisodeState, EpisodeStateStore
@@ -68,6 +70,7 @@ class DirectorAgent:
         language: str = "",
         channel: str = "",
         episode_id: str = "",
+        require_telegram_approval: bool = False,
     ) -> dict[str, Any]:
         """Start a new episode from a user request.
 
@@ -94,7 +97,10 @@ class DirectorAgent:
         guard = BudgetGuard(ledger)
 
         # Run pre-production pipeline (up to WAITING_PLAN_APPROVAL)
-        result = await self._run_preproduction(episode_id, theme, fs, state, guard)
+        result = await self._run_preproduction(
+            episode_id, theme, fs, state, guard,
+            require_telegram_approval=require_telegram_approval,
+        )
 
         return {
             "episode_id": episode_id,
@@ -111,11 +117,13 @@ class DirectorAgent:
         fs: EpisodeFS,
         state: EpisodeStateStore,
         guard: BudgetGuard,
+        require_telegram_approval: bool = False,
     ) -> dict[str, Any]:
-        """Run pre-production: research → plan → WAITING_PLAN_APPROVAL.
+        """Run pre-production: research → duration plan → WAITING_PLAN_APPROVAL.
 
         §98: Steps 1-5 (analyze, research, identify, duration, budget).
-        §20-21: Pre-production plan with all required fields.
+        §18-21: Adaptive duration based on story complexity, NOT fixed.
+        §4/§7/§8: Budget gate with human approval before expensive generation.
         """
         plan = {}
 
@@ -137,40 +145,21 @@ class DirectorAgent:
         plan["research"] = research_result.data
         plan["references"] = research_result.data.get("references", [])
 
-        # Step 4-5: Planning (§20-21, §61)
+        # Step 4-5: Adaptive duration planning (§18-21) — NOT a fixed duration.
+        # Analyzes story complexity (event count, reference span) to recommend
+        # 3-15 min, following the categories in §18.
         state.transition_to(EpisodeState.PLANNING, agent=self.name)
         state.save(fs.paths.state_json)
 
-        # Estimate duration and cost (§18-19, §20-21)
-        target_duration_s = self.config.episode_duration.min_minutes * 60
-        est_words = int((target_duration_s / 60) * 150)
-        est_scenes = len(research_result.data.get("narrative_classification", {}).get("BIBLICAL_FACT", []))
+        duration_planner = DurationPlannerAgent(
+            budget_hard_limit=self.config.budget.hard_limit_usd,
+            budget_target=self.config.budget.target_usd,
+        )
+        duration_plan = duration_planner.plan(theme, research_result.data)
+        budget_check = duration_planner.check_budget(duration_plan)
 
-        plan["duration_plan"] = {
-            "target_duration_s": target_duration_s,
-            "estimated_words": est_words,
-            "estimated_scenes": est_scenes,
-            "estimated_images": est_scenes,
-        }
-
-        # Cost estimate (§20-21)
-        # Local generation is free; only RunPod i2v costs money
-        est_runpod_seconds = min(est_scenes, 3) * 4  # ~3 cloud scenes @ 4s each
-        est_runpod_cost = (est_runpod_seconds * 5.3 / 3600) * 0.74  # 4090 @ SECURE
-        est_tts_cost = 0.07  # Azure fallback
-        est_llm_cost = 0.30
-
-        plan["cost_estimate"] = {
-            "currency": self.config.budget.currency,
-            "runpod_seconds": est_runpod_seconds,
-            "runpod_cost": round(est_runpod_cost, 2),
-            "tts_cost": est_tts_cost,
-            "llm_cost": est_llm_cost,
-            "minimum": round(est_runpod_cost + est_tts_cost, 2),
-            "probable": round(est_runpod_cost + est_tts_cost + est_llm_cost, 2),
-            "maximum": round(est_runpod_cost * 1.5 + est_tts_cost + est_llm_cost * 1.5, 2),
-            "hard_limit": self.config.budget.hard_limit_usd,
-        }
+        plan["duration_plan"] = duration_plan.to_dict()
+        plan["budget_check"] = budget_check
 
         # Transition to WAITING_PLAN_APPROVAL (§95)
         state.transition_to(EpisodeState.WAITING_PLAN_APPROVAL, agent=self.name, note="Pre-production plan ready")
@@ -184,7 +173,49 @@ class DirectorAgent:
         # Save costs
         guard.ledger.save(fs.paths.costs_json)
 
+        # §4/§7/§8: If cost exceeds budget, this MUST be surfaced for human approval
+        # before any paid generation begins. The report is always produced (§20);
+        # whether we block here depends on require_telegram_approval (pilot runs
+        # may auto-approve locally, but production runs must gate on Telegram).
+        report_text = duration_plan.format_report(self.config.budget.hard_limit_usd)
+        plan["report_text"] = report_text
+
+        if require_telegram_approval:
+            gate = TelegramApprovalGate()
+            if not budget_check["within_budget"]:
+                options = {
+                    alt["option"]: f"{alt['title']} — {alt['description']} (~${alt['estimated_cost']:.2f})"
+                    for alt in budget_check["alternatives"]
+                }
+                message = format_decision_message(
+                    episode_title=theme,
+                    stage="Pré-produção — orçamento",
+                    situation=f"Custo máximo estimado (${duration_plan.cost_max_usd:.2f}) excede "
+                              f"o limite configurado (${self.config.budget.hard_limit_usd:.2f}).",
+                    analysis=duration_plan.justification,
+                    options=options,
+                    recommendation=f"Opção {list(options.keys())[0]} recomendada.",
+                )
+                approval = await gate.request_approval(
+                    message, valid_responses=list(options.keys()) + ["CANCELAR"],
+                )
+                plan["budget_approval"] = {
+                    "approved": approval.approved,
+                    "response": approval.response,
+                    "timed_out": approval.timed_out,
+                }
+                if not approval.approved:
+                    state.transition_to(EpisodeState.PAUSED, agent=self.name,
+                                         note=f"Budget approval not granted: {approval.reason}")
+                    state.save(fs.paths.state_json)
+                    return plan
+            else:
+                # Even within budget, send the plan for visibility (§20) but
+                # don't block unless explicitly configured to require sign-off.
+                gate.send_message(f"📋 Plano de produção pronto:\n\n{report_text}")
+
         return plan
+
 
     async def continue_after_approval(
         self,
@@ -239,7 +270,7 @@ class DirectorAgent:
         script_result = await self.script.run(
             episode_id=episode_id,
             research_data=research_data,
-            target_duration_s=plan.get("duration_plan", {}).get("target_duration_s", 180),
+            target_duration_s=plan.get("duration_plan", {}).get("recommended_duration_s", 180),
             script_dir=str(fs.paths.script_dir),
         )
 

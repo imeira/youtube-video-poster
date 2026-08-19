@@ -40,17 +40,30 @@ class LocalSD15Provider(ImageProvider):
     """Local Stable Diffusion 1.5 with LCM-LoRA acceleration.
 
     Modes:
-        - 'lcm': Fast mode (6 steps, 7.1s/image) — for most scenes
-        - 'standard': Quality mode (20 steps, 38.8s/image) — for CRITICAL scenes
-        - 'ip_adapter': Character consistency (VAE on CPU, 65s/image)
+        - 'lcm': Fast mode (6-8 steps) — for most scenes
+        - 'standard': Quality mode (20 steps) — for CRITICAL scenes
+        - 'ip_adapter': Character consistency (VAE on CPU)
 
-    VRAM: 2.87-3.34 GB of 4.00 GB available.
+    Checkpoint: nitrosocke/mo-di-diffusion (Modern Disney style) — chosen after
+    the base runwayml/stable-diffusion-v1-5 checkpoint produced squashed/flattened
+    character heads when combined with 16:9 aspect ratio output. mo-di-diffusion
+    has correct human anatomy at native widescreen resolution (validated 2026-08-19).
+
+    Native resolution: 1024x576 (16:9) — NOT 512x512 square. Generating square
+    images and then stretching them to 16:9 in the animation stage visibly
+    distorts anatomy (flattened heads). Always generate at the target aspect ratio.
+
+    VRAM: ~3 GB of 4 GB available at 1024x576.
     """
 
-    def __init__(self, mode: str = "lcm"):
+    DEFAULT_CHECKPOINT = "nitrosocke/mo-di-diffusion"
+
+    def __init__(self, mode: str = "lcm", checkpoint: str = ""):
         self.mode = mode
+        self.checkpoint = checkpoint or self.DEFAULT_CHECKPOINT
         self._pipe = None
         self._loaded_mode: str | None = None
+        self._loaded_checkpoint: str | None = None
 
     def estimate_cost(self, **params) -> float:
         """Local generation is free."""
@@ -72,7 +85,9 @@ class LocalSD15Provider(ImageProvider):
 
     def _load_pipeline(self):
         """Load the SD pipeline if not already loaded."""
-        if self._pipe is not None and self._loaded_mode == self.mode:
+        if (self._pipe is not None
+                and self._loaded_mode == self.mode
+                and self._loaded_checkpoint == self.checkpoint):
             return
 
         import torch
@@ -82,21 +97,20 @@ class LocalSD15Provider(ImageProvider):
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
 
-        logger.info(f"Loading SD 1.5 (mode={self.mode})...")
+        logger.info(f"Loading {self.checkpoint} (mode={self.mode})...")
 
         self._pipe = StableDiffusionPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5",
+            self.checkpoint,
             torch_dtype=torch.float16,
             safety_checker=None,
             requires_safety_checker=False,
-            use_safetensors=True,
         ).to("cuda")
 
         if self.mode == "lcm":
-            # B3: LCM LoRA for 5.5× speedup
+            # LCM LoRA for speedup (~5-8x depending on checkpoint)
             self._pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
             self._pipe.scheduler = LCMScheduler.from_config(self._pipe.scheduler.config)
-            logger.info("LCM LoRA loaded (6 steps, ~7.1s/image)")
+            logger.info("LCM LoRA loaded (8 steps)")
         elif self.mode == "ip_adapter":
             # B4: IP-Adapter for character consistency
             # VAE must be on CPU to avoid OOM with IP-Adapter
@@ -116,6 +130,7 @@ class LocalSD15Provider(ImageProvider):
             logger.info("IP-Adapter loaded (VAE on CPU, ~65s/image)")
 
         self._loaded_mode = self.mode
+        self._loaded_checkpoint = self.checkpoint
         vram = torch.cuda.memory_allocated() / 1024**3
         logger.info(f"VRAM after load: {vram:.2f} GB")
 
@@ -123,8 +138,8 @@ class LocalSD15Provider(ImageProvider):
         self,
         prompt: str,
         negative_prompt: str = "",
-        width: int = 512,
-        height: int = 512,
+        width: int = 1024,
+        height: int = 576,
         reference_images: list[str] | None = None,
         seed: int | None = None,
     ) -> ImageResult:
@@ -133,8 +148,9 @@ class LocalSD15Provider(ImageProvider):
         Args:
             prompt: Positive prompt.
             negative_prompt: Negative prompt.
-            width: Image width (512 or 768).
-            height: Image height.
+            width: Image width. Default 1024 (16:9 native — do NOT use square
+                512x512 and stretch later, it distorts character anatomy).
+            height: Image height. Default 576 (16:9 native).
             reference_images: Reference images for IP-Adapter mode.
             seed: Reproducibility seed.
 
@@ -148,8 +164,8 @@ class LocalSD15Provider(ImageProvider):
 
         # Determine generation parameters based on mode
         if self.mode == "lcm":
-            steps = 6
-            guidance = 1.0
+            steps = 8
+            guidance = 1.5
             cross_attn_kwargs = {}
             ip_adapter_image = None
         elif self.mode == "ip_adapter":
