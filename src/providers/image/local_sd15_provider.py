@@ -19,6 +19,15 @@ import time
 import logging
 from typing import Any
 
+# Fix cuDNN crash on Pascal (B1: cudnnGetLibConfig symbol missing in cu118)
+# MUST be set before any torch.cuda operation
+try:
+    import torch as _torch
+    _torch.backends.cudnn.benchmark = True
+    _torch.backends.cudnn.deterministic = False
+except ImportError:
+    pass
+
 from src.providers.base import ImageProvider, ImageResult
 
 logger = logging.getLogger(__name__)
@@ -68,6 +77,10 @@ class LocalSD15Provider(ImageProvider):
 
         import torch
         from diffusers import StableDiffusionPipeline, LCMScheduler
+
+        # Fix for cuDNN crash on Pascal (B1: cudnnGetLibConfig symbol missing)
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
 
         logger.info(f"Loading SD 1.5 (mode={self.mode})...")
 

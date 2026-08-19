@@ -18,6 +18,9 @@ from src.agents.research import ResearchAgent
 from src.agents.script import ScriptAgent
 from src.agents.audio import AudioAgent
 from src.agents.storyboard import StoryboardAgent
+from src.agents.image_gen import ImageGenAgent
+from src.agents.animation import AnimationAgent
+from src.agents.assembly import AssemblyAgent
 from src.budget.guard import BudgetGuard, CostLedger
 from src.config.loader import StudioConfig, get_config
 from src.state.machine import EpisodeState, EpisodeStateStore
@@ -40,6 +43,9 @@ class DirectorAgent:
         self.script = ScriptAgent()
         self.audio = AudioAgent()
         self.storyboard = StoryboardAgent()
+        self.image_gen = ImageGenAgent(mode="lcm")
+        self.animation = AnimationAgent()
+        self.assembly = AssemblyAgent()
         self._episodes: dict[str, dict] = {}  # in-memory cache
 
     async def start_episode(
@@ -273,6 +279,59 @@ class DirectorAgent:
         state.transition_to(EpisodeState.GENERATING_IMAGES, agent=self.name, note="production ready for image gen")
         state.save(fs.paths.state_json)
 
+        # Step 10: Generate images (§42)
+        scenes = storyboard_result.data["scenes"]
+        image_result = await self.image_gen.run(
+            episode_id=episode_id,
+            scenes=scenes,
+            images_dir=str(fs.paths.images_dir),
+        )
+
+        if not image_result.success:
+            state.transition_to(EpisodeState.FAILED, note=image_result.error)
+            state.save(fs.paths.state_json)
+            return {"error": image_result.error}
+
+        # Step 11: Animate (§49-52)
+        state.transition_to(EpisodeState.LOCAL_ANIMATION, agent=self.animation.name)
+        state.save(fs.paths.state_json)
+
+        anim_result = await self.animation.run(
+            episode_id=episode_id,
+            scenes=scenes,
+            images=image_result.data["generated"],
+            animation_dir=str(fs.paths.animation_dir),
+        )
+
+        if not anim_result.success:
+            state.transition_to(EpisodeState.FAILED, note=anim_result.error)
+            state.save(fs.paths.state_json)
+            return {"error": anim_result.error}
+
+        # Step 12: Assemble final video (§50)
+        state.transition_to(EpisodeState.ASSEMBLING, agent=self.assembly.name)
+        state.save(fs.paths.state_json)
+
+        assembly_result = await self.assembly.run(
+            episode_id=episode_id,
+            clips=anim_result.data["clips"],
+            audio_path=audio_result.data["audio_path"],
+            output_path=str(fs.paths.final_video),
+        )
+
+        if not assembly_result.success:
+            state.transition_to(EpisodeState.FAILED, note=assembly_result.error)
+            state.save(fs.paths.state_json)
+            return {"error": assembly_result.error}
+
+        # Step 13: Final QA (§97)
+        state.transition_to(EpisodeState.FINAL_QA, agent=self.name, note="video assembled")
+        state.save(fs.paths.state_json)
+
+        # Transition to WAITING_FINAL_APPROVAL
+        state.transition_to(EpisodeState.WAITING_FINAL_APPROVAL, agent=self.name, note="ready for approval")
+        state.save(fs.paths.state_json)
+
         return {
             "episode_id": episode_id,
             "state": state.current_state.value,
@@ -280,8 +339,32 @@ class DirectorAgent:
             "word_count": script_result.data["word_count"],
             "audio_duration_s": round(audio_result.data["duration_s"], 1),
             "scene_count": storyboard_result.data["scene_count"],
-            "scenes": storyboard_result.data["scenes"],
+            "images_generated": image_result.data["total_generated"],
+            "image_gen_time_s": image_result.data["total_time_s"],
+            "clips_animated": anim_result.data["total_clips"],
+            "animation_time_s": anim_result.data["total_time_s"],
+            "final_video": str(fs.paths.final_video),
+            "final_duration_s": assembly_result.data["duration_s"],
+            "budget_remaining": 6.00,  # local-only, no external cost
         }
+
+    async def run_full_pipeline(
+        self,
+        theme: str,
+        episode_id: str = "",
+        skip_image_gen: bool = False,
+    ) -> dict[str, Any]:
+        """Run the complete pipeline from request to final video (§98).
+
+        §117: Pilot episode — do NOT auto-publish.
+        """
+        # Pre-production
+        pre_result = await self.start_episode(theme=theme, episode_id=episode_id)
+        eid = pre_result["episode_id"]
+
+        # Production (after plan approval — auto-approve for pilot)
+        result = await self.continue_after_approval(eid, "plan")
+        return result
 
     def cleanup_orphans(self) -> list[str]:
         """§56: Clean up orphaned RunPod pods on startup."""
