@@ -21,6 +21,9 @@ from src.agents.storyboard import StoryboardAgent
 from src.agents.image_gen import ImageGenAgent
 from src.agents.animation import AnimationAgent
 from src.agents.assembly import AssemblyAgent
+from src.agents.captions import CaptionsAgent
+from src.agents.thumbnail import ThumbnailAgent
+from src.agents.metadata import MetadataAgent
 from src.budget.guard import BudgetGuard, CostLedger
 from src.config.loader import StudioConfig, get_config
 from src.state.machine import EpisodeState, EpisodeStateStore
@@ -46,6 +49,17 @@ class DirectorAgent:
         self.image_gen = ImageGenAgent(mode="lcm")
         self.animation = AnimationAgent()
         self.assembly = AssemblyAgent()
+        self.captions = CaptionsAgent()
+        self.thumbnail = ThumbnailAgent()
+        # LLM provider is optional — metadata falls back to templates if unavailable
+        try:
+            from src.providers.llm.openrouter_provider import OpenRouterLLMProvider
+            llm = OpenRouterLLMProvider()
+            if not llm.available():
+                llm = None
+        except Exception:
+            llm = None
+        self.metadata = MetadataAgent(llm_provider=llm)
         self._episodes: dict[str, dict] = {}  # in-memory cache
 
     async def start_episode(
@@ -324,6 +338,49 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
             return {"error": assembly_result.error}
 
+        # Step 12b: Finishing — captions, thumbnail, metadata (§31, §91, §92-93)
+        # These are non-fatal: a failure here logs but does not fail the episode.
+        theme = fs.paths.request_json  # placeholder, real theme loaded below
+        import json as _json
+        with open(fs.paths.request_json, encoding="utf-8") as f:
+            _req = _json.load(f)
+        theme_str = _req.get("theme", "")
+        language = _req.get("language", "pt-BR")
+
+        # Captions (§31-32: from real narration timestamps)
+        captions_result = await self.captions.run(
+            episode_id=episode_id,
+            sentence_timestamps=audio_result.data.get("sentence_timestamps"),
+            word_timestamps=audio_result.data.get("word_timestamps"),
+            narration=narration,
+            subtitles_dir=str(fs.paths.subtitles_dir),
+        )
+        captions_files = captions_result.data.get("files", {}) if captions_result.success else {}
+
+        # Thumbnail (§91)
+        headline = research_data.get("story", theme_str)
+        thumb_result = await self.thumbnail.run(
+            episode_id=episode_id,
+            images=image_result.data["generated"],
+            scenes=scenes,
+            headline=headline,
+            thumbnails_dir=str(fs.paths.thumbnails_dir),
+        )
+        thumbnail_path = thumb_result.data.get("thumbnail_path", "") if thumb_result.success else ""
+
+        # Metadata (§92-93)
+        meta_result = await self.metadata.run(
+            episode_id=episode_id,
+            theme=theme_str,
+            research_data=research_data,
+            scenes=scenes,
+            language=language,
+            metadata_dir=str(fs.paths.metadata_dir),
+            captions_files=captions_files,
+            thumbnail_path=thumbnail_path,
+        )
+        metadata = meta_result.data.get("metadata", {}) if meta_result.success else {}
+
         # Step 13: Final QA (§97)
         state.transition_to(EpisodeState.FINAL_QA, agent=self.name, note="video assembled")
         state.save(fs.paths.state_json)
@@ -345,6 +402,12 @@ class DirectorAgent:
             "animation_time_s": anim_result.data["total_time_s"],
             "final_video": str(fs.paths.final_video),
             "final_duration_s": assembly_result.data["duration_s"],
+            "captions": captions_files,
+            "thumbnail": thumbnail_path,
+            "title": metadata.get("title", ""),
+            "playlist": metadata.get("playlist", ""),
+            "chapters": len(metadata.get("chapters", [])),
+            "tags_count": len(metadata.get("tags", [])),
             "budget_remaining": 6.00,  # local-only, no external cost
         }
 
