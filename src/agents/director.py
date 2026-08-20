@@ -45,18 +45,35 @@ class DirectorAgent:
     def __init__(self, config: StudioConfig | None = None):
         self.config = config or get_config()
         self.research = ResearchAgent()
-        # ScriptAgent uses OpenRouter for rich narration (390-750 words)
-        # NVIDIA API tested but too slow for long generation (>5min timeout)
+        # LLM providers:
+        # - OpenRouter (deepseek) for script generation (long, needs high token limit)
+        # - NVIDIA for storyboard visual descriptions (short, fast, free)
         try:
             from src.providers.llm.openrouter_provider import OpenRouterLLMProvider
-            llm_script = OpenRouterLLMProvider()
+            llm_script = OpenRouterLLMProvider(timeout=180)
             if not llm_script.available():
                 llm_script = None
         except Exception:
             llm_script = None
+        try:
+            from src.providers.llm.nvidia_provider import NvidiaLLMProvider
+            llm_nvidia = NvidiaLLMProvider(timeout=120)
+            if not llm_nvidia.available():
+                llm_nvidia = None
+        except Exception:
+            llm_nvidia = None
+        # StoryboardAgent uses OpenRouter for visual descriptions (many small calls)
+        # NVIDIA API rate-limits (429) when making many rapid calls per episode
+        try:
+            from src.providers.llm.openrouter_provider import OpenRouterLLMProvider
+            llm_storyboard = OpenRouterLLMProvider(timeout=30)
+            if not llm_storyboard.available():
+                llm_storyboard = llm_nvidia  # fallback to NVIDIA if OpenRouter fails
+        except Exception:
+            llm_storyboard = llm_nvidia or llm_script
         self.script = ScriptAgent(llm_provider=llm_script)
         self.audio = AudioAgent()
-        self.storyboard = StoryboardAgent()
+        self.storyboard = StoryboardAgent(llm_provider=llm_storyboard)
         self.image_gen = ImageGenAgent(mode="lcm")
         self.animation = AnimationAgent()
         self.assembly = AssemblyAgent()

@@ -9,9 +9,12 @@ Constraints: Semantic division (not 5s/sentence) (§33); real timestamps from au
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from src.agents.base import BaseAgent, AgentResult
+
+logger = logging.getLogger(__name__)
 
 
 class StoryboardAgent(BaseAgent):
@@ -21,8 +24,9 @@ class StoryboardAgent(BaseAgent):
     STYLE_PREFIX = ("stylized 3d animation, warm cinematic lighting, "
                     "children's book illustration, family-friendly, high quality, ")
 
-    def __init__(self):
+    def __init__(self, llm_provider=None):
         super().__init__(name="Storyboard")
+        self._llm = llm_provider
 
     async def run(
         self,
@@ -72,7 +76,8 @@ class StoryboardAgent(BaseAgent):
             }
             
             # Build prompts with Character Bible + Style Guide (§56-60)
-            scene["image_prompt"] = self._build_image_prompt(scene)
+            # Use async LLM-powered prompt builder for English visual descriptions
+            scene["image_prompt"] = await self._build_image_prompt_async(scene)
             scene["negative_prompt"] = self._build_negative_prompt()
             scene["animation_prompt"] = f"gentle movement, {text[:60]}"
             
@@ -138,20 +143,22 @@ class StoryboardAgent(BaseAgent):
             return "awe"
         return "calm"
 
-    def _build_image_prompt(self, scene: dict) -> str:
-        """Build the image generation prompt with Character Bible + Style Guide (§40-41, §56-60).
+    async def _build_image_prompt_async(self, scene: dict) -> str:
+        """Build image prompt using LLM to convert narration → visual description in English.
         
-        Uses character_bible.py and style_guide.py for consistent visual style.
+        CRITICAL: SD1.5 does NOT understand Portuguese. The narration text must be
+        converted to a visual scene description in English before being used as
+        an image generation prompt. Otherwise the model ignores the prompt and
+        generates random images.
         """
         from src.character_bible import build_character_prompt
-        from src.style_guide import build_full_prompt
+        from src.style_guide import build_full_prompt, BASE_STYLE
         
         narration = scene.get("narration", "")
         characters = scene.get("characters", [])
         location = scene.get("location", "")
         emotion = scene.get("emotion", "calm")
         
-        # Map emotion to mood
         mood_map = {
             "calm": "peaceful",
             "joy": "joyful",
@@ -160,12 +167,14 @@ class StoryboardAgent(BaseAgent):
         }
         mood = mood_map.get(emotion, "peaceful")
         
-        # Get character visual descriptions
         char_desc = build_character_prompt(characters)
         
-        # Build the full styled prompt
+        # Use LLM to convert Portuguese narration → English visual description
+        visual_desc = await self._narration_to_visual(narration, characters, location, mood)
+        
+        # Build the full styled prompt with the ENGLISH visual description
         prompts = build_full_prompt(
-            scene_description=narration,
+            scene_description=visual_desc,
             characters=characters,
             location=location,
             mood=mood,
@@ -174,6 +183,103 @@ class StoryboardAgent(BaseAgent):
             character_descriptions=char_desc,
         )
         
+        return prompts["prompt"]
+    
+    async def _narration_to_visual(self, narration: str, characters: list[str], location: str, mood: str) -> str:
+        """Convert Portuguese narration into an English visual scene description for SD1.5.
+        
+        Falls back to a simple translation if LLM is unavailable.
+        """
+        if self._llm and getattr(self._llm, "available", lambda: False)():
+            try:
+                char_hint = f"Characters present: {', '.join(characters)}" if characters else "No specific characters"
+                loc_hint = f"Location: {location}" if location else ""
+                
+                prompt = f"""Convert this Portuguese children's Bible narration into a concise English visual scene description for AI image generation.
+
+Narration (Portuguese): "{narration}"
+{char_hint}
+{loc_hint}
+Mood: {mood}
+
+Write a SINGLE concise English sentence (max 30 words) describing what the IMAGE should show — the visual scene, characters' actions, and setting. Do NOT translate the narration. Describe only what you would SEE in the picture.
+
+Example input: "Deus criou a luz no primeiro dia"
+Example output: "Golden divine light emerging from darkness, brilliant rays piercing through void, heavenly creation scene"
+
+Example input: "Deus criou os peixes e as aves no quinto dia"
+Example output: "Colorful cartoon fish swimming in blue ocean, friendly birds flying above, vibrant underwater and sky scene"
+
+Visual description:"""
+                
+                result = await self._llm.complete(
+                    prompt=prompt,
+                    system="You convert children's Bible narration into visual scene descriptions for AI image generation. Always respond in English with a single concise sentence.",
+                    max_tokens=80,
+                    temperature=0.6,
+                )
+                # Clean up — take only first sentence
+                desc = result.strip().split('.')[0].strip()
+                if desc:
+                    return desc
+            except Exception as e:
+                logger.warning(f"LLM visual description failed, using fallback: {e}")
+        
+        # Fallback: simple keyword-based visual description
+        return self._fallback_visual(narration, characters, location)
+    
+    def _fallback_visual(self, narration: str, characters: list[str], location: str) -> str:
+        """Fallback visual description from narration keywords (no LLM)."""
+        text_lower = narration.lower()
+        visuals = []
+        
+        if "luz" in text_lower or "primeiro dia" in text_lower:
+            visuals.append("golden divine light emerging from darkness")
+        elif "águas" in text_lower or "céu" in text_lower or "segundo dia" in text_lower:
+            visuals.append("blue waters separating from sky, clouds forming above ocean")
+        elif "terra" in text_lower or "plantas" in text_lower or "terceiro dia" in text_lower:
+            visuals.append("green earth rising from water, colorful plants and trees growing")
+        elif "sol" in text_lower or "lua" in text_lower or "estrelas" in text_lower:
+            visuals.append("bright sun, moon and stars in colorful sky")
+        elif "peixes" in text_lower or "aves" in text_lower or "quinto dia" in text_lower:
+            visuals.append("colorful cartoon fish in blue ocean, friendly birds flying in sky")
+        elif "animais" in text_lower or "humanos" in text_lower or "sexto dia" in text_lower:
+            visuals.append("friendly cartoon animals and happy children in green paradise")
+        elif "descansou" in text_lower or "sétimo dia" in text_lower:
+            visuals.append("peaceful sunset over beautiful creation, calm resting scene")
+        elif "deus" in text_lower or "criou" in text_lower:
+            visuals.append("divine light shining over beautiful creation landscape")
+        else:
+            visuals.append("beautiful biblical landscape with warm colors")
+        
+        return ", ".join(visuals)
+    
+    def _build_image_prompt(self, scene: dict) -> str:
+        """Synchronous fallback — DO NOT use in async context (use _build_image_prompt_async)."""
+        from src.character_bible import build_character_prompt
+        from src.style_guide import build_full_prompt
+        
+        narration = scene.get("narration", "")
+        characters = scene.get("characters", [])
+        location = scene.get("location", "")
+        emotion = scene.get("emotion", "calm")
+        
+        mood_map = {"calm": "peaceful", "joy": "joyful", "awe": "miraculous", "suspense": "dramatic"}
+        mood = mood_map.get(emotion, "peaceful")
+        char_desc = build_character_prompt(characters)
+        
+        # Use fallback visual (no LLM in sync mode)
+        visual_desc = self._fallback_visual(narration, characters, location)
+        
+        prompts = build_full_prompt(
+            scene_description=visual_desc,
+            characters=characters,
+            location=location,
+            mood=mood,
+            lighting="divine" if "deus" in characters or "criou" in narration.lower() else "day",
+            camera="medium",
+            character_descriptions=char_desc,
+        )
         return prompts["prompt"]
     
     def _build_negative_prompt(self) -> str:

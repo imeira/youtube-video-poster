@@ -43,7 +43,7 @@ class OpenRouterLLMProvider(LLMProvider):
     metadata/title/tag generation are simple tasks and must not use premium models.
     """
 
-    def __init__(self, model: str = "deepseek/deepseek-chat", api_key: str | None = None, timeout: int = 60):
+    def __init__(self, model: str = "deepseek/deepseek-chat", api_key: str | None = None, timeout: int = 120):
         self.model = model
         self.api_key = api_key or _read_api_key()
         self.timeout = timeout

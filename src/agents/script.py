@@ -132,7 +132,7 @@ Fatos bíblicos a incluir (NÃO invente fatos adicionais):
 
 Referências bíblicas: {refs_text}
 
-REGRAS:
+REGRAS OBRIGATÓRIAS:
 - Público: crianças de 6 a 10 anos
 - Idioma: português do Brasil
 - Tom: acolhedor, emocionante, educativo, fiel à Bíblia
@@ -141,8 +141,10 @@ REGRAS:
 - Divida a história em momentos claros, cada fato bíblico vira uma cena narrada
 - Use pausas naturais (pontos finais, não pontos de exclamação excessivos)
 - Termine com uma lição ou mensagem de amor e fé
-- Tamanho alvo: aproximadamente {target_words} palavras
-- NÃO adicione texto de preenchimento para aumentar a duração
+- TAMANHO OBRIGATÓRIO: mínimo {target_words} palavras, máximo {int(target_words * 1.3)} palavras
+- NÃO escreva menos de {target_words} palavras — cada fato bíblico deve ser detalhado com descrições ricas
+- Para cada um dos {len(facts)} fatos bíblicos, escreva pelo menos {max(50, target_words // max(1, len(facts)))} palavras descrevendo a cena
+- NÃO adicione texto de preenchimento para aumentar a duração — detalhe a história com imagens vívidas
 - NÃO corte fatos importantes para encurtar
 - Escreva APENAS a narração, sem marcadores de cena, sem números, sem cabeçalhos
 - A narração deve ser contínua, como se fosse lida por um narrador
@@ -152,7 +154,7 @@ Narração:"""
         result = await self._llm.complete(
             prompt=prompt,
             system=system,
-            max_tokens=min(3000, target_words * 3),  # tokens ~= words * 1.5
+            max_tokens=min(4000, target_words * 4),  # tokens ~= words * 2.5, generous
             temperature=0.7,
         )
 

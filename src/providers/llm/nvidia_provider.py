@@ -35,7 +35,7 @@ class NvidiaLLMProvider:
     Default model: llama-3.1-nemotron-70b-instruct (good for Portuguese, free tier).
     """
 
-    def __init__(self, model: str = "meta/llama-3.1-70b-instruct", api_key: str | None = None, timeout: int = 120):
+    def __init__(self, model: str = "meta/llama-3.1-70b-instruct", api_key: str | None = None, timeout: int = 300):
         self.model = model
         self.api_key = api_key or _read_api_key()
         self.timeout = timeout

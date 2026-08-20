@@ -90,9 +90,22 @@ def build_full_prompt(
     if character_descriptions:
         parts.append(character_descriptions)
     
-    # Location
+    # Location (translate common Portuguese locations to English for SD1.5)
     if location:
-        parts.append(f"in {location}")
+        loc_map = {
+            "paisagem natural": "beautiful natural landscape",
+            "mar": "ocean",
+            "navio": "ship",
+            "cova dos leões": "lions den",
+            "arca": "ark",
+            "céu": "sky",
+            "terra": "land",
+            "praia": "beach",
+            "Nínive": "ancient city",
+            "campo verde": "green field",
+        }
+        loc_en = loc_map.get(location, location)
+        parts.append(f"in {loc_en}")
     
     # Compact style (keep short to avoid token waste)
     parts.append("children's Bible cartoon, 2D animation, soft rounded shapes, vibrant colors, family-friendly")
