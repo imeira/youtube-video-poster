@@ -69,9 +69,22 @@ class AnimationAgent(BaseAgent):
                 continue
 
             duration = max(1, int(scene.get("duration", 3)))
-            motion = self._map_camera_to_motion(scene.get("camera", "slow_push_in"))
 
-            logger.info(f"Animating {scene_id} ({motion}, {duration}s)...")
+            # §67-69: Use Visual Strategy Engine + Motion Presets for auto-selection
+            from src.providers.video.motion_presets import select_motion_for_scene
+            importance = scene.get("importance", "NORMAL")
+            emotion = scene.get("emotion", "calm")
+            location = scene.get("location", "")
+            camera_hint = scene.get("camera", "")
+
+            # If camera is already set to a valid preset, use it; otherwise auto-select
+            motion = camera_hint if camera_hint in [
+                "slow_push_in", "slow_pull_out", "pan_left", "pan_right",
+                "vertical_reveal", "hero_reveal", "dramatic_zoom", "gentle_float",
+                "parallax_walk", "storm_motion", "fire_glow", "water_motion",
+            ] else select_motion_for_scene(importance, emotion, location)
+
+            logger.info(f"Animating {scene_id} ({motion}, {duration}s, importance={importance})...")
             result = await self._provider.image_to_video(
                 image_path=image_path,
                 duration=duration,

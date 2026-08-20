@@ -187,11 +187,16 @@ class StoryboardAgent(BaseAgent):
     
     async def _narration_to_visual(self, narration: str, characters: list[str], location: str, mood: str) -> str:
         """Convert Portuguese narration into an English visual scene description for SD1.5.
-        
-        Falls back to a simple translation if LLM is unavailable.
+
+        Uses LLM with rate limiting (asyncio.sleep between calls to avoid 429).
+        Falls back to keyword-based description if LLM is unavailable or rate-limited.
         """
         if self._llm and getattr(self._llm, "available", lambda: False)():
             try:
+                # Rate limit: small delay between LLM calls to avoid 429
+                import asyncio
+                await asyncio.sleep(0.5)
+
                 char_hint = f"Characters present: {', '.join(characters)}" if characters else "No specific characters"
                 loc_hint = f"Location: {location}" if location else ""
                 

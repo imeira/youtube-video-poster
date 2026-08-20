@@ -45,49 +45,45 @@ class DirectorAgent:
     def __init__(self, config: StudioConfig | None = None):
         self.config = config or get_config()
         self.research = ResearchAgent()
-        # LLM providers:
-        # - OpenRouter (deepseek) for script generation (long, needs high token limit)
-        # - NVIDIA for storyboard visual descriptions (short, fast, free)
+        # LLM providers (Profile D — Codex Pro + Gemini):
+        # - Gemini Flash for script generation (fast, cheap, good PT-BR)
+        # - Gemini Flash Lite for storyboard visual descriptions (ultra-cheap)
+        # - Gemini Flash Lite for metadata (title/description)
         try:
-            from src.providers.llm.openrouter_provider import OpenRouterLLMProvider
-            llm_script = OpenRouterLLMProvider(timeout=180)
+            from src.providers.llm.gemini_provider import GeminiLLMProvider
+            llm_script = GeminiLLMProvider(model="gemini-3.1-flash-lite", timeout=120)
             if not llm_script.available():
                 llm_script = None
         except Exception:
             llm_script = None
         try:
-            from src.providers.llm.nvidia_provider import NvidiaLLMProvider
-            llm_nvidia = NvidiaLLMProvider(timeout=120)
-            if not llm_nvidia.available():
-                llm_nvidia = None
+            from src.providers.llm.gemini_provider import GeminiLLMProvider
+            llm_storyboard = GeminiLLMProvider(model="gemini-3.1-flash-lite", timeout=30)
+            if not llm_storyboard.available():
+                llm_storyboard = None
         except Exception:
-            llm_nvidia = None
-        # StoryboardAgent uses OpenRouter for visual descriptions (many small calls)
-        # NVIDIA API rate-limits (429) when making many rapid calls per episode
+            llm_storyboard = None
+        # StoryboardAgent uses Gemini Flash Lite for visual descriptions
+        # (ultra-cheap, handles batch calls without rate limiting)
         try:
             from src.providers.llm.openrouter_provider import OpenRouterLLMProvider
-            llm_storyboard = OpenRouterLLMProvider(timeout=30)
-            if not llm_storyboard.available():
-                llm_storyboard = llm_nvidia  # fallback to NVIDIA if OpenRouter fails
+            llm_storyboard_fallback = OpenRouterLLMProvider(timeout=30)
+            if not llm_storyboard_fallback.available():
+                llm_storyboard_fallback = None
         except Exception:
-            llm_storyboard = llm_nvidia or llm_script
+            llm_storyboard_fallback = None
+        # Use Gemini if available, otherwise OpenRouter
+        llm_storyboard_final = llm_storyboard or llm_storyboard_fallback
         self.script = ScriptAgent(llm_provider=llm_script)
         self.audio = AudioAgent()
-        self.storyboard = StoryboardAgent(llm_provider=llm_storyboard)
+        self.storyboard = StoryboardAgent(llm_provider=llm_storyboard_final)
         self.image_gen = ImageGenAgent(mode="lcm")
         self.animation = AnimationAgent()
         self.assembly = AssemblyAgent()
         self.captions = CaptionsAgent()
         self.thumbnail = ThumbnailAgent()
-        # MetadataAgent uses OpenRouter for title/description
-        try:
-            from src.providers.llm.openrouter_provider import OpenRouterLLMProvider
-            llm_or = OpenRouterLLMProvider()
-            if not llm_or.available():
-                llm_or = None
-        except Exception:
-            llm_or = None
-        self.metadata = MetadataAgent(llm_provider=llm_or)
+        # MetadataAgent uses Gemini Flash Lite for title/description
+        self.metadata = MetadataAgent(llm_provider=llm_storyboard_final)
         self._episodes: dict[str, dict] = {}  # in-memory cache
 
     async def start_episode(
@@ -363,7 +359,42 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
             return {"error": image_result.error}
 
-        # Step 11: Animate (§49-52)
+        # Step 11: Visual Strategy — decide local vs generative video (§63-67)
+        from src.providers.gpu.gpu_compute_provider import (
+            LocalGPUProvider, RunPodGPUProvider, SceneImportance,
+            GenerativeVideoConfig, get_gpu_provider,
+        )
+        from src.providers.gpu.visual_strategy import VisualStrategyEngine
+
+        local_gpu = LocalGPUProvider()
+        cloud_gpu = RunPodGPUProvider()
+        gen_video_config = GenerativeVideoConfig(
+            enabled=cloud_gpu.available(),
+            max_seconds_per_episode=30,
+            preferred_clip_duration_seconds=4,
+            maximum_clip_duration_seconds=8,
+        )
+        strategy_engine = VisualStrategyEngine(gen_video_config, local_gpu, cloud_gpu)
+
+        # Classify each scene and mark strategy
+        for scene in scenes:
+            importance = SceneImportance(scene.get("importance", "NORMAL"))
+            strategy = strategy_engine.decide(
+                scene_importance=importance,
+                scene_duration=scene.get("duration", 5.0),
+                emotion=scene.get("emotion", ""),
+                location=scene.get("location", ""),
+                characters=scene.get("characters", []),
+                narration=scene.get("narration", ""),
+            )
+            scene["visual_strategy"] = strategy.strategy
+            scene["visual_strategy_reason"] = strategy.reason
+
+        gen_summary = strategy_engine.get_usage_summary()
+        logger.info(f"Visual strategy: {gen_summary['generative_clips_used']} generative clips, "
+                     f"{gen_summary['generative_seconds_used']}s of {gen_summary['max_seconds']}s max")
+
+        # Step 12: Animate locally (§49-52, §67: local animation is PRIMARY)
         state.transition_to(EpisodeState.LOCAL_ANIMATION, agent=self.animation.name)
         state.save(fs.paths.state_json)
 
