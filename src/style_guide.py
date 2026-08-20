@@ -31,7 +31,8 @@ NEGATIVE_PROMPT = (
     "photorealistic, 3D render, realistic human, scary, violent, dark, "
     "horror, adult themes, weapon violence, blood, gore, "
     "low quality, blurry, distorted, deformed faces, extra limbs, "
-    "watermark, text, signature, ugly, creepy"
+    "watermark, text, signature, ugly, creepy, unwanted humans, random people, human faces before human creation, "
+    "clothing on Adam, clothing on Eve, tunic on Adam, dress on Eve, underwear, sexualized nudity, anatomical detail"
 )
 
 # Color palettes for different moods

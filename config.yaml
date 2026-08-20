@@ -13,7 +13,7 @@ project:
 
 # --- §2 LOCAL-FIRST + CLOUD-ON-DEMAND ---
 production:
-  strategy: hybrid  # local-first with cloud-on-demand
+  strategy: comfy_cloud_reference_first
   priority_chain:
     - local
     - local_optimized
@@ -265,11 +265,78 @@ hardware:
 # --- §84 COMFYUI ---
 comfyui:
   use_as_engine: true
+  provider: "comfy_cloud"
+  active_for_episode_1: false  # free tier blocks API execution (403)
+  host: "https://cloud.comfy.org"
   headless_api: true  # /prompt endpoint for automation
   workflows_versioned: true
   workflows_parametrized: true
   workflows_testable: true
+  text_to_image_is_final: false
+  recurring_characters_require_reference_images: true
+  recurring_characters_require_img2img: true
+  canonical_reference_reuse_required: true
+  identity_lock_fields: [face, age, hair, clothing, colors, body_proportions, accessories]
+  image_workflow: "workflows/comfy_cloud_character_img2img.json"
+  video_workflows:
+    primary: "workflows/comfy_cloud_wan_i2v.json"
+    fallback: "workflows/comfy_cloud_hunyuan_i2v.json"
+  video_models: [wan, hunyuan_video]
   flags: "--lowvram --listen"
+
+# --- CHARACTER CONTINUITY / VISUAL QA (global production gate) ---
+character_continuity:
+  canonical_cards_required: true
+  episode_1_theme: "A Criação"
+  episode_1_biblical_scope:
+    - "Gênesis 1:1-31"
+    - "Gênesis 2:1-25"
+  canonical_characters_episode_1: [adao, eva]
+  god_visual_representation: "presença divina por luz, vento e transformações da natureza; nunca rosto, corpo, mãos ou silhueta humana"
+  no_humans_before_adam: true
+  adam_eve_unclothed: true
+  adam_eve_child_safe_framing: "planos médios ou distantes, vegetação e enquadramento cobrindo áreas íntimas, sem detalhes anatômicos e sem roupas"
+  same_reference_images_every_scene: true
+  seeds_are_auxiliary_only: true
+  block_text_only_final_generation: true
+
+visual_qa:
+  required_for_every_image: true
+  required_before_animation: true
+  minimum_score: 0.85
+  compare_against:
+    - exact_active_narration
+    - canonical_character_references
+    - fixed_identity_fields
+    - continuity_anchor
+    - child_safety
+  reject_on_any_identity_drift: true
+  require_image_count_timeline_audit: true
+
+timeline_sync:
+  source: "approved_audio_word_timestamps"
+  scene_boundary: "semantic_phrase_or_visible_action_change"
+  uniform_intervals_forbidden: true
+  image_changes_follow_spoken_phrase_duration: true
+  short_transition_seconds: 0.25
+  cinematic_motion: "gentle"
+
+approved_audio:
+  preserve_existing: true
+  overwrite_forbidden: true
+  voice: "pt-BR-ThalitaNeural"
+  episode_1_source: "C:/HermesStudio/episodes/EP8SOLPLAN/audio/narration.mp3"
+
+episode_1_image_generation:
+  provider: "openai-codex"
+  model: "gpt-image-2-medium"
+  method: "image-to-image"
+  text_only_final_forbidden: true
+  additional_character_references_supported: true
+  canonical_references:
+    adam: "assets/characters/creation/adam/face_v1.png"
+    eve: "assets/characters/creation/eve/face_v1.png"
+  visual_qa_model: "gemini-3.6-flash"
 
 # --- §85-87 STORAGE ---
 storage:
@@ -309,7 +376,9 @@ approval:
   final_video: true
   silence_is_not_approval: true  # §8
 publishing:
-  auto_publish_after_final_approval: true
+  auto_publish_after_final_approval: false
+  approval_delivery_only: true
+  publication_requires_separate_explicit_instruction: true
 
 # --- §100 MÉTRICAS ---
 metrics:

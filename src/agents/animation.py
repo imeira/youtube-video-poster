@@ -68,7 +68,9 @@ class AnimationAgent(BaseAgent):
                 failed.append({"scene_id": scene_id, "error": "No image for scene"})
                 continue
 
-            duration = max(1, int(scene.get("duration", 3)))
+            # Preserve real TTS timing. Truncating every scene to int loses
+            # accumulated seconds and desynchronizes image changes from speech.
+            duration = max(1.0, float(scene.get("duration", 3.0)))
 
             # §67-69: Use Visual Strategy Engine + Motion Presets for auto-selection
             from src.providers.video.motion_presets import select_motion_for_scene

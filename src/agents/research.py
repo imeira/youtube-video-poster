@@ -23,17 +23,31 @@ class ResearchAgent(BaseAgent):
     # Known biblical stories and their references (pre-seeded for common stories)
     KNOWN_STORIES = {
         "criação do mundo": {
-            "references": [{"book": "Gênesis", "chapter": 1, "verses": "1-31"}, {"book": "Gênesis", "chapter": 2, "verses": "1-3"}],
-            "summary": "Deus criou o mundo em seis dias e descansou no sétimo.",
+            "references": [{"book": "Gênesis", "chapter": 1, "verses": "1-31"}, {"book": "Gênesis", "chapter": 2, "verses": "1-25"}],
+            "summary": "Deus cria os céus, a terra, a vida e o Jardim do Éden; depois forma Adão e Eva e os coloca no jardim.",
             "key_facts": [
-                "Deus criou a luz no primeiro dia",
-                "Deus separou as águas e criou o céu no segundo dia",
-                "Deus criou a terra, os mares e as plantas no terceiro dia",
-                "Deus criou o sol, a lua e as estrelas no quarto dia",
-                "Deus criou os peixes e as aves no quinto dia",
-                "Deus criou os animais terrestres e os seres humanos no sexto dia",
-                "Deus descansou no sétimo dia",
+                "No princípio, a terra estava sem forma, vazia e coberta de trevas e águas",
+                "Deus criou a luz e separou o dia da noite",
+                "Deus separou as águas e estabeleceu o céu",
+                "Deus fez aparecer a terra seca, os mares, as plantas e as árvores",
+                "Deus criou o sol, a lua e as estrelas para iluminar e marcar os tempos",
+                "Deus criou os peixes e as aves e os abençoou",
+                "Deus criou os animais terrestres",
+                "Deus criou o ser humano, homem e mulher, à sua imagem",
+                "Deus terminou sua obra e descansou no sétimo dia",
+                "Deus formou Adão do pó e soprou nele o fôlego de vida",
+                "Deus colocou Adão no Jardim do Éden para cuidar dele",
+                "No jardim havia árvores agradáveis, a árvore da vida e a árvore do conhecimento do bem e do mal",
+                "Deus disse a Adão que poderia comer das árvores, menos da árvore do conhecimento do bem e do mal",
+                "Adão deu nomes aos animais e percebeu que estava sozinho",
+                "Deus fez Eva e a apresentou a Adão",
+                "Adão e Eva estavam nus e não sentiam vergonha",
             ],
+            "visual_constraints": {
+                "humans_allowed_after": "criação do ser humano em Gênesis 1:26-27; formação de Adão em Gênesis 2:7",
+                "pre_human_rule": "Nenhum humano, rosto humano, criança ou silhueta humana antes de Gênesis 1:26",
+                "adam_eve_rule": "Adão e Eva sem roupas; enquadramento infantil não sexualizado com folhas e distância cobrindo áreas íntimas; não desenhar roupas",
+            },
         },
         "davi e golias": {
             "references": [{"book": "1 Samuel", "chapter": 17, "verses": "1-58"}],
@@ -121,6 +135,7 @@ class ResearchAgent(BaseAgent):
                         "Detalhes ambientais para atmosfera",
                     ],
                 },
+                "visual_constraints": matched.get("visual_constraints", {}),
             }
 
             # Save to research dir

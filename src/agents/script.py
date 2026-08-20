@@ -12,6 +12,8 @@ Constraints: Clarity, emotion, curiosity, adventure, appropriate suspense,
 from __future__ import annotations
 
 import logging
+import os
+import json
 from pathlib import Path
 
 from src.agents.base import BaseAgent, AgentResult
@@ -59,6 +61,39 @@ class ScriptAgent(BaseAgent):
         facts = research_data.get("narrative_classification", {}).get("BIBLICAL_FACT", [])
         story = research_data.get("story", "")
         references = research_data.get("references", [])
+
+        # Explicit GPT-5.6-SOL plan override. This bypasses weaker fallback
+        # providers and keeps the narration and visual storyboard paired.
+        sol_plan_path = os.environ.get("STUDIO_SOL_PLAN_PATH", "")
+        if sol_plan_path and Path(sol_plan_path).exists():
+            try:
+                with open(sol_plan_path, encoding="utf-8") as f:
+                    sol_plan = json.load(f)
+                narration = "\n\n".join(
+                    str(scene["narration_pt"]).strip()
+                    for scene in sol_plan.get("scenes", [])
+                    if scene.get("narration_pt")
+                ).strip()
+                if narration:
+                    word_count = len(narration.split())
+                    if script_dir:
+                        Path(script_dir).mkdir(parents=True, exist_ok=True)
+                        with open(Path(script_dir) / "narration.txt", "w", encoding="utf-8") as f:
+                            f.write(narration)
+                    return AgentResult(
+                        success=True,
+                        data={
+                            "narration": narration,
+                            "word_count": word_count,
+                            "target_duration_s": target_duration_s,
+                            "estimated_duration_s": (word_count / self.WORDS_PER_MINUTE) * 60,
+                            "source": "gpt-5.6-sol",
+                            "sol_scene_count": len(sol_plan.get("scenes", [])),
+                        },
+                        next_state="SCRIPT_QA",
+                    )
+            except Exception as e:
+                logger.warning("GPT-5.6-SOL plan could not be loaded: %s", e)
 
         # Try LLM first for rich narration
         narration = None

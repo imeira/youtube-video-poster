@@ -19,6 +19,9 @@ Duration categories (initial guidance, not rigid rules):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+import os
+import re
 
 
 # Narration pace: children's narration ~130 words/minute (slower than adult ~150 wpm)
@@ -145,12 +148,34 @@ class DurationPlannerAgent:
 
         tier, duration_s, dur_min, dur_max = self._classify_complexity(n_events, references)
 
+        # GPT-5.6-SOL may recommend a duration after reading the full chapter.
+        # That recommendation is authoritative for this episode; the heuristic
+        # remains the fallback for themes without a SOL plan.
+        sol_scene_count = 0
+        sol_plan_path = os.environ.get("STUDIO_SOL_PLAN_PATH", "")
+        if sol_plan_path and os.path.exists(sol_plan_path):
+            try:
+                with open(sol_plan_path, encoding="utf-8") as f:
+                    sol_plan = json.load(f)
+                summary = sol_plan.get("complexity_summary", {})
+                m = re.search(r"(\d+)\s*min", str(summary.get("recommended_duration", "")), re.I)
+                if m:
+                    duration_s = float(int(m.group(1)) * 60)
+                    dur_min = max(180.0, duration_s - 60.0)
+                    dur_max = duration_s + 60.0
+                sol_scene_count = len(sol_plan.get("scenes", []))
+                if sol_scene_count:
+                    tier = "sol_adaptive"
+            except Exception as e:
+                # Planning must remain available if an external plan is malformed.
+                pass
+
         # Word count target from duration (§19: never pad/cut artificially —
         # this is a TARGET derived from duration, script agent must respect content over count)
         word_count = int((duration_s / 60.0) * WORDS_PER_MINUTE)
 
-        # Scene count: ~1 scene per 8s of narration (local animated stills)
-        scene_count = max(n_events, round(duration_s / AVG_SCENE_DURATION_S))
+        # Scene count follows the paired SOL visual plan when available.
+        scene_count = sol_scene_count or max(n_events, round(duration_s / AVG_SCENE_DURATION_S))
         image_count = scene_count  # 1 image per scene (consistent characters reused across scenes)
 
         # RunPod candidates: high-impact scenes only (§46-48) — CRITICAL importance events

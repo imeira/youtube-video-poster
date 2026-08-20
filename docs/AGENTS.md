@@ -1,7 +1,7 @@
 # AGENTS SPECIFICATION
 ## Hybrid AI Animation Studio
 
-**Version:** 1.0
+**Version:** 1.1
 **Date:** 2026-08-19
 **Reference:** §11-12 (multiagent architecture)
 
@@ -47,6 +47,22 @@ DIRECTOR AGENT (orchestrator)
 - Clean up orphaned RunPod pods on startup
 
 **Rule:** No specialized agent may publish directly or bypass global rules.
+
+### 2.1 Global visual production rules (mandatory)
+
+- Final generation for recurring characters MUST use canonical reference images and image-to-image. Text-only generation is a draft and can never be marked final.
+- Episode 1 is **A Criação**, grounded exactly in Gênesis 1:1-31 and Gênesis 2:1-25. Davi, Golias, Saul and Jessé do not belong to this episode.
+- Episode 1 canonical recurring characters are Adão and Eva. Their fixed cards define face, adult age, hair, body proportions and physical identity. They have no clothing before the fall; use child-safe, non-sexual framing with vegetation covering intimate areas.
+- Before Adão is formed, no human, child, human face, body, shadow or humanoid silhouette may appear.
+- Deus is never depicted as a person. Represent divine action through light, wind, water and visible transformations in creation.
+- Every scene featuring a recurring character MUST receive the same approved canonical references. Seeds are only auxiliary and never establish identity.
+- Every image MUST map to the exact active narration phrase and real approved-audio timestamps. Uniform time slicing is forbidden.
+- Every frame MUST pass individual visual QA against narration, action, identity, costume, anatomy, continuity and child safety before animation.
+- The Director MUST audit generated-image count against narration phrases and audio duration before rendering.
+- Approved audio assets and the approved Thalita voice MUST be preserved; overwrite is forbidden.
+- Animation uses Comfy Cloud Wan image-to-video as primary and Hunyuan Video image-to-video as fallback, with gentle cinematic motion and short transitions.
+- Episode 1 final still images use OpenAI/Codex `gpt-image-2-medium` editing with the rejected frame as the primary image and approved Adão/Eva canonical portraits as additional references. Every result remains subject to the same per-frame visual QA gate.
+- New videos are delivered only for approval. Publishing requires a later, separate and explicit user instruction.
 
 ## 3. Agent Specifications
 

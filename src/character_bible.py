@@ -38,8 +38,9 @@ CHARACTER_BIBLE = {
     },
     "adão": {
         "visual_description": (
-            "friendly young man with short dark brown hair, kind face, "
-            "simple earth-tone tunic, barefoot, gentle expression, "
+            "friendly young adult man with short dark brown hair, kind face, "
+            "bare, unclothed, no garments, no clothing, barefoot, gentle expression, "
+            "non-sexual child-safe framing with foliage naturally covering intimate areas, "
             "children's cartoon style, warm skin tone"
         ),
         "personality_tags": ["curious", "gentle", "innocent"],
@@ -49,8 +50,9 @@ CHARACTER_BIBLE = {
     },
     "eva": {
         "visual_description": (
-            "friendly young woman with long dark hair, kind gentle face, "
-            "simple earth-tone dress, barefoot, warm smile, "
+            "friendly young adult woman with long dark hair, kind gentle face, "
+            "bare, unclothed, no garments, no clothing, barefoot, warm smile, "
+            "non-sexual child-safe framing with foliage naturally covering intimate areas, "
             "children's cartoon style, warm skin tone"
         ),
         "personality_tags": ["curious", "gentle", "caring"],
