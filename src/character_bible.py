@@ -12,6 +12,36 @@ Each character has:
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import yaml
+
+
+CANONICAL_CHARACTER_CARDS = {
+    "adão": Path("assets/characters/creation/adam/character_v1.yaml"),
+    "adam": Path("assets/characters/creation/adam/character_v1.yaml"),
+    "eva": Path("assets/characters/creation/eve/character_v1.yaml"),
+    "eve": Path("assets/characters/creation/eve/character_v1.yaml"),
+}
+
+
+def get_canonical_character(name: str, repo_root: Path | None = None) -> dict:
+    """Load an approved character card and resolve its canonical face path."""
+    key = name.lower().strip()
+    relative_card = CANONICAL_CHARACTER_CARDS.get(key)
+    if relative_card is None:
+        raise KeyError(f"No canonical character card registered for {name!r}")
+
+    root = repo_root or Path(__file__).resolve().parents[1]
+    card_path = root / relative_card
+    card = yaml.safe_load(card_path.read_text(encoding="utf-8"))
+    if card.get("status") != "approved":
+        raise ValueError(f"Canonical character card is not approved: {card_path}")
+
+    card["card_path"] = card_path
+    card["reference_path"] = root / card["reference_images"]["face"]
+    return card
+
 # Main characters for children's Bible stories (ages 6-10)
 CHARACTER_BIBLE = {
     "deus": {
@@ -162,6 +192,23 @@ GENERIC_TYPES = {
 def get_character_description(name: str) -> dict | None:
     """Get character description by name (case-insensitive)."""
     name_lower = name.lower().strip()
+    if name_lower in CANONICAL_CHARACTER_CARDS:
+        card = get_canonical_character(name_lower)
+        identity = card["identity_lock"]
+        safety = card["child_safety"]
+        legacy = CHARACTER_BIBLE.get("adão" if name_lower in {"adão", "adam"} else "eva", {})
+        return {
+            **legacy,
+            "visual_description": ", ".join(
+                str(identity[field])
+                for field in ("age", "ethnicity", "skin", "face", "eyes", "hair", "beard", "body", "clothing", "accessories")
+                if field in identity
+            )
+            + f", enquadramento infantil seguro: {safety['framing']}; cobertura: {safety['coverage']}",
+            "reference_path": card["reference_path"],
+            "character_id": card["character_id"],
+            "status": card["status"],
+        }
     return CHARACTER_BIBLE.get(name_lower) or GENERIC_TYPES.get(name_lower)
 
 

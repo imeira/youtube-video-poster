@@ -79,7 +79,7 @@ Cada imagem deve ser verificada individualmente contra:
 
 Score mínimo: 0,85 e `approved=true`. Regenerar somente cenas reprovadas e reauditar.
 
-## 8. Movimento, transições e montagem
+## 8. Movimento, transições, áudio masterizado e montagem
 
 - Preservar duração fracionária; nunca converter timestamps para inteiro.
 - Movimento cinematográfico suave: push-in, pull-out, pan e float alternados.
@@ -87,6 +87,9 @@ Score mínimo: 0,85 e `approved=true`. Regenerar somente cenas reprovadas e reau
 - Compensar o tempo de sobreposição para que xfade não encurte a timeline.
 - Vídeo padrão: 1920×1080, 30 fps, H.264, yuv420p e AAC.
 - Diferença máxima entre áudio e vídeo: 0,5 s.
+- Preservar o TTS original por hash e gerar uma cópia derivada para masterização.
+- Antes da aprovação, medir com EBU R128 e normalizar a cópia derivada para **−16 LUFS ±1 LU**, com true peak máximo de **−1 dBTP**.
+- Nunca normalizar ou substituir retroativamente um áudio já aprovado sem nova autorização.
 
 ## 9. Aprovação e publicação
 

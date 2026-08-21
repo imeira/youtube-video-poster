@@ -43,7 +43,7 @@ class TestLocalSD15Provider:
     @pytest.mark.slow
     @pytest.mark.asyncio
     async def test_generate_lcm_image(self):
-        """B3: Generate an actual image with LCM (requires model download)."""
+        """Generate an actual image with the current 8-step LCM quality preset."""
         provider = LocalSD15Provider(mode="lcm")
         result = await provider.generate(
             prompt="a young shepherd boy standing in a field, stylized 3d animation, children's book style",
@@ -58,4 +58,4 @@ class TestLocalSD15Provider:
         assert os.path.exists(result.image_path)
         assert result.generation_time > 0
         assert result.metadata["mode"] == "lcm"
-        assert result.metadata["steps"] == 6
+        assert result.metadata["steps"] == 8
