@@ -32,7 +32,7 @@ Uma fase é marcada como **CONCLUÍDA** somente quando há implementação e evi
 | 19 | Telegram HITL | CONCLUÍDA | vídeo e thumbnail entregues e aprovados no Telegram |
 | 20 | YouTube Integration | CONCLUÍDA | vídeo público `GlWh69LF9LM`, thumbnail e playlist verificadas |
 | 21 | End-to-End Pilot | CONCLUÍDA | episódio aprovado e publicado após autorização explícita |
-| 22 | Performance Optimization | PENDENTE | medir tempos por etapa, cache/reuso, custo e gargalos do fluxo aprovado |
+| 22 | Performance Optimization | CONCLUÍDA | manifesto SHA-256; render inalterado reutilizado com segurança em 0,845 s |
 | 23 | Production Hardening | PENDENTE | retomada idempotente, manifesto de episódio, testes de falha e recuperação |
 
 ## Evidências medidas do piloto
@@ -49,7 +49,6 @@ Uma fase é marcada como **CONCLUÍDA** somente quando há implementação e evi
 
 ## Próxima execução automática
 
-1. Executar **Fase 22 — Performance Optimization**.
-2. Executar **Fase 23 — Production Hardening**.
-3. Aplicar masterização mensurável na cópia derivada de áudio do próximo episódio antes da aprovação.
-4. A **Fase 13** só pode ser encerrada após a ação humana H2.
+1. Executar **Fase 23 — Production Hardening**.
+2. Aplicar masterização mensurável na cópia derivada de áudio do próximo episódio antes da aprovação.
+3. A **Fase 13** só pode ser encerrada após a ação humana H2.
