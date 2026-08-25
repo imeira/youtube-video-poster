@@ -8,28 +8,26 @@ Responsibility: Coordinate all agents, manage state machine, enforce budget.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from pathlib import Path
 from typing import Any
 
-from src.agents.base import BaseAgent, AgentResult
-from src.agents.research import ResearchAgent
-from src.agents.script import ScriptAgent
-from src.agents.audio import AudioAgent
-from src.agents.storyboard import StoryboardAgent
-from src.agents.image_gen import ImageGenAgent
 from src.agents.animation import AnimationAgent
 from src.agents.assembly import AssemblyAgent
+from src.agents.audio import AudioAgent
 from src.agents.captions import CaptionsAgent
-from src.agents.thumbnail import ThumbnailAgent
-from src.agents.metadata import MetadataAgent
 from src.agents.duration_planner import DurationPlannerAgent
-from src.telegram.approval_gate import TelegramApprovalGate, format_decision_message
+from src.agents.image_gen import ImageGenAgent
+from src.agents.metadata import MetadataAgent
+from src.agents.research import ResearchAgent
+from src.agents.script import ScriptAgent
+from src.agents.storyboard import StoryboardAgent
+from src.agents.thumbnail import ThumbnailAgent
 from src.budget.guard import BudgetGuard, CostLedger
 from src.config.loader import StudioConfig, get_config
+from src.providers.llm.core_model_router import CoreModelRouter
 from src.state.machine import EpisodeState, EpisodeStateStore
 from src.storage.episode_fs import EpisodeFS
+from src.telegram.approval_gate import TelegramApprovalGate, format_decision_message
 
 logger = logging.getLogger(__name__)
 
@@ -42,48 +40,26 @@ class DirectorAgent:
     §8: Silence is NOT approval for HITL gates.
     """
 
-    def __init__(self, config: StudioConfig | None = None):
+    def __init__(
+        self,
+        config: StudioConfig | None = None,
+        model_router: CoreModelRouter | None = None,
+    ):
         self.config = config or get_config()
+        self.model_router = model_router or CoreModelRouter.profile_d()
         self.research = ResearchAgent()
-        # LLM providers (Profile D — Codex Pro + Gemini):
-        # - Gemini Flash for script generation (fast, cheap, good PT-BR)
-        # - Gemini Flash Lite for storyboard visual descriptions (ultra-cheap)
-        # - Gemini Flash Lite for metadata (title/description)
-        try:
-            from src.providers.llm.gemini_provider import GeminiLLMProvider
-            llm_script = GeminiLLMProvider(model="gemini-3.1-flash-lite", timeout=120)
-            if not llm_script.available():
-                llm_script = None
-        except Exception:
-            llm_script = None
-        try:
-            from src.providers.llm.gemini_provider import GeminiLLMProvider
-            llm_storyboard = GeminiLLMProvider(model="gemini-3.1-flash-lite", timeout=30)
-            if not llm_storyboard.available():
-                llm_storyboard = None
-        except Exception:
-            llm_storyboard = None
-        # StoryboardAgent uses Gemini Flash Lite for visual descriptions
-        # (ultra-cheap, handles batch calls without rate limiting)
-        try:
-            from src.providers.llm.openrouter_provider import OpenRouterLLMProvider
-            llm_storyboard_fallback = OpenRouterLLMProvider(timeout=30)
-            if not llm_storyboard_fallback.available():
-                llm_storyboard_fallback = None
-        except Exception:
-            llm_storyboard_fallback = None
-        # Use Gemini if available, otherwise OpenRouter
-        llm_storyboard_final = llm_storyboard or llm_storyboard_fallback
+        llm_script = self.model_router.provider_for("script", timeout=180)
+        llm_storyboard = self.model_router.provider_for("storyboard", timeout=120)
+        llm_metadata = self.model_router.provider_for("metadata", timeout=60)
         self.script = ScriptAgent(llm_provider=llm_script)
         self.audio = AudioAgent()
-        self.storyboard = StoryboardAgent(llm_provider=llm_storyboard_final)
+        self.storyboard = StoryboardAgent(llm_provider=llm_storyboard)
         self.image_gen = ImageGenAgent(mode="lcm")
         self.animation = AnimationAgent()
         self.assembly = AssemblyAgent()
         self.captions = CaptionsAgent()
         self.thumbnail = ThumbnailAgent()
-        # MetadataAgent uses Gemini Flash Lite for title/description
-        self.metadata = MetadataAgent(llm_provider=llm_storyboard_final)
+        self.metadata = MetadataAgent(llm_provider=llm_metadata)
         self._episodes: dict[str, dict] = {}  # in-memory cache
 
     async def start_episode(
@@ -361,8 +337,10 @@ class DirectorAgent:
 
         # Step 11: Visual Strategy — decide local vs generative video (§63-67)
         from src.providers.gpu.gpu_compute_provider import (
-            LocalGPUProvider, RunPodGPUProvider, SceneImportance,
-            GenerativeVideoConfig, get_gpu_provider,
+            GenerativeVideoConfig,
+            LocalGPUProvider,
+            RunPodGPUProvider,
+            SceneImportance,
         )
         from src.providers.gpu.visual_strategy import VisualStrategyEngine
 
