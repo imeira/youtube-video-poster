@@ -57,6 +57,10 @@ jobs:
             echo "unit_tests=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Install media tooling
+        if: steps.project.outputs.python_project == 'true'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Install project dependencies
         if: steps.project.outputs.python_project == 'true'
         run: python -m pip install -e ".[dev]"

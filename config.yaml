@@ -1,0 +1,441 @@
+# ==============================================================================
+# HYBRID AI ANIMATION STUDIO — Central Configuration
+# ==============================================================================
+# This is the single source of truth for all configurable parameters.
+# Secrets (API keys, tokens) live in .env, NEVER here.
+# Section numbers refer to the SUPERPROMPT FINAL DE IMPLEMENTAÇÃO.
+
+project:
+  name: "Hybrid AI Animation Studio"
+  default_language: "pt-BR"
+  default_channel: "@EraUmaVezBibliaAnimada"
+  version: "0.1.0"
+
+# --- §2 LOCAL-FIRST + CLOUD-ON-DEMAND ---
+production:
+  strategy: comfy_cloud_reference_first
+  priority_chain:
+    - local
+    - local_optimized
+    - runpod_on_demand
+    - other_providers
+
+# --- §3 OBJETIVO FINANCEIRO ---
+budget:
+  currency: USD
+  episode:
+    target_usd: 4.00
+    warning_usd: 5.00
+    hard_limit_usd: 6.00
+    require_approval_above_limit: true
+  cost_classification:
+    excellent: [0, 3.00]
+    good: [3.00, 4.00]
+    acceptable: [4.00, 5.00]
+    attention: [5.00, 6.00]
+    blocked: [6.00, 999999.00]
+
+cost_estimates:
+  image_usd: 0.015
+  generative_video_second_usd: 0.10
+
+# --- §18-19 DURAÇÃO ---
+episode:
+  typical_duration:
+    min_minutes: 3
+    max_minutes: 15
+  categories:
+    short: { min: 3, max: 5 }
+    medium: { min: 6, max: 8 }
+    long: { min: 8, max: 12 }
+    special: { min: 12, max: 15 }
+  duration_rule: "complexity + audience_age + pace + retention + budget"
+  never:
+    - add_text_to_pad_duration
+    - repeat_ideas
+    - truncate_narrative
+    - invent_events
+
+# --- §28 TTS ---
+tts:
+  language: "pt-BR"
+  preferred_voice:
+    name: "pt-BR-ThalitaNeural"
+    rate: "-8%"
+    pitch: "+1Hz"
+  direction: "voz humanizada, acolhedora, expressiva, como uma pessoa contando histórias para crianças"
+  alternative_voices:
+    - "pt-BR-Luana:MAI-Voice-2"  # 18 emotional styles
+    - "pt-BR-FranciscaNeural"
+  provider: "edge-tts"  # free; "azure" for licensed commercial use (~$0.07/ep)
+  preserve_voice_across_episodes: true
+  azure_fallback: true
+
+# --- §30 ÁUDIO ---
+audio:
+  structure:
+    narration: "audio/narration.wav"
+    dialogue_dir: "audio/dialogue/"
+    music_dir: "audio/music/"
+    sfx_dir: "audio/sfx/"
+    master: "audio/master.wav"
+  mastering:
+    loudness_target_lufs: -14  # YouTube standard
+    true_peak_db: -1.0
+    lra: 11
+    ducking_threshold: 0.05
+    ducking_ratio: 8
+    ducking_attack_ms: 20
+    ducking_release_ms: 400
+
+# --- §31-33 TRANSCRIÇÃO ---
+transcription:
+  burn_subtitles: false  # never burn into video
+  formats:
+    - "transcript.txt"
+    - "captions.srt"
+    - "captions.vtt"
+  timestamp_source: "real_audio"  # §32: never fixed 80-words/30s heuristic
+  alignment_method: "edge-tts SentenceBoundary + faster-whisper word-level"
+
+# --- §34 SCENE SCHEMA ---
+scene:
+  schema_version: 1
+  required_fields:
+    - scene_id
+    - narration
+    - start
+    - end
+    - duration
+    - characters
+    - location
+    - emotion
+    - action
+    - importance  # LOW | NORMAL | HIGH | CRITICAL
+    - visual_strategy  # STATIC_IMAGE | LOCAL_ANIMATED_STILL | LOCAL_IMAGE_TO_VIDEO | RUNPOD_GENERATIVE_VIDEO
+    - references
+    - camera
+    - image_prompt
+    - animation_prompt
+    - negative_prompt
+    - qa_status  # PENDING | APPROVED | REJECTED | REGENERATED
+
+# --- §41 ESTILO VISUAL BASE ---
+visual_style:
+  style: "high-quality children's animated movie"
+  rendering: "stylized 3D animation"
+  lighting: "warm cinematic"
+  characters: "expressive, soft friendly shapes"
+  environment: "rich colorful"
+  tone: "family-friendly"
+  composition: "cinematic"
+  # §40: avoid depending on artist/studio names as mandatory requirement
+  identity: "construct own visual identity"
+
+# --- §47-50 ANIMATION ---
+visual_strategy_engine:
+  decision_factors:
+    - narrative_importance
+    - visual_complexity
+    - movement_requirement
+    - character_consistency_risk
+    - local_render_feasibility
+    - expected_quality_gain
+    - estimated_cloud_cost
+    - remaining_budget
+    - production_time
+
+# --- §49-52 LOCAL ANIMATION ---
+local_animation:
+  enabled: true
+  default: true
+  engine: "ffmpeg"
+  motion_presets:
+    - slow_push_in
+    - slow_pull_out
+    - pan_left
+    - pan_right
+    - vertical_reveal
+    - hero_reveal
+    - dramatic_zoom
+    - gentle_float
+    - parallax_walk
+    - storm_motion
+    - fire_glow
+    - water_motion
+  multilayer_support: true  # BACKGROUND | MIDGROUND | CHARACTER | FOREGROUND | FX
+  motion_blur: true
+  transitions: true
+
+# --- §53-60 RUNPOD ---
+runpod:
+  enabled: true
+  provider: "runpod"
+  shutdown_after_job: true  # §55
+  retries:
+    max_per_scene: 2  # §75
+  gpu_selection:
+    strategy: "cheapest_sufficient"  # §58: never hardcode
+    criteria:
+      - vram
+      - model
+      - price_per_hour
+      - availability
+      - historical_time
+      - projected_cost
+  preferred_cloud: "SECURE"  # community is unreliable (B6 finding)
+  fallback_cloud: "COMMUNITY"
+  preferred_gpus:
+    i2v: "NVIDIA GeForce RTX 4090"
+    image_gen: "NVIDIA RTX A5000"
+    lora_training: "NVIDIA RTX A4000"
+  idle_protection:  # §56
+    timeout: true
+    watchdog: true
+    finally_cleanup: true
+    shutdown: true
+    leak_detection: true
+    orphan_check_on_startup: true
+
+# --- §61-67 BUDGET GUARD ---
+budget_guard:
+  check_before_each_job: true
+  formula: "projected_spend = current_spend + estimated_next_job"
+  rule: "proceed if projected_spend <= hard_limit; else WAITING_BUDGET_APPROVAL"
+  approval_required_for:
+    - budget_override
+    - final_publishing
+    - preproduction_plan
+  override_logging:
+    fields: [who, when, old_limit, new_limit, reason, episode]
+
+# --- §70-71 VÍDEO GENERATIVO ---
+generative_video:
+  enabled: true
+  provider: runpod
+  only_for_high_value_scenes: true  # §68: HIGH or CRITICAL
+  max_clips_per_episode: 5
+  max_seconds_per_episode: 30
+  preferred_clip_duration_seconds: 4
+  maximum_clip_duration_seconds: 8
+  cost_limit_per_clip_usd: 1.00
+  fallback_chain:  # §77
+    - runpod_video
+    - local_image_to_video
+    - local_parallax
+    - pan_zoom_fx
+  prefer_i2v: true  # §73: approved image → image-to-video, not text→video
+
+# --- §79-83 HARDWARE ---
+hardware:
+  profile: "LOW_VRAM_4GB"  # GTX 1050 Ti Max-Q
+  profiles:
+    LOW_VRAM_4GB:
+      cpu_offload: false  # B2 finding: offload is 4x slower
+      quantization: "fp16"
+      generative_video_local: restricted
+      animated_stills: preferred
+      lcm_lora: true  # B3 finding: 5.5x speedup
+      vae: "tiled_or_cpu_offload"  # B4: VAE to CPU for IP-Adapter
+    MID_VRAM_8GB:
+      cpu_offload: false
+      quantization: "fp16"
+      generative_video_local: experimental
+      animated_stills: preferred
+    STANDARD_12GB:
+      cpu_offload: false
+      quantization: "fp16"
+      generative_video_local: supported
+    PRO_16GB:
+      cpu_offload: false
+      quantization: "fp16"
+      generative_video_local: preferred
+    HIGH_VRAM_24GB:
+      cpu_offload: false
+      quantization: "fp16"
+      generative_video_local: preferred
+    ULTRA_32GB:
+      cpu_offload: false
+      quantization: "fp16"
+      generative_video_local: preferred
+  pytorch:
+    cuda_version: "cu118"  # B1 finding: cu126 fails on driver 528.79
+    version: "2.7.1+cu118"
+  encoder:
+    primary: "libx264"  # B0 finding: NVENC broken, QSV slower
+    preset: "veryfast"
+    crf: 20
+    nvenc: "broken"  # driver 528.79 < 610 required
+    qsv: "discarded"  # slower than CPU
+
+# --- §84 COMFYUI ---
+comfyui:
+  use_as_engine: true
+  provider: "comfy_cloud"
+  active_for_episode_1: false  # free tier blocks API execution (403)
+  host: "https://cloud.comfy.org"
+  headless_api: true  # /prompt endpoint for automation
+  workflows_versioned: true
+  workflows_parametrized: true
+  workflows_testable: true
+  text_to_image_is_final: false
+  recurring_characters_require_reference_images: true
+  recurring_characters_require_img2img: true
+  canonical_reference_reuse_required: true
+  identity_lock_fields: [face, age, hair, clothing, colors, body_proportions, accessories]
+  image_workflow: "workflows/comfy_cloud_character_img2img.json"
+  video_workflows:
+    primary: "workflows/comfy_cloud_wan_i2v.json"
+    fallback: "workflows/comfy_cloud_hunyuan_i2v.json"
+  video_models: [wan, hunyuan_video]
+  flags: "--lowvram --listen"
+
+# --- CHARACTER CONTINUITY / VISUAL QA (global production gate) ---
+character_continuity:
+  canonical_cards_required: true
+  episode_1_theme: "A Criação"
+  episode_1_biblical_scope:
+    - "Gênesis 1:1-31"
+    - "Gênesis 2:1-25"
+  canonical_characters_episode_1: [adao, eva]
+  god_visual_representation: "presença divina por luz, vento e transformações da natureza; nunca rosto, corpo, mãos ou silhueta humana"
+  no_humans_before_adam: true
+  adam_eve_unclothed: true
+  adam_eve_child_safe_framing: "planos médios ou distantes, vegetação e enquadramento cobrindo áreas íntimas, sem detalhes anatômicos e sem roupas"
+  same_reference_images_every_scene: true
+  seeds_are_auxiliary_only: true
+  block_text_only_final_generation: true
+
+visual_qa:
+  required_for_every_image: true
+  required_before_animation: true
+  minimum_score: 0.85
+  compare_against:
+    - exact_active_narration
+    - canonical_character_references
+    - fixed_identity_fields
+    - continuity_anchor
+    - child_safety
+  reject_on_any_identity_drift: true
+  require_image_count_timeline_audit: true
+
+timeline_sync:
+  source: "approved_audio_word_timestamps"
+  scene_boundary: "semantic_phrase_or_visible_action_change"
+  uniform_intervals_forbidden: true
+  image_changes_follow_spoken_phrase_duration: true
+  short_transition_seconds: 0.25
+  cinematic_motion: "gentle"
+
+approved_audio:
+  preserve_existing: true
+  overwrite_forbidden: true
+  voice: "pt-BR-ThalitaNeural"
+  episode_1_source: "C:/HermesStudio/episodes/EP8SOLPLAN/audio/narration.mp3"
+
+episode_1_image_generation:
+  provider: "openai-codex"
+  model: "gpt-image-2-medium"
+  method: "image-to-image"
+  text_only_final_forbidden: true
+  additional_character_references_supported: true
+  canonical_references:
+    adam: "assets/characters/creation/adam/face_v1.png"
+    eve: "assets/characters/creation/eve/face_v1.png"
+  visual_qa_model: "gemini-3.6-flash"
+
+# --- §85-87 STORAGE ---
+storage:
+  policy:
+    never_delete:
+      - character_bible
+      - script
+      - audio_master
+      - manifest
+      - final_video
+      - thumbnail
+      - metadata
+      - canonical_assets
+    can_clean:
+      - cache
+      - temporaries
+      - previews
+      - reproducible_intermediates
+  cache:
+    enabled: true
+    hash_fields: [model, prompt, reference, seed, parameters]
+
+# --- §93 PLAYLISTS ---
+youtube:
+  playlists:
+    - "Aventuras do Antigo Testamento"
+    - "Histórias de Jesus"
+    - "Heróis e Heroínas da Bíblia"
+    - "Milagres da Bíblia"
+    - "Lições de Fé e Coragem"
+  auto_select_playlist: true
+
+# --- §95-96 APPROVAL ---
+approval:
+  preproduction: true
+  budget_override: true
+  final_video: true
+  silence_is_not_approval: true  # §8
+publishing:
+  auto_publish_after_final_approval: false
+  approval_delivery_only: true
+  publication_requires_separate_explicit_instruction: true
+
+# --- §100 MÉTRICAS ---
+metrics:
+  track:
+    - average_cost_per_episode
+    - median_cost_per_episode
+    - p95_cost_per_episode
+    - average_runpod_seconds
+    - average_runpod_cost
+    - average_regenerations
+    - average_generation_time
+    - average_episode_duration
+
+# --- §108 PHASES ---
+phases:
+  - Phase 0: "Discovery + Hardware Audit + RunPod Feasibility"  # DONE
+  - Phase 1: "SDD (this document set)"  # IN PROGRESS
+  - Phase 2: "Project Skeleton"
+  - Phase 3: "State Machine"
+  - Phase 4: "Provider Abstractions"
+  - Phase 5: "Budget Guard"
+  - Phase 6: "Script / Biblical Research"
+  - Phase 7: "TTS"
+  - Phase 8: "Storyboard"
+  - Phase 9: "Character Bible"
+  - Phase 10: "Image Pipeline"
+  - Phase 11: "Visual QA"
+  - Phase 12: "Local Animation"
+  - Phase 13: "RunPod Integration"
+  - Phase 14: "Animation QA"
+  - Phase 15: "FFmpeg Assembly"
+  - Phase 16: "Audio Mastering"
+  - Phase 17: "Thumbnail"
+  - Phase 18: "Metadata"
+  - Phase 19: "Telegram HITL"
+  - Phase 20: "YouTube Integration"
+  - Phase 21: "End-to-End Pilot"
+  - Phase 22: "Performance Optimization"
+  - Phase 23: "Production Hardening"
+
+# --- BENCHMARK RESULTS (measured, not estimated) ---
+benchmark:
+  date: "2026-08-16"
+  pytorch: "2.7.1+cu118"
+  sd15_512_20steps: 38.8  # seconds
+  sd15_lcm_6steps: 7.1    # seconds — production default
+  sd15_lcm_4steps: 8.8
+  tts_thalita_rtf: 0.048  # 1.8s gen / 36.5s audio
+  ip_adapter_consistency: 6  # out of 10
+  ffmpeg_episode_4min: 420  # ~7 minutes
+  runpod_4090_community: 0.34  # $/hr
+  runpod_a5000_secure: 0.27   # $/hr
+  episode_cost_external: 0.35  # USD (projected)
+  episode_time_local: 12      # minutes (projected)

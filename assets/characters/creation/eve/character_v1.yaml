@@ -1,0 +1,26 @@
+schema_version: 1
+character_id: eve_creation_v1
+name: Eva
+episode_scope: "A Criação — Gênesis 1:27-31 e Gênesis 2:18-25"
+status: approved
+reference_images:
+  face: assets/characters/creation/eve/face_v1.png
+identity_lock:
+  age: 26
+  ethnicity: Oriente Médio antigo
+  skin: oliva quente
+  face: oval suave, expressão gentil e inocente
+  eyes: castanhos, grandes e amigáveis
+  hair: castanho-escuro, longo, espesso e ondulado abaixo da cintura
+  body: adulta, saudável, proporções naturais e delicadas
+  clothing: nenhuma roupa, nenhum tecido, nenhum calçado
+  accessories: nenhum
+child_safety:
+  framing: planos médios ou distantes
+  coverage: cabelo longo, folhas, flores, vinhas, troncos ou enquadramento cobrem áreas íntimas
+  forbidden: [detalhes anatômicos íntimos, erotização, poses sensuais]
+generation:
+  final_method: image-to-image
+  text_only_final_forbidden: true
+  same_reference_every_scene: true
+  seed_is_auxiliary_only: true

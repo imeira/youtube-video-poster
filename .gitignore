@@ -1,0 +1,59 @@
+# Secrets
+.env
+.env.local
+*.key
+*.pem
+credentials.json
+token.json
+oauth_*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+hermes-studio-venv/
+
+# Episode data (§85-87 — episodes OUTSIDE OneDrive)
+projects/episodes/
+
+# Model caches
+models/
+checkpoints/
+*.safetensors
+*.ckpt
+*.pth
+*.gguf
+*.bin
+
+# ComfyUI
+ComfyUI/
+ComfyUI-Manager/
+output/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Temp
+tmp/
+temp/
+*.tmp

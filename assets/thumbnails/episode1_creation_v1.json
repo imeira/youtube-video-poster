@@ -1,0 +1,9 @@
+{
+  "episode": "Episódio 1 — A Criação",
+  "title": "A CRIAÇÃO DO MUNDO",
+  "subtitle": "GÊNESIS 1–2",
+  "subtitle_separator_codepoint": "U+2013",
+  "status": "pending_human_approval",
+  "source_scene": "SC021",
+  "generator": "openai-codex/gpt-image-2-medium + deterministic subtitle typography"
+}

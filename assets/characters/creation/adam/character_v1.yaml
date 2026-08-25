@@ -1,0 +1,27 @@
+schema_version: 1
+character_id: adam_creation_v1
+name: Adão
+episode_scope: "A Criação — Gênesis 1:26-31 e Gênesis 2:4-25"
+status: approved
+reference_images:
+  face: assets/characters/creation/adam/face_v1.png
+identity_lock:
+  age: 28
+  ethnicity: Oriente Médio antigo
+  skin: oliva quente
+  face: oval masculino, expressão gentil e inocente
+  eyes: castanhos, grandes e amigáveis
+  hair: castanho-escuro, ondulado, até os ombros
+  beard: curta, escura e bem cuidada
+  body: adulto, saudável, atlético natural, sem musculatura exagerada
+  clothing: nenhuma roupa, nenhum tecido, nenhum calçado
+  accessories: nenhum
+child_safety:
+  framing: planos médios ou distantes
+  coverage: folhas, vinhas, flores, troncos ou enquadramento cobrem áreas íntimas
+  forbidden: [detalhes anatômicos íntimos, erotização, poses sensuais]
+generation:
+  final_method: image-to-image
+  text_only_final_forbidden: true
+  same_reference_every_scene: true
+  seed_is_auxiliary_only: true
