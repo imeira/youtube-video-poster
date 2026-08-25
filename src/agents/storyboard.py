@@ -13,7 +13,7 @@ import logging
 import os
 from pathlib import Path
 
-from src.agents.base import BaseAgent, AgentResult
+from src.agents.base import AgentResult, BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,6 @@ class StoryboardAgent(BaseAgent):
         if not sentence_timestamps:
             return AgentResult(success=False, error="No timestamps provided")
 
-        style = visual_style or self.STYLE_PREFIX
         scenes = []
         humans_created = False
 
@@ -55,9 +54,8 @@ class StoryboardAgent(BaseAgent):
         sol_plan_path = os.environ.get("STUDIO_SOL_PLAN_PATH", "")
         if sol_plan_path and Path(sol_plan_path).exists():
             try:
-                with open(sol_plan_path, encoding="utf-8") as f:
-                    sol_scenes = json.load(f).get("scenes", [])
-            except Exception as e:
+                sol_scenes = json.loads(Path(sol_plan_path).read_text(encoding="utf-8")).get("scenes", [])
+            except (OSError, json.JSONDecodeError, TypeError) as e:
                 logger.warning("Could not load GPT-5.6-SOL storyboard plan: %s", e)
         if sol_scenes and len(sol_scenes) != len(sentence_timestamps):
             logger.warning("SOL scenes (%d) != TTS timestamps (%d); using proportional alignment", len(sol_scenes), len(sentence_timestamps))
@@ -87,7 +85,13 @@ class StoryboardAgent(BaseAgent):
                     "primeira mulher", "casal",
                 )) and "não havia homem" not in sol_text and "nao havia homem" not in sol_text
                 sol_humans_allowed = human_terms_present or not any(item in pre_human_forbidden for item in sol_forbidden)
-                human_event = sol_humans_allowed and self._is_human_creation_event(sol_text)
+                declared_humans = any(
+                    str(name).lower() in {"adão", "adao", "adam", "eva", "eve"}
+                    for name in sol_scene.get("characters", [])
+                )
+                human_event = declared_humans or (
+                    sol_humans_allowed and self._is_human_creation_event(sol_text)
+                )
                 humans_allowed = humans_created or human_event
             else:
                 human_event = self._is_human_creation_event(text)
@@ -100,13 +104,17 @@ class StoryboardAgent(BaseAgent):
             # Only scenes with high movement would be RUNPOD (identified later)
             importance = self._assess_importance(text)
 
+            sol_characters = [str(name).lower() for name in sol_scene.get("characters", [])] if sol_scene else []
             scene = {
                 "scene_id": scene_id,
                 "narration": text,
                 "start": ts["start"],
                 "end": ts["end"],
                 "duration": ts["duration"],
-                "characters": self._extract_characters(text) if humans_allowed else (["deus"] if "deus" in text.lower() else []),
+                "characters": (
+                    (sol_characters or self._extract_characters(text))
+                    if humans_allowed else (["deus"] if "deus" in text.lower() else [])
+                ),
                 "forbidden_characters": [] if humans_allowed else ["human", "person", "child", "man", "woman", "Adam", "Eve"],
                 "humans_allowed": humans_allowed,
                 "creation_phase": "after_human_creation" if humans_allowed else "before_human_creation",
@@ -115,7 +123,7 @@ class StoryboardAgent(BaseAgent):
                 "action": text[:80],
                 "importance": importance,
                 "visual_strategy": "LOCAL_ANIMATED_STILL",
-                "references": [],
+                "references": list(sol_scene.get("references", [])) if sol_scene else [],
                 "camera": "slow_push_in",
                 "qa_status": "PENDING",
             }
@@ -137,8 +145,8 @@ class StoryboardAgent(BaseAgent):
         # Save storyboard
         if storyboard_dir:
             Path(storyboard_dir).mkdir(parents=True, exist_ok=True)
-            with open(Path(storyboard_dir) / "scenes.json", "w", encoding="utf-8") as f:
-                json.dump({"scenes": scenes}, f, indent=2, ensure_ascii=False)
+            payload = json.dumps({"scenes": scenes}, indent=2, ensure_ascii=False)
+            (Path(storyboard_dir) / "scenes.json").write_text(payload, encoding="utf-8")
 
         return AgentResult(
             success=True,
@@ -190,9 +198,8 @@ class StoryboardAgent(BaseAgent):
         characters = []
         known = ["Deus", "Davi", "Golias", "Jonas", "Daniel", "Noé", "Saul", "Adão", "Eva"]
         for name in known:
-            if name.lower() in text.lower():
-                if name not in characters:
-                    characters.append(name.lower())
+            if name.lower() in text.lower() and name.lower() not in characters:
+                characters.append(name.lower())
         return characters
 
     def _infer_location(self, text: str) -> str:
@@ -228,7 +235,7 @@ class StoryboardAgent(BaseAgent):
         generates random images.
         """
         from src.character_bible import build_character_prompt
-        from src.style_guide import build_full_prompt, BASE_STYLE
+        from src.style_guide import build_full_prompt
         
         narration = scene.get("narration", "")
         characters = scene.get("characters", [])
@@ -324,7 +331,7 @@ Visual description:"""
                 desc = result.strip().split('.')[0].strip()
                 if desc:
                     return desc
-            except Exception as e:
+            except (RuntimeError, ValueError, TimeoutError) as e:
                 logger.warning(f"LLM visual description failed, using fallback: {e}")
         
         # Fallback: simple keyword-based visual description
