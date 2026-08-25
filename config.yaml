@@ -35,11 +35,15 @@ budget:
     attention: [5.00, 6.00]
     blocked: [6.00, 999999.00]
 
+cost_estimates:
+  image_usd: 0.015
+  generative_video_second_usd: 0.10
+
 # --- §18-19 DURAÇÃO ---
 episode:
   typical_duration:
     min_minutes: 3
-    max_minutes: 5
+    max_minutes: 15
   categories:
     short: { min: 3, max: 5 }
     medium: { min: 6, max: 8 }
@@ -210,9 +214,11 @@ generative_video:
   enabled: true
   provider: runpod
   only_for_high_value_scenes: true  # §68: HIGH or CRITICAL
+  max_clips_per_episode: 5
   max_seconds_per_episode: 30
   preferred_clip_duration_seconds: 4
   maximum_clip_duration_seconds: 8
+  cost_limit_per_clip_usd: 1.00
   fallback_chain:  # §77
     - runpod_video
     - local_image_to_video

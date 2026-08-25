@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
+from src.agents.director import DirectorAgent
+from src.config.loader import GenerativeVideoConfig as StudioGenerativeVideoConfig
+from src.config.loader import get_config
 from src.providers.gpu.gpu_compute_provider import (
-    GPUComputeProvider,
+    GenerativeVideoConfig,
+    GPUJobRequest,
+    GPUSpec,
     LocalGPUProvider,
     RunPodGPUProvider,
-    GPUJobRequest,
-    GPUJobResult,
-    GPUJobStatus,
-    GPUSpec,
     SceneImportance,
-    GenerativeVideoConfig,
     get_gpu_provider,
 )
-from src.providers.gpu.visual_strategy import VisualStrategyEngine, VisualStrategy
+from src.providers.gpu.visual_strategy import VisualStrategyEngine
 from src.providers.video.motion_presets import (
-    MotionPreset,
-    MotionParams,
     PRESETS,
+    MotionPreset,
     get_preset,
     select_motion_for_scene,
 )
@@ -54,7 +55,6 @@ class TestLocalGPUProvider:
 
     def test_select_gpu_meets_requirements(self):
         provider = LocalGPUProvider()
-        spec = provider.get_gpu_spec()
         # Should select if vram >= 0 (always true for local)
         selected = provider.select_gpu(required_vram_gb=0)
         assert selected is not None
@@ -220,6 +220,29 @@ class TestVisualStrategyEngine:
         summary = engine.get_usage_summary()
         assert summary["generative_clips_used"] == 1
         assert summary["generative_seconds_used"] > 0
+
+    def test_director_builds_engine_from_central_limits(self):
+        studio_config = replace(
+            get_config(),
+            generative_video=StudioGenerativeVideoConfig(
+                max_clips_per_episode=3,
+                max_seconds_per_episode=18,
+                preferred_clip_duration_seconds=6,
+                maximum_clip_duration_seconds=7,
+                cost_limit_per_clip_usd=0.75,
+            ),
+        )
+        director = DirectorAgent(config=studio_config)
+        local = LocalGPUProvider()
+        cloud = RunPodGPUProvider(api_key="test_key")
+
+        engine = director._build_visual_strategy_engine(local, cloud)
+
+        assert engine.config.max_clips_per_episode == 3
+        assert engine.config.max_seconds_per_episode == 18
+        assert engine.config.preferred_clip_duration_seconds == 6
+        assert engine.config.maximum_clip_duration_seconds == 7
+        assert engine.config.cost_limit_per_clip_usd == 0.75
 
 
 class TestMotionPresets:

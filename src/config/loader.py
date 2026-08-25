@@ -13,7 +13,6 @@ from typing import Any
 
 import yaml
 
-
 # ── Dataclasses for each config section ───────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -26,9 +25,15 @@ class BudgetConfig:
 
 
 @dataclass(frozen=True)
+class CostEstimateConfig:
+    image_usd: float = 0.015
+    generative_video_second_usd: float = 0.10
+
+
+@dataclass(frozen=True)
 class EpisodeDurationConfig:
     min_minutes: int = 3
-    max_minutes: int = 5
+    max_minutes: int = 15
 
 
 @dataclass(frozen=True)
@@ -47,9 +52,11 @@ class GenerativeVideoConfig:
     enabled: bool = True
     provider: str = "runpod"
     only_for_high_value_scenes: bool = True
+    max_clips_per_episode: int = 5
     max_seconds_per_episode: int = 30
     preferred_clip_duration_seconds: int = 4
     maximum_clip_duration_seconds: int = 8
+    cost_limit_per_clip_usd: float = 1.0
     prefer_i2v: bool = True
 
 
@@ -82,6 +89,7 @@ class StudioConfig:
     default_language: str
     default_channel: str
     budget: BudgetConfig
+    cost_estimates: CostEstimateConfig
     episode_duration: EpisodeDurationConfig
     tts: TTSConfig
     generative_video: GenerativeVideoConfig
@@ -127,6 +135,7 @@ def load_config(config_path: str | Path | None = None) -> StudioConfig:
         raw = yaml.safe_load(f)
 
     budget_raw = raw.get("budget", {}).get("episode", {})
+    cost_raw = raw.get("cost_estimates", {})
     ep_raw = raw.get("episode", {}).get("typical_duration", {})
     tts_raw = raw.get("tts", {})
     gv_raw = raw.get("generative_video", {})
@@ -144,9 +153,13 @@ def load_config(config_path: str | Path | None = None) -> StudioConfig:
             hard_limit_usd=budget_raw.get("hard_limit_usd", 6.00),
             require_approval_above_limit=budget_raw.get("require_approval_above_limit", True),
         ),
+        cost_estimates=CostEstimateConfig(
+            image_usd=cost_raw.get("image_usd", 0.015),
+            generative_video_second_usd=cost_raw.get("generative_video_second_usd", 0.10),
+        ),
         episode_duration=EpisodeDurationConfig(
             min_minutes=ep_raw.get("min_minutes", 3),
-            max_minutes=ep_raw.get("max_minutes", 5),
+            max_minutes=ep_raw.get("max_minutes", 15),
         ),
         tts=TTSConfig(
             language=tts_raw.get("language", "pt-BR"),
@@ -161,9 +174,11 @@ def load_config(config_path: str | Path | None = None) -> StudioConfig:
             enabled=gv_raw.get("enabled", True),
             provider=gv_raw.get("provider", "runpod"),
             only_for_high_value_scenes=gv_raw.get("only_for_high_value_scenes", True),
+            max_clips_per_episode=gv_raw.get("max_clips_per_episode", 5),
             max_seconds_per_episode=gv_raw.get("max_seconds_per_episode", 30),
             preferred_clip_duration_seconds=gv_raw.get("preferred_clip_duration_seconds", 4),
             maximum_clip_duration_seconds=gv_raw.get("maximum_clip_duration_seconds", 8),
+            cost_limit_per_clip_usd=gv_raw.get("cost_limit_per_clip_usd", 1.0),
             prefer_i2v=gv_raw.get("prefer_i2v", True),
         ),
         runpod=RunPodConfig(

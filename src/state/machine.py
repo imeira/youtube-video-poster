@@ -9,8 +9,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -65,7 +65,11 @@ _TRANSITIONS: dict[EpisodeState, set[EpisodeState]] = {
     EpisodeState.REQUEST_RECEIVED: {EpisodeState.RESEARCHING, EpisodeState.CANCELLED},
     EpisodeState.RESEARCHING: {EpisodeState.PLANNING, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.PLANNING: {EpisodeState.WAITING_PLAN_APPROVAL, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
-    EpisodeState.WAITING_PLAN_APPROVAL: {EpisodeState.SCRIPTING, EpisodeState.CANCELLED},
+    EpisodeState.WAITING_PLAN_APPROVAL: {
+        EpisodeState.SCRIPTING,
+        EpisodeState.WAITING_BUDGET_APPROVAL,
+        EpisodeState.CANCELLED,
+    },
     EpisodeState.SCRIPTING: {EpisodeState.SCRIPT_QA, EpisodeState.GENERATING_AUDIO, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.SCRIPT_QA: {EpisodeState.CHARACTER_DESIGN, EpisodeState.SCRIPTING, EpisodeState.FAILED, EpisodeState.CANCELLED},
     EpisodeState.CHARACTER_DESIGN: {EpisodeState.STORYBOARDING, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
@@ -116,7 +120,7 @@ class StateHistoryEntry:
     def now(cls, state: EpisodeState, agent: str, note: str = "") -> StateHistoryEntry:
         return cls(
             state=state.value,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             agent=agent,
             note=note,
         )
@@ -160,7 +164,7 @@ class EpisodeStateStore:
     previous_state: EpisodeState | None = None
     state_history: list[dict[str, Any]] = field(default_factory=list)
     checkpoint: dict[str, Any] = field(default_factory=Checkpoint().asdict if hasattr(Checkpoint, 'asdict') else dict)
-    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     # in-memory only — not persisted
     _paused_from: EpisodeState | None = field(default=None, repr=False)
@@ -192,7 +196,7 @@ class EpisodeStateStore:
         if to_state == self.current_state:
             # Idempotent no-op — already in this state
             self.state_history.append(asdict(StateHistoryEntry.now(to_state, agent, note or "already in state")))
-            self.updated_at = datetime.now(timezone.utc).isoformat()
+            self.updated_at = datetime.now(UTC).isoformat()
             return
 
         if not self.can_transition_to(to_state):
@@ -213,7 +217,7 @@ class EpisodeStateStore:
         self.current_state = to_state
         entry = StateHistoryEntry.now(to_state, agent, note)
         self.state_history.append(asdict(entry))
-        self.updated_at = datetime.now(timezone.utc).isoformat()
+        self.updated_at = datetime.now(UTC).isoformat()
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
@@ -237,7 +241,7 @@ class EpisodeStateStore:
             previous_state=EpisodeState(data["previous_state"]) if data.get("previous_state") else None,
             state_history=data.get("state_history", []),
             checkpoint=data.get("checkpoint", {}),
-            updated_at=data.get("updated_at", datetime.now(timezone.utc).isoformat()),
+            updated_at=data.get("updated_at", datetime.now(UTC).isoformat()),
         )
         return store
 

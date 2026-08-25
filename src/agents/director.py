@@ -8,6 +8,8 @@ Responsibility: Coordinate all agents, manage state machine, enforce budget.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from typing import Any
 
@@ -32,6 +34,16 @@ from src.telegram.approval_gate import TelegramApprovalGate, format_decision_mes
 logger = logging.getLogger(__name__)
 
 
+def _read_json_file(path) -> dict:
+    with open(path, encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _write_json_file(path, data: dict) -> None:
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2, ensure_ascii=False)
+
+
 class DirectorAgent:
     """Central orchestrator — coordinates the full pipeline (§12).
 
@@ -44,9 +56,11 @@ class DirectorAgent:
         self,
         config: StudioConfig | None = None,
         model_router: CoreModelRouter | None = None,
+        approval_gate: TelegramApprovalGate | None = None,
     ):
         self.config = config or get_config()
         self.model_router = model_router or CoreModelRouter.profile_d()
+        self.approval_gate = approval_gate or TelegramApprovalGate()
         self.research = ResearchAgent()
         llm_script = self.model_router.provider_for("script", timeout=180)
         llm_storyboard = self.model_router.provider_for("storyboard", timeout=120)
@@ -152,6 +166,11 @@ class DirectorAgent:
         duration_planner = DurationPlannerAgent(
             budget_hard_limit=self.config.budget.hard_limit_usd,
             budget_target=self.config.budget.target_usd,
+            max_generative_clips=self.config.generative_video.max_clips_per_episode,
+            preferred_clip_duration_s=self.config.generative_video.preferred_clip_duration_seconds,
+            max_generative_seconds=self.config.generative_video.max_seconds_per_episode,
+            cost_per_generative_second=self.config.cost_estimates.generative_video_second_usd,
+            cost_per_image=self.config.cost_estimates.image_usd,
         )
         duration_plan = duration_planner.plan(theme, research_result.data)
         budget_check = duration_planner.check_budget(duration_plan)
@@ -163,11 +182,6 @@ class DirectorAgent:
         state.transition_to(EpisodeState.WAITING_PLAN_APPROVAL, agent=self.name, note="Pre-production plan ready")
         state.save(fs.paths.state_json)
 
-        # Save plan
-        import json
-        with open(fs.paths.plan_json, "w", encoding="utf-8") as f:
-            json.dump(plan, f, indent=2, ensure_ascii=False)
-
         # Save costs
         guard.ledger.save(fs.paths.costs_json)
 
@@ -178,23 +192,22 @@ class DirectorAgent:
         report_text = duration_plan.format_report(self.config.budget.hard_limit_usd)
         plan["report_text"] = report_text
 
-        if require_telegram_approval:
-            gate = TelegramApprovalGate()
-            if not budget_check["within_budget"]:
-                options = {
-                    alt["option"]: f"{alt['title']} — {alt['description']} (~${alt['estimated_cost']:.2f})"
-                    for alt in budget_check["alternatives"]
-                }
-                message = format_decision_message(
-                    episode_title=theme,
-                    stage="Pré-produção — orçamento",
-                    situation=f"Custo máximo estimado (${duration_plan.cost_max_usd:.2f}) excede "
-                              f"o limite configurado (${self.config.budget.hard_limit_usd:.2f}).",
-                    analysis=duration_plan.justification,
-                    options=options,
-                    recommendation=f"Opção {list(options.keys())[0]} recomendada.",
-                )
-                approval = await gate.request_approval(
+        if not budget_check["within_budget"]:
+            options = {
+                alt["option"]: f"{alt['title']} — {alt['description']} (~${alt['estimated_cost']:.2f})"
+                for alt in budget_check["alternatives"]
+            }
+            message = format_decision_message(
+                episode_title=theme,
+                stage="Pré-produção — orçamento",
+                situation=f"Custo máximo estimado (${duration_plan.cost_max_usd:.2f}) excede "
+                          f"o limite configurado (${self.config.budget.hard_limit_usd:.2f}).",
+                analysis=duration_plan.justification,
+                options=options,
+                recommendation=f"Opção {next(iter(options))} recomendada.",
+            )
+            if require_telegram_approval:
+                approval = await self.approval_gate.request_approval(
                     message, valid_responses=list(options.keys()) + ["CANCELAR"],
                 )
                 plan["budget_approval"] = {
@@ -206,11 +219,16 @@ class DirectorAgent:
                     state.transition_to(EpisodeState.PAUSED, agent=self.name,
                                          note=f"Budget approval not granted: {approval.reason}")
                     state.save(fs.paths.state_json)
+                    await asyncio.to_thread(_write_json_file, fs.paths.plan_json, plan)
                     return plan
             else:
-                # Even within budget, send the plan for visibility (§20) but
-                # don't block unless explicitly configured to require sign-off.
-                gate.send_message(f"📋 Plano de produção pronto:\n\n{report_text}")
+                self.approval_gate.send_message(message)
+        elif require_telegram_approval:
+            # Even within budget, send the plan for visibility (§20) but
+            # don't block unless explicitly configured to require sign-off.
+            self.approval_gate.send_message(f"📋 Plano de produção pronto:\n\n{report_text}")
+
+        await asyncio.to_thread(_write_json_file, fs.paths.plan_json, plan)
 
         return plan
 
@@ -230,6 +248,25 @@ class DirectorAgent:
         state = EpisodeStateStore.load(fs.paths.state_json)
 
         if approval_type == "plan":
+            plan = await asyncio.to_thread(_read_json_file, fs.paths.plan_json)
+            budget_check = plan.get("budget_check", {})
+            budget_approval = plan.get("budget_approval", {})
+            explicit_over_budget_approval = (
+                budget_approval.get("approved") is True
+                and budget_approval.get("response") == "D"
+            )
+            if not budget_check.get("within_budget", False) and not explicit_over_budget_approval:
+                state.transition_to(
+                    EpisodeState.WAITING_BUDGET_APPROVAL,
+                    agent=self.name,
+                    note="Production blocked until explicit over-budget approval",
+                )
+                state.save(fs.paths.state_json)
+                return {
+                    "status": "waiting_budget_approval",
+                    "state": state.current_state.value,
+                    "alternatives": budget_check.get("alternatives", []),
+                }
             return await self._run_production(episode_id, fs, state)
         elif approval_type == "budget":
             # Budget override approved — continue cloud generation
@@ -244,6 +281,23 @@ class DirectorAgent:
 
         return {"error": f"Unknown approval type: {approval_type}"}
 
+    def _build_visual_strategy_engine(self, local_provider, cloud_provider):
+        """Build the visual router from the central episode limits."""
+        from src.providers.gpu.gpu_compute_provider import GenerativeVideoConfig
+        from src.providers.gpu.visual_strategy import VisualStrategyEngine
+
+        configured = self.config.generative_video
+        engine_config = GenerativeVideoConfig(
+            enabled=configured.enabled and cloud_provider.available(),
+            provider=configured.provider,
+            max_clips_per_episode=configured.max_clips_per_episode,
+            max_seconds_per_episode=configured.max_seconds_per_episode,
+            preferred_clip_duration_seconds=configured.preferred_clip_duration_seconds,
+            maximum_clip_duration_seconds=configured.maximum_clip_duration_seconds,
+            cost_limit_per_clip_usd=configured.cost_limit_per_clip_usd,
+        )
+        return VisualStrategyEngine(engine_config, local_provider, cloud_provider)
+
     async def _run_production(
         self,
         episode_id: str,
@@ -255,11 +309,10 @@ class DirectorAgent:
         §98: Steps 6-14.
         """
         # Load plan and research
-        import json
-        with open(fs.paths.plan_json, encoding="utf-8") as f:
-            plan = json.load(f)
-        with open(fs.paths.research_dir / "sources.json", encoding="utf-8") as f:
-            research_data = json.load(f)
+        plan, research_data = await asyncio.gather(
+            asyncio.to_thread(_read_json_file, fs.paths.plan_json),
+            asyncio.to_thread(_read_json_file, fs.paths.research_dir / "sources.json"),
+        )
 
         # Step 6: Script (§24)
         state.transition_to(EpisodeState.SCRIPTING, agent=self.script.name)
@@ -310,15 +363,6 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
             return {"error": storyboard_result.error}
 
-        # Save complete production data
-        production = {
-            "narration": narration,
-            "word_count": script_result.data["word_count"],
-            "audio_duration_s": audio_result.data["duration_s"],
-            "scene_count": storyboard_result.data["scene_count"],
-            "scenes": storyboard_result.data["scenes"],
-        }
-
         state.transition_to(EpisodeState.GENERATING_IMAGES, agent=self.name, note="production ready for image gen")
         state.save(fs.paths.state_json)
 
@@ -337,22 +381,14 @@ class DirectorAgent:
 
         # Step 11: Visual Strategy — decide local vs generative video (§63-67)
         from src.providers.gpu.gpu_compute_provider import (
-            GenerativeVideoConfig,
             LocalGPUProvider,
             RunPodGPUProvider,
             SceneImportance,
         )
-        from src.providers.gpu.visual_strategy import VisualStrategyEngine
 
         local_gpu = LocalGPUProvider()
         cloud_gpu = RunPodGPUProvider()
-        gen_video_config = GenerativeVideoConfig(
-            enabled=cloud_gpu.available(),
-            max_seconds_per_episode=30,
-            preferred_clip_duration_seconds=4,
-            maximum_clip_duration_seconds=8,
-        )
-        strategy_engine = VisualStrategyEngine(gen_video_config, local_gpu, cloud_gpu)
+        strategy_engine = self._build_visual_strategy_engine(local_gpu, cloud_gpu)
 
         # Classify each scene and mark strategy
         for scene in scenes:
@@ -406,10 +442,7 @@ class DirectorAgent:
 
         # Step 12b: Finishing — captions, thumbnail, metadata (§31, §91, §92-93)
         # These are non-fatal: a failure here logs but does not fail the episode.
-        theme = fs.paths.request_json  # placeholder, real theme loaded below
-        import json as _json
-        with open(fs.paths.request_json, encoding="utf-8") as f:
-            _req = _json.load(f)
+        _req = await asyncio.to_thread(_read_json_file, fs.paths.request_json)
         theme_str = _req.get("theme", "")
         language = _req.get("language", "pt-BR")
 
@@ -504,7 +537,7 @@ class DirectorAgent:
             if orphans:
                 logger.warning(f"Cleaned up {len(orphans)} orphaned pods: {orphans}")
             return orphans
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — cleanup must never crash the director
             logger.error(f"Orphan cleanup failed: {e}")
             return []
 

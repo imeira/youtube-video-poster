@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from src.agents.duration_planner import DurationPlannerAgent, DurationPlan
+from src.agents.duration_planner import DurationPlannerAgent
+from src.config.loader import load_config
 
 
 @pytest.fixture
@@ -101,6 +104,16 @@ class TestDurationClassification:
 
 
 class TestDurationPlanContent:
+    def test_global_config_uses_adaptive_fifteen_minute_ceiling(self):
+        config = load_config(Path(__file__).resolve().parents[2] / "config.yaml")
+
+        assert config.episode_duration.min_minutes == 3
+        assert config.episode_duration.max_minutes == 15
+        assert config.generative_video.max_clips_per_episode == 5
+        assert config.generative_video.cost_limit_per_clip_usd == 1.0
+        assert config.cost_estimates.image_usd == 0.015
+        assert config.cost_estimates.generative_video_second_usd == 0.10
+
     def test_word_count_scales_with_duration(self, short_story_research, long_story_research):
         planner = DurationPlannerAgent()
         short_plan = planner.plan("Curta", short_story_research)
@@ -122,6 +135,25 @@ class TestDurationPlanContent:
         planner = DurationPlannerAgent()
         plan = planner.plan("Vida de Jesus", special_story_research)
         assert plan.runpod_candidate_scenes <= 5
+
+    def test_generative_limits_are_configurable_and_reported(self, special_story_research):
+        planner = DurationPlannerAgent(
+            max_generative_clips=3,
+            preferred_clip_duration_s=6.0,
+            max_generative_seconds=12.0,
+            cost_per_generative_second=0.10,
+            cost_per_image=0.015,
+        )
+
+        plan = planner.plan("Vida de Jesus", special_story_research)
+
+        assert plan.runpod_candidate_scenes == 2
+        assert plan.generative_clip_duration_seconds == 6.0
+        assert plan.runpod_clip_seconds_total == 12.0
+        expected_image_cost = plan.image_count * 0.015
+        assert plan.cost_min_usd == pytest.approx(expected_image_cost)
+        assert plan.cost_likely_usd == pytest.approx(expected_image_cost + 1.20)
+        assert "2 clipes de até 6s" in plan.format_report()
 
     def test_cost_min_is_zero_when_all_local_possible(self, short_story_research):
         planner = DurationPlannerAgent()

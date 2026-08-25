@@ -18,11 +18,10 @@ Duration categories (initial guidance, not rigid rules):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import os
 import re
-
+from dataclasses import dataclass, field
 
 # Narration pace: children's narration ~130 words/minute (slower than adult ~150 wpm)
 WORDS_PER_MINUTE = 130
@@ -50,6 +49,7 @@ class DurationPlan:
     image_count: int
     local_animated_scenes: int
     runpod_candidate_scenes: int
+    generative_clip_duration_seconds: float
     runpod_clip_seconds_total: float
     cost_min_usd: float
     cost_likely_usd: float
@@ -70,6 +70,7 @@ class DurationPlan:
             "image_count": self.image_count,
             "local_animated_scenes": self.local_animated_scenes,
             "runpod_candidate_scenes": self.runpod_candidate_scenes,
+            "generative_clip_duration_seconds": self.generative_clip_duration_seconds,
             "runpod_clip_seconds_total": self.runpod_clip_seconds_total,
             "cost_min_usd": round(self.cost_min_usd, 2),
             "cost_likely_usd": round(self.cost_likely_usd, 2),
@@ -105,6 +106,7 @@ class DurationPlan:
 🖼️ Imagens: {self.image_count}
    - Animadas localmente (FFmpeg): {self.local_animated_scenes}
    - Candidatas a vídeo generativo (RunPod): {self.runpod_candidate_scenes}
+   - Plano: {self.runpod_candidate_scenes} clipes de até {self.generative_clip_duration_seconds:g}s
 🎥 Vídeo generativo total: {self.runpod_clip_seconds_total:.0f}s
 
 💰 CUSTO
@@ -130,9 +132,23 @@ class DurationPlannerAgent:
     BEFORE any expensive resource generation, using only research data.
     """
 
-    def __init__(self, budget_hard_limit: float = 6.00, budget_target: float = 4.00):
+    def __init__(
+        self,
+        budget_hard_limit: float = 6.00,
+        budget_target: float = 4.00,
+        max_generative_clips: int = 5,
+        preferred_clip_duration_s: float = DEFAULT_RUNPOD_CLIP_DURATION_S,
+        max_generative_seconds: float = 30.0,
+        cost_per_generative_second: float = COST_PER_RUNPOD_CLIP_SECOND,
+        cost_per_image: float = COST_PER_LOCAL_IMAGE,
+    ):
         self.budget_hard_limit = budget_hard_limit
         self.budget_target = budget_target
+        self.max_generative_clips = max(0, max_generative_clips)
+        self.preferred_clip_duration_s = max(0.1, preferred_clip_duration_s)
+        self.max_generative_seconds = max(0.0, max_generative_seconds)
+        self.cost_per_generative_second = max(0.0, cost_per_generative_second)
+        self.cost_per_image = max(0.0, cost_per_image)
 
     def plan(self, theme: str, research_data: dict) -> DurationPlan:
         """Build a DurationPlan from research data (§18-21).
@@ -158,7 +174,11 @@ class DurationPlannerAgent:
                 with open(sol_plan_path, encoding="utf-8") as f:
                     sol_plan = json.load(f)
                 summary = sol_plan.get("complexity_summary", {})
-                m = re.search(r"(\d+)\s*min", str(summary.get("recommended_duration", "")), re.I)
+                m = re.search(
+                    r"(\d+)\s*min",
+                    str(summary.get("recommended_duration", "")),
+                    re.IGNORECASE,
+                )
                 if m:
                     duration_s = float(int(m.group(1)) * 60)
                     dur_min = max(180.0, duration_s - 60.0)
@@ -166,7 +186,7 @@ class DurationPlannerAgent:
                 sol_scene_count = len(sol_plan.get("scenes", []))
                 if sol_scene_count:
                     tier = "sol_adaptive"
-            except Exception as e:
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
                 # Planning must remain available if an external plan is malformed.
                 pass
 
@@ -181,13 +201,18 @@ class DurationPlannerAgent:
         # RunPod candidates: high-impact scenes only (§46-48) — CRITICAL importance events
         # Heuristic: ~10-15% of scenes for tier short/medium, up to 3-5 clips max per plan
         runpod_pct = {"short": 0.10, "medium": 0.12, "long": 0.10, "special": 0.08}.get(tier, 0.10)
-        runpod_scenes = min(5, max(0, round(scene_count * runpod_pct)))
+        seconds_limited_clips = int(self.max_generative_seconds // self.preferred_clip_duration_s)
+        runpod_scenes = min(
+            self.max_generative_clips,
+            seconds_limited_clips,
+            max(0, round(scene_count * runpod_pct)),
+        )
         local_scenes = scene_count - runpod_scenes
-        runpod_seconds = runpod_scenes * DEFAULT_RUNPOD_CLIP_DURATION_S
+        runpod_seconds = runpod_scenes * self.preferred_clip_duration_s
 
         # Cost estimate (§3, §21)
-        cost_min = 0.0  # if all local (no RunPod scenes)
-        cost_likely = runpod_seconds * COST_PER_RUNPOD_CLIP_SECOND
+        cost_min = image_count * self.cost_per_image
+        cost_likely = cost_min + runpod_seconds * self.cost_per_generative_second
         cost_max = cost_likely * 1.6  # buffer for retries/re-generation (§21 pattern)
 
         justification = self._build_justification(tier, n_events, duration_s)
@@ -203,6 +228,7 @@ class DurationPlannerAgent:
             image_count=image_count,
             local_animated_scenes=local_scenes,
             runpod_candidate_scenes=runpod_scenes,
+            generative_clip_duration_seconds=self.preferred_clip_duration_s,
             runpod_clip_seconds_total=runpod_seconds,
             cost_min_usd=cost_min,
             cost_likely_usd=cost_likely,
@@ -270,7 +296,12 @@ class DurationPlannerAgent:
         if not within_budget:
             # Alternative A: reduce RunPod clips
             reduced_runpod = max(0, plan.runpod_candidate_scenes - 2)
-            reduced_cost = reduced_runpod * DEFAULT_RUNPOD_CLIP_DURATION_S * COST_PER_RUNPOD_CLIP_SECOND * 1.6
+            reduced_cost = (
+                reduced_runpod
+                * self.preferred_clip_duration_s
+                * self.cost_per_generative_second
+                * 1.6
+            )
             alternatives.append({
                 "option": "A",
                 "title": "Reduzir clipes generativos",

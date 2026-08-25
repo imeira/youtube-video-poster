@@ -1,6 +1,6 @@
 # Memória de produção aprovada
 
-**Versão:** 1.0  
+**Versão:** 1.1
 **Episódio de referência:** Episódio 1 — A Criação  
 **Status:** padrão obrigatório para episódios futuros
 
@@ -16,6 +16,27 @@
 - Adaptar a linguagem para crianças sem inventar acontecimentos como se fossem fatos bíblicos.
 - Classificar fatos, inferências e adições criativas.
 - A duração não é fixa: deve ser recomendada pela complexidade da passagem, sem cortes artificiais ou preenchimento.
+
+### Duração adaptativa e planejamento obrigatório
+
+- Faixa normal global: **3 a 15 minutos**. Três a cinco minutos é somente a categoria curta, nunca um teto geral.
+- Recomendações iniciais, sem rigidez:
+  - curta e objetiva: 3–5 min;
+  - média: 6–8 min;
+  - longa, com vários acontecimentos: 8–12 min;
+  - especial ou extensa: 12–15 min.
+- A decisão considera acontecimentos indispensáveis, compreensão de crianças de 6–10 anos, ritmo, retenção e orçamento.
+- Nunca reduzir a passagem para caber numa duração curta nem inserir repetições para atingir uma duração maior.
+- Antes de qualquer recurso pago, apresentar: duração e justificativa; palavras; cenas e imagens; quantidade, duração e segundos totais dos clipes generativos; custos mínimo, provável e máximo; referências bíblicas.
+- Para episódios curtos, usar como ponto de partida — não como quota rígida — 390–750 palavras, 20–35 imagens e 3–5 clipes decisivos de 4–6 s.
+- Os preços unitários são estimativas configuráveis e devem ser revistos quando o fornecedor mudar; o orçamento do episódio é o limite vinculante.
+
+### Estratégia visual e orçamento
+
+- Imagens consistentes animadas localmente com FFmpeg ou Remotion são a estratégia principal.
+- Vídeo generativo é reservado a cenas HIGH/CRITICAL em que movimento real gere ganho narrativo; quantidade, duração, segundos totais e custo por clipe têm limites configuráveis.
+- Se o custo máximo estimado ultrapassar o limite, enviar pelo Telegram as alternativas: reduzir clipes, usar 100% animação local, dividir a história ou aumentar o orçamento.
+- Aprovar o plano narrativo não aprova estouro de orçamento. Somente autorização humana explícita da opção de aumento permite ultrapassar o limite; silêncio e escolhas de replanejamento não autorizam cobrança.
 
 ## 3. Voz e áudio
 
