@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import ClassVar
 
-from src.agents.base import BaseAgent, AgentResult
+from src.agents.base import AgentResult, BaseAgent
 
 
 class ResearchAgent(BaseAgent):
@@ -21,7 +22,7 @@ class ResearchAgent(BaseAgent):
     """
 
     # Known biblical stories and their references (pre-seeded for common stories)
-    KNOWN_STORIES = {
+    KNOWN_STORIES: ClassVar[dict[str, dict]] = {
         "criação do mundo": {
             "references": [{"book": "Gênesis", "chapter": 1, "verses": "1-31"}, {"book": "Gênesis", "chapter": 2, "verses": "1-25"}],
             "summary": "Deus cria os céus, a terra, a vida e o Jardim do Éden; depois forma Adão e Eva e os coloca no jardim.",
@@ -47,6 +48,48 @@ class ResearchAgent(BaseAgent):
                 "humans_allowed_after": "criação do ser humano em Gênesis 1:26-27; formação de Adão em Gênesis 2:7",
                 "pre_human_rule": "Nenhum humano, rosto humano, criança ou silhueta humana antes de Gênesis 1:26",
                 "adam_eve_rule": "Adão e Eva sem roupas; enquadramento infantil não sexualizado com folhas e distância cobrindo áreas íntimas; não desenhar roupas",
+            },
+        },
+        "adão e eva no jardim do éden": {
+            "references": [
+                {"book": "Gênesis", "chapter": 2, "verses": "4-25"},
+                {"book": "Gênesis", "chapter": 3, "verses": "1-24"},
+            ],
+            "summary": (
+                "Deus forma Adão, cria o Jardim do Éden e depois Eva. Eles vivem em paz com a "
+                "criação até desobedecerem à única orientação de Deus; consequências chegam com "
+                "carinho (cuidado, promessa de redenção) e eles aprendem sobre escolhas, perdão "
+                "e o amor constante de Deus."
+            ),
+            "key_facts": [
+                "Deus formou Adão do pó da terra e soprou nele o fôlego de vida",
+                "Deus plantou um jardim no Éden e colocou Adão lá para cuidar dele",
+                "Deus orientou que Adão não comesse do fruto de uma árvore específica",
+                "Adão deu nomes aos animais, mas nenhum era companhia como ele",
+                "Deus fez Eva a partir de Adão e a apresentou a ele",
+                "A serpente enganou Eva dizendo que nada de ruim aconteceria",
+                "Eva comeu o fruto proibido e ofereceu a Adão, que também comeu",
+                "Adão e Eva sentiram vergonha e esconderam-se de Deus",
+                "Deus perguntou o que haviam feito e cada um explicou",
+                "Deus anunciou consequências para a desobediência, mas também cuidado",
+                "Deus fez roupas para Adão e Eva antes de enviá-los do jardim",
+                "Anjos com espada flamejante guardaram o caminho da árvore da vida",
+            ],
+            "visual_constraints": {
+                "adam_eve_rule": (
+                    "Adão e Eva sem roupas apenas antes da queda; enquadramento infantil não "
+                    "sexualizado com vegetação, cabelos longos, distância e objetos em primeiro "
+                    "plano cobrindo áreas íntimas; após a queda usam as roupas feitas por Deus"
+                ),
+                "serpent_rule": (
+                    "Serpente astuta mas não assustadora; estilo cartoon suave, sem horror"
+                ),
+                "god_visual_representation": (
+                    "Presença divina por luz, vento e som suaves; nunca rosto ou corpo humano"
+                ),
+                "expulsion_tone": (
+                    "Saída do jardim tratada com esperança e carinho; sem choro dramático ou medo intenso"
+                ),
             },
         },
         "davi e golias": {
@@ -141,7 +184,7 @@ class ResearchAgent(BaseAgent):
             # Save to research dir
             if research_dir:
                 Path(research_dir).mkdir(parents=True, exist_ok=True)
-                with open(Path(research_dir) / "sources.json", "w", encoding="utf-8") as f:
+                with open(Path(research_dir) / "sources.json", "w", encoding="utf-8") as f:  # noqa: ASYNC230 — small JSON write in stdlib-only agent
                     json.dump(classified, f, indent=2, ensure_ascii=False)
 
             return AgentResult(
