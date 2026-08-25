@@ -90,8 +90,8 @@ def img2img(prompt: str, source: Path, seed: int, denoise: float) -> tuple[bytes
     return runpod(wf, [{"name": name, "image": encoded}])
 
 
-def gemini_qa(image_path: Path, scene: dict, reference: Path | None) -> dict:
-    parts = [{"text": (
+def openrouter_qa(image_path: Path, scene: dict, reference: Path | None) -> dict:
+    content = [{"type": "text", "text": (
         "Responda somente JSON válido com approved (bool), score (0 a 1) e problems (lista). "
         "Audite este quadro de animação bíblica infantil contra a frase e ação exatas. "
         f"NARRAÇÃO: {scene['narration']}\nAÇÃO VISUAL: {scene.get('visual_action_pt','')}\n"
@@ -100,21 +100,26 @@ def gemini_qa(image_path: Path, scene: dict, reference: Path | None) -> dict:
         "estilo animação 3D infantil, anatomia, mãos, ausência de texto e objetos modernos. "
         "Quando Adão/Eva aparecerem, compare rigorosamente rosto, idade, cabelo e proporções com a referência; "
         "eles não podem usar roupa ou tecido e áreas íntimas devem estar cobertas apenas por vegetação/enquadramento infantil."
-    )}, {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_path.read_bytes()).decode("ascii")}}]
+    )}, {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(image_path.read_bytes()).decode("ascii")}}]
     if reference:
-        parts.extend([
-            {"text": "IMAGEM DE REFERÊNCIA CANÔNICA OBRIGATÓRIA:"},
-            {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(reference.read_bytes()).decode("ascii")}},
+        content.extend([
+            {"type": "text", "text": "IMAGEM DE REFERÊNCIA CANÔNICA OBRIGATÓRIA:"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(reference.read_bytes()).decode("ascii")}},
         ])
     payload = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+        "model": "stealth/ox-alpha",
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
     }
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=" + env_key("GEMINI_API_KEY")
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": "Bearer " + env_key("OPENROUTER_API_KEY"), "Content-Type": "application/json"},
+    )
     with urllib.request.urlopen(req, timeout=120) as response:
         data = json.loads(response.read())
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    text = data["choices"][0]["message"]["content"]
     return json.loads(text)
 
 
@@ -174,12 +179,12 @@ def main() -> int:
             if reference:
                 data, meta = img2img(prompt, reference, seed, 0.62 if attempt == 1 else 0.52)
             else:
-                draft_data, draft_meta = t2i(prompt, seed)
+                draft_data, _draft_meta = t2i(prompt, seed)
                 draft_path = images_dir / f"{scene_id}_draft.png"
                 draft_path.write_bytes(draft_data)
                 data, meta = img2img(prompt, draft_path, seed + 1, 0.28)
             final_path.write_bytes(data)
-            qa = gemini_qa(final_path, scene, reference)
+            qa = openrouter_qa(final_path, scene, reference)
             qa.update({
                 "scene_id": scene_id,
                 "narration": scene["narration"],

@@ -1,8 +1,8 @@
-"""OpenRouter LLM Provider — cheap-model-first text generation (§54).
+"""OpenRouter LLM Provider — free availability fallback (§54).
 
 Uses OpenRouter's OpenAI-compatible chat completions endpoint.
-Model routing policy: cheapest model that reliably completes the task.
-For metadata/titles (simple tasks), uses a flash/cheap model.
+Model routing policy: Codex-first, with the most-used free OpenRouter model as
+an availability fallback.
 
 Reads OPENROUTER_API_KEY from ~/AppData/Local/hermes/.env.
 Never blocks the pipeline: callers should fall back to templates on failure.
@@ -20,6 +20,7 @@ from src.providers.base import LLMProvider
 logger = logging.getLogger(__name__)
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_FREE_FALLBACK_MODEL = "stealth/ox-alpha"
 
 
 def _read_api_key() -> str | None:
@@ -39,11 +40,16 @@ def _read_api_key() -> str | None:
 class OpenRouterLLMProvider(LLMProvider):
     """LLM text generation via OpenRouter (§54).
 
-    Default model is a cheap flash model per the model-routing policy —
-    metadata/title/tag generation are simple tasks and must not use premium models.
+    The default is the current most-used free model in OpenRouter's public
+    rankings. It is an availability fallback, not a replacement for Codex core work.
     """
 
-    def __init__(self, model: str = "deepseek/deepseek-chat", api_key: str | None = None, timeout: int = 120):
+    def __init__(
+        self,
+        model: str = DEFAULT_FREE_FALLBACK_MODEL,
+        api_key: str | None = None,
+        timeout: int = 120,
+    ):
         self.model = model
         self.api_key = api_key or _read_api_key()
         self.timeout = timeout
@@ -52,8 +58,7 @@ class OpenRouterLLMProvider(LLMProvider):
         return bool(self.api_key)
 
     def estimate_cost(self, **params) -> float:
-        # Flash models are ~$0.10-0.30 per 1M tokens; a metadata call is tiny.
-        return 0.01
+        return 0.0
 
     async def complete(
         self,
@@ -89,7 +94,7 @@ class OpenRouterLLMProvider(LLMProvider):
                 "X-Title": "Hermes Animation Studio",
             },
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: ASYNC210 — stdlib-only provider
             data = json.loads(resp.read())
         return data["choices"][0]["message"]["content"].strip()
 
