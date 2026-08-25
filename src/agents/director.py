@@ -52,6 +52,16 @@ class DirectorAgent:
     §8: Silence is NOT approval for HITL gates.
     """
 
+    @staticmethod
+    def thumbnail_copy(theme: str) -> tuple[str, str]:
+        """Return concise mobile title and biblical subtitle for a theme."""
+        title, separator, passage = theme.partition(" — ")
+        if "adão e eva" in title.lower():
+            title = "ADÃO E EVA"
+        else:
+            title = title.upper()
+        return title, passage.upper() if separator else ""
+
     def __init__(
         self,
         config: StudioConfig | None = None,
@@ -457,12 +467,13 @@ class DirectorAgent:
         captions_files = captions_result.data.get("files", {}) if captions_result.success else {}
 
         # Thumbnail (§91)
-        headline = research_data.get("story", theme_str)
+        headline, subtitle = self.thumbnail_copy(theme_str)
         thumb_result = await self.thumbnail.run(
             episode_id=episode_id,
             images=image_result.data["generated"],
             scenes=scenes,
             headline=headline,
+            subtitle=subtitle,
             thumbnails_dir=str(fs.paths.thumbnails_dir),
         )
         thumbnail_path = thumb_result.data.get("thumbnail_path", "") if thumb_result.success else ""
