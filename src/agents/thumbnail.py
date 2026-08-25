@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from src.agents.base import BaseAgent, AgentResult
+from src.agents.base import AgentResult, BaseAgent
 
 # YouTube recommended thumbnail size
 THUMB_W, THUMB_H = 1280, 720
@@ -38,6 +38,7 @@ class ThumbnailAgent(BaseAgent):
         images: list[dict] | None = None,
         scenes: list[dict] | None = None,
         headline: str = "",
+        subtitle: str = "",
         thumbnails_dir: str = "",
         **kwargs,
     ) -> AgentResult:
@@ -61,8 +62,8 @@ class ThumbnailAgent(BaseAgent):
             thumb_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            out_path = self._compose(hero_path, headline, thumb_dir)
-        except Exception as e:
+            out_path = self._compose(hero_path, headline, subtitle, thumb_dir)
+        except (OSError, ValueError) as e:
             return AgentResult(success=False, error=f"Thumbnail composition failed: {e}")
 
         return AgentResult(
@@ -71,6 +72,7 @@ class ThumbnailAgent(BaseAgent):
                 "thumbnail_path": out_path,
                 "hero_scene_image": hero_path,
                 "headline": headline,
+                "subtitle": subtitle,
                 "size": f"{THUMB_W}x{THUMB_H}",
             },
             next_state="",
@@ -104,8 +106,14 @@ class ThumbnailAgent(BaseAgent):
                 return ImageFont.truetype(fp, size)
         return ImageFont.load_default()
 
-    def _compose(self, hero_path: str, headline: str, thumb_dir: Path | None) -> str:
-        from PIL import Image, ImageDraw, ImageFilter
+    def _compose(
+        self,
+        hero_path: str,
+        headline: str,
+        subtitle: str,
+        thumb_dir: Path | None,
+    ) -> str:
+        from PIL import Image, ImageDraw
 
         # Load and cover-crop hero to 1280x720
         hero = Image.open(hero_path).convert("RGB")
@@ -130,12 +138,21 @@ class ThumbnailAgent(BaseAgent):
             text_w = bbox[2] - bbox[0]
             text_h = bbox[3] - bbox[1]
             x = (THUMB_W - text_w) // 2
-            y = THUMB_H - text_h - 90
+            subtitle_h = 0
+            subtitle_font = None
+            subtitle_w = 0
+            if subtitle:
+                subtitle = subtitle.upper().strip()
+                subtitle_font = self._load_font(50)
+                subtitle_bbox = draw.textbbox((0, 0), subtitle, font=subtitle_font)
+                subtitle_w = subtitle_bbox[2] - subtitle_bbox[0]
+                subtitle_h = subtitle_bbox[3] - subtitle_bbox[1]
+            y = THUMB_H - text_h - subtitle_h - 105
 
             # Darkened band behind text for contrast (§91 mobile readability)
             band_pad = 30
             draw.rectangle(
-                [0, y - band_pad, THUMB_W, y + text_h + band_pad],
+                [0, y - band_pad, THUMB_W, THUMB_H],
                 fill=(0, 0, 0, 140),
             )
 
@@ -145,6 +162,17 @@ class ThumbnailAgent(BaseAgent):
                 for dy in range(-outline, outline + 1, 2):
                     draw.text((x + dx, y + dy), headline, font=font, fill=(0, 0, 0, 255))
             draw.text((x, y), headline, font=font, fill=(255, 221, 51, 255))  # warm yellow
+            if subtitle and subtitle_font:
+                subtitle_x = (THUMB_W - subtitle_w) // 2
+                subtitle_y = y + text_h + 22
+                draw.text(
+                    (subtitle_x, subtitle_y),
+                    subtitle,
+                    font=subtitle_font,
+                    fill=(255, 255, 255, 255),
+                    stroke_width=4,
+                    stroke_fill=(0, 0, 0, 255),
+                )
 
         out_path = str((thumb_dir / "thumbnail.png") if thumb_dir else Path(hero_path).parent / "thumbnail.png")
         hero.save(out_path, "PNG")

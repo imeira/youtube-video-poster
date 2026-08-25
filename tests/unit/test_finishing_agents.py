@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -10,9 +9,8 @@ from pathlib import Path
 import pytest
 
 from src.agents.captions import CaptionsAgent
-from src.agents.thumbnail import ThumbnailAgent
 from src.agents.metadata import MetadataAgent
-
+from src.agents.thumbnail import ThumbnailAgent
 
 # ── Captions Agent (§31-32) ──────────────────────────────────────────────────
 
@@ -80,7 +78,7 @@ def test_images(tmp_path: Path):
         img = tmp_path / f"SC{i:03d}.png"
         subprocess.run(
             ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
-             "-i", f"color=c=blue:s=512x512:d=1", "-frames:v", "1", str(img)],
+             "-i", "color=c=blue:s=512x512:d=1", "-frames:v", "1", str(img)],
             check=True, timeout=15,
         )
         images.append({"scene_id": f"SC{i:03d}", "image_path": str(img)})
@@ -109,6 +107,23 @@ class TestThumbnailAgent:
         from PIL import Image
         img = Image.open(result.data["thumbnail_path"])
         assert img.size == (1280, 720)
+
+    @pytest.mark.asyncio
+    async def test_generates_required_title_and_subtitle(self, test_images, tmp_path: Path):
+        agent = ThumbnailAgent()
+        result = await agent.run(
+            episode_id="EP2",
+            images=test_images,
+            scenes=[{"scene_id": "SC001", "importance": "CRITICAL", "characters": ["adão", "eva"]}],
+            headline="ADÃO E EVA",
+            subtitle="GÊNESIS 2–3",
+            thumbnails_dir=str(tmp_path),
+        )
+
+        assert result.success
+        assert result.data["headline"] == "ADÃO E EVA"
+        assert result.data["subtitle"] == "GÊNESIS 2–3"
+        assert Path(result.data["thumbnail_path"]).stat().st_size > 10_000
 
     @pytest.mark.asyncio
     async def test_selects_critical_scene_as_hero(self, test_images, tmp_path: Path):
