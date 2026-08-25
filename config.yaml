@@ -342,7 +342,7 @@ episode_1_image_generation:
   canonical_references:
     adam: "assets/characters/creation/adam/face_v1.png"
     eve: "assets/characters/creation/eve/face_v1.png"
-  visual_qa_model: "gemini-3.6-flash"
+  visual_qa_model: "stealth/ox-alpha"
 
 # --- §85-87 STORAGE ---
 storage:
