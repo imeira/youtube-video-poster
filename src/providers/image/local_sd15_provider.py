@@ -13,11 +13,9 @@ IMPORTANT: Must set PYTHONPATH="" to avoid Hermes venv contamination (B1).
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import os
 import time
-import logging
-from typing import Any
 
 # Fix cuDNN crash on Pascal (B1: cudnnGetLibConfig symbol missing in cu118)
 # MUST be set before any torch.cuda operation
@@ -58,6 +56,26 @@ class LocalSD15Provider(ImageProvider):
 
     DEFAULT_CHECKPOINT = "nitrosocke/mo-di-diffusion"
 
+    @staticmethod
+    def _configure_ip_adapter(pipe, torch_module) -> None:
+        """Configure IP-Adapter in an order compatible with sliced attention."""
+        pipe.vae.to("cpu").to(torch_module.float32)
+        original_decode = pipe.vae.decode
+
+        def patched_decode(z, return_dict=False, generator=None):
+            z = z.to("cpu").to(torch_module.float32)
+            return original_decode(z, return_dict=return_dict, generator=generator)
+
+        pipe.vae.decode = patched_decode
+        pipe.load_ip_adapter(
+            "h94/IP-Adapter",
+            subfolder="models",
+            weight_name="ip-adapter_sd15.bin",
+        )
+        # Do not enable attention slicing here: Diffusers replaces the
+        # IPAdapterAttnProcessor instances and then receives tuple-valued
+        # encoder states that SlicedAttnProcessor cannot handle.
+
     def __init__(self, mode: str = "lcm", checkpoint: str = ""):
         self.mode = mode
         self.checkpoint = checkpoint or self.DEFAULT_CHECKPOINT
@@ -91,7 +109,7 @@ class LocalSD15Provider(ImageProvider):
             return
 
         import torch
-        from diffusers import StableDiffusionPipeline, LCMScheduler
+        from diffusers import LCMScheduler, StableDiffusionPipeline
 
         # Fix for cuDNN crash on Pascal (B1: cudnnGetLibConfig symbol missing)
         torch.backends.cudnn.benchmark = True
@@ -114,19 +132,7 @@ class LocalSD15Provider(ImageProvider):
         elif self.mode == "ip_adapter":
             # B4: IP-Adapter for character consistency
             # VAE must be on CPU to avoid OOM with IP-Adapter
-            self._pipe.vae.to("cpu").to(torch.float32)
-            # Monkey-patch VAE decode for dtype safety
-            original_decode = self._pipe.vae.decode
-            def patched_decode(z, return_dict=False, generator=None):
-                z = z.to("cpu").to(torch.float32)
-                return original_decode(z, return_dict=return_dict, generator=generator)
-            self._pipe.vae.decode = patched_decode
-
-            self._pipe.load_ip_adapter(
-                "h94/IP-Adapter",
-                subfolder="models",
-                weight_name="ip-adapter_sd15.bin",
-            )
+            self._configure_ip_adapter(self._pipe, torch)
             logger.info("IP-Adapter loaded (VAE on CPU, ~65s/image)")
 
         self._loaded_mode = self.mode
@@ -227,7 +233,7 @@ class LocalSD15Provider(ImageProvider):
         except torch.cuda.OutOfMemoryError as e:
             logger.error(f"OOM generating image: {e}")
             return ImageResult(success=False, error=f"OOM: {e}")
-        except Exception as e:
+        except (RuntimeError, ValueError, OSError) as e:
             logger.error(f"Image generation failed: {e}")
             return ImageResult(success=False, error=str(e))
 

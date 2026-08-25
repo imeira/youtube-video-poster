@@ -15,7 +15,7 @@ async def test_sol_scene_characters_and_canonical_references_are_preserved(tmp_p
         "scenes": [{
             "scene_id": "SC001",
             "narration_pt": "O casal caminhava junto entre as árvores do jardim.",
-            "visual_prompt_en": "Canonical Adam and Eve walking together in Eden",
+            "visual_prompt_en": "High-quality stylized 3D children's animation, canonical Adam and Eve walking together in Eden",
             "characters": ["adão", "eva"],
             "references": [
                 "assets/characters/creation/adam/face_v1.png",
@@ -44,3 +44,6 @@ async def test_sol_scene_characters_and_canonical_references_are_preserved(tmp_p
     assert scene["characters"] == ["adão", "eva"]
     assert scene["references"] == plan["scenes"][0]["references"]
     assert scene["source_model"] == "gpt-5.6-sol"
+    assert "3d render" not in scene["negative_prompt"].lower()
+    assert "exposed intimate areas" in scene["negative_prompt"].lower()
+    assert "unclothed" not in scene["animation_prompt"].lower()

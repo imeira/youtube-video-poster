@@ -13,6 +13,8 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
+from PIL import Image
+
 from src.agents.base import AgentResult, BaseAgent
 from src.providers.image.local_sd15_provider import LocalSD15Provider
 
@@ -70,25 +72,19 @@ class ImageGenAgent(BaseAgent):
         missing = [str(path) for path in paths if not path.is_file()]
         if missing:
             return None, f"Canonical reference missing: {', '.join(missing)}"
-        if len(paths) == 1:
-            return [str(paths[0])], None
+        return [str(path) for path in paths], None
 
-        if images_dir is None:
-            images_dir = Path.cwd()
-        refs_dir = images_dir / "_references"
-        refs_dir.mkdir(parents=True, exist_ok=True)
-        composite = refs_dir / "adam_eve_canonical_reference.png"
-        if not composite.exists():
-            from PIL import Image, ImageOps
-
-            opened = [Image.open(path).convert("RGB") for path in paths]
-            side = max(max(image.size) for image in opened)
-            tiles = [ImageOps.fit(image, (side, side)) for image in opened]
-            sheet = Image.new("RGB", (side * len(tiles), side), "white")
-            for index, tile in enumerate(tiles):
-                sheet.paste(tile, (index * side, 0))
-            sheet.save(composite, "PNG")
-        return [str(composite)], None
+    @staticmethod
+    def _valid_existing_image(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        try:
+            with Image.open(path) as image:
+                image.verify()
+            with Image.open(path) as image:
+                return image.width > 0 and image.height > 0
+        except (OSError, ValueError):
+            return False
 
     async def run(
         self,
@@ -121,6 +117,17 @@ class ImageGenAgent(BaseAgent):
 
         for scene in scenes:
             scene_id = scene["scene_id"]
+            existing = images_dir_path / f"{scene_id}.png" if images_dir_path else None
+            if existing and self._valid_existing_image(existing):
+                generated.append({
+                    "scene_id": scene_id,
+                    "image_path": str(existing),
+                    "seed": 0,
+                    "generation_time": 0.0,
+                    "reused": True,
+                })
+                logger.info("  %s: reused valid existing image", scene_id)
+                continue
             prompt = scene.get("image_prompt", "")
             negative = scene.get("negative_prompt", "")
             seed = seed_base + hash(scene_id) % 10000
@@ -132,15 +139,24 @@ class ImageGenAgent(BaseAgent):
                 failed.append({"scene_id": scene_id, "error": reference_error})
                 logger.warning("  %s: FAILED - %s", scene_id, reference_error)
                 continue
-            selected_mode = "ip_adapter" if references else self.mode
+            if references:
+                error = (
+                    "Canonical character scene requires an external reference-grounded image; "
+                    "local IP-Adapter is disabled after visual QA failure"
+                )
+                failed.append({"scene_id": scene_id, "error": error})
+                logger.warning("  %s: FAILED - %s", scene_id, error)
+                continue
+            selected_mode = self.mode
             provider = self._get_provider(selected_mode)
+            width, height = 1024, 576
 
             logger.info(f"Generating image for {scene_id} (seed={seed})...")
             result = await provider.generate(
                 prompt=prompt,
                 negative_prompt=negative,
-                width=1024,
-                height=576,
+                width=width,
+                height=height,
                 reference_images=references,
                 seed=seed,
             )
@@ -166,7 +182,7 @@ class ImageGenAgent(BaseAgent):
                 failed.append({"scene_id": scene_id, "error": result.error})
                 logger.warning(f"  {scene_id}: FAILED - {result.error}")
 
-        success = len(generated) > 0
+        success = not failed and len(generated) == len(scenes)
         return AgentResult(
             success=success,
             data={

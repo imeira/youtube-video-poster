@@ -137,7 +137,7 @@ class StoryboardAgent(BaseAgent):
                 scene["source_model"] = "gpt-5.6-sol"
             else:
                 scene["image_prompt"] = await self._build_image_prompt_async(scene)
-            scene["negative_prompt"] = self._build_negative_prompt()
+            scene["negative_prompt"] = self._build_negative_prompt(sol_scene)
             scene["animation_prompt"] = self._build_animation_prompt(scene)
             
             scenes.append(scene)
@@ -176,7 +176,7 @@ class StoryboardAgent(BaseAgent):
         if not scene.get("humans_allowed"):
             return base + ", animate only light, water, sky, plants, stars, birds, or animals; no humans"
         if any(c in scene.get("characters", []) for c in ("adão", "eva")):
-            return base + ", subtle leaf movement and gentle breathing; keep Adam and Eve unclothed and non-sexual"
+            return base + ", subtle leaf movement and gentle breathing; preserve established child-safe modest coverage or garments"
         return base
 
     def _assess_importance(self, text: str) -> str:
@@ -417,7 +417,14 @@ Visual description:"""
         )
         return prompts["prompt"]
     
-    def _build_negative_prompt(self) -> str:
+    def _build_negative_prompt(self, sol_scene: dict | None = None) -> str:
         """Get the negative prompt from style guide."""
+        if sol_scene and "3d" in str(sol_scene.get("visual_prompt_en", "")).lower():
+            return (
+                "photorealistic, realistic skin, scary, violent, dark horror, adult themes, "
+                "weapon violence, blood, gore, low quality, blurry, distorted, deformed faces, "
+                "extra limbs, duplicate people, watermark, text, signature, ugly, creepy, "
+                "explicit nudity, exposed intimate areas, sexualized pose, anatomical detail"
+            )
         from src.style_guide import NEGATIVE_PROMPT
         return NEGATIVE_PROMPT

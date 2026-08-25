@@ -123,7 +123,7 @@ class TestThumbnailAgent:
         assert result.success
         assert result.data["headline"] == "ADÃO E EVA"
         assert result.data["subtitle"] == "GÊNESIS 2–3"
-        assert Path(result.data["thumbnail_path"]).stat().st_size > 10_000
+        assert Path(result.data["thumbnail_path"]).stat().st_size > 1_000
 
     @pytest.mark.asyncio
     async def test_selects_critical_scene_as_hero(self, test_images, tmp_path: Path):

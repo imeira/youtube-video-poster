@@ -30,6 +30,13 @@ class FakeProvider:
         )
 
 
+class FailingProvider(FakeProvider):
+    async def generate(self, **kwargs):
+        if "second" in kwargs["prompt"]:
+            return SimpleNamespace(success=False, error="synthetic failure")
+        return await super().generate(**kwargs)
+
+
 @pytest.fixture
 def canonical_assets(tmp_path, monkeypatch):
     root = tmp_path / "characters" / "creation"
@@ -42,7 +49,7 @@ def canonical_assets(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_adam_and_eve_scene_uses_composite_ip_adapter_reference(tmp_path, canonical_assets):
+async def test_adam_and_eve_scene_requires_external_reference_grounded_image(tmp_path, canonical_assets):
     calls: list[dict] = []
     agent = ImageGenAgent(provider_factory=lambda mode: FakeProvider(mode, calls))
     scenes = [{
@@ -54,12 +61,10 @@ async def test_adam_and_eve_scene_uses_composite_ip_adapter_reference(tmp_path, 
 
     result = await agent.run("EP2", scenes=scenes, images_dir=str(tmp_path / "images"))
 
-    assert result.success is True
-    assert calls[0]["mode"] == "ip_adapter"
-    refs = calls[0]["reference_images"]
-    assert len(refs) == 1
-    assert Path(refs[0]).exists()
-    assert "adam_eve" in Path(refs[0]).name
+    assert result.success is False
+    assert result.data["total_failed"] == 1
+    assert "external reference-grounded image" in result.data["failed"][0]["error"]
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -77,6 +82,7 @@ async def test_non_character_scene_stays_on_fast_local_lcm(tmp_path, canonical_a
 
     assert result.success is True
     assert calls[0]["mode"] == "lcm"
+    assert (calls[0]["width"], calls[0]["height"]) == (1024, 576)
     assert calls[0]["reference_images"] is None
 
 
@@ -96,5 +102,42 @@ async def test_missing_canonical_identity_fails_character_scene(tmp_path, monkey
 
     assert result.success is False
     assert result.data["total_failed"] == 1
-    assert "canonical reference" in result.data["failed"][0]["error"].lower()
+    assert "Canonical reference missing" in result.data["failed"][0]["error"]
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_partial_generation_is_not_reported_as_success(tmp_path, canonical_assets):
+    calls: list[dict] = []
+    agent = ImageGenAgent(provider_factory=lambda mode: FailingProvider(mode, calls))
+    scenes = [
+        {"scene_id": "SC001", "characters": [], "image_prompt": "first", "negative_prompt": ""},
+        {"scene_id": "SC002", "characters": [], "image_prompt": "second", "negative_prompt": ""},
+    ]
+
+    result = await agent.run("EP2", scenes=scenes, images_dir=str(tmp_path / "images"))
+
+    assert result.success is False
+    assert result.data["total_generated"] == 1
+    assert result.data["total_failed"] == 1
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_valid_existing_scene_is_reused_on_resume(tmp_path, canonical_assets):
+    calls: list[dict] = []
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    Image.new("RGB", (1024, 576), "green").save(image_dir / "SC001.png")
+    agent = ImageGenAgent(provider_factory=lambda mode: FakeProvider(mode, calls))
+    scenes = [
+        {"scene_id": "SC001", "characters": [], "image_prompt": "first", "negative_prompt": ""},
+        {"scene_id": "SC002", "characters": [], "image_prompt": "second", "negative_prompt": ""},
+    ]
+
+    result = await agent.run("EP2", scenes=scenes, images_dir=str(image_dir))
+
+    assert result.success is True
+    assert len(calls) == 1
+    reused = next(item for item in result.data["generated"] if item["scene_id"] == "SC001")
+    assert reused["reused"] is True
