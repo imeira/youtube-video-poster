@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -21,7 +22,8 @@ class EdgeTTSProvider(TTSProvider):
     """Free TTS using Microsoft Edge's online neural voices.
 
     Voice: pt-BR-ThalitaNeural (confirmed in B5)
-    Provides SentenceBoundary timestamps for real narration alignment (§32).
+    Requests WordBoundary events and derives sentence windows from those exact
+    word timings for real narration alignment (§32).
     Falls back to Azure Speech if edge-tts is unavailable (§28 azure_fallback).
     """
 
@@ -65,38 +67,79 @@ class EdgeTTSProvider(TTSProvider):
         audio_path = output_dir / "narration.mp3"
         t_start = time.time()
 
-        communicate = self._edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-        sentence_timestamps: list[dict] = []
+        communicate = self._edge_tts.Communicate(
+            text,
+            voice,
+            rate=rate,
+            pitch=pitch,
+            boundary="WordBoundary",
+        )
+        word_timestamps: list[dict] = []
 
         with open(audio_path, "wb") as audio_file:
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
                     audio_file.write(chunk["data"])
-                elif chunk["type"] == "SentenceBoundary":
+                elif chunk["type"] == "WordBoundary":
                     # offset and duration are in 100ns units (10^-7 seconds)
                     offset_s = chunk["offset"] / 10_000_000
                     duration_s = chunk["duration"] / 10_000_000
-                    sentence_timestamps.append({
+                    word_timestamps.append({
                         "start": round(offset_s, 3),
                         "end": round(offset_s + duration_s, 3),
-                        "duration": round(duration_s, 3),
-                        "text": chunk["text"],
+                        "word": chunk["text"],
                     })
 
         gen_time = time.time() - t_start
 
         # Get audio duration via ffprobe
         duration = self._get_duration(str(audio_path))
+        sentence_timestamps = self._derive_sentence_timestamps(text, word_timestamps)
 
         return TTSResult(
             success=True,
             audio_path=str(audio_path),
             duration_seconds=duration,
             sentence_timestamps=sentence_timestamps,
+            word_timestamps=word_timestamps,
             cost=0.0,
             generation_time=gen_time,
             metadata={"voice": voice, "rate": rate, "pitch": pitch, "rtf": gen_time / duration if duration > 0 else 0},
         )
+
+    @staticmethod
+    def _derive_sentence_timestamps(text: str, word_timestamps: list[dict]) -> list[dict]:
+        """Map narration sentences onto exact Edge WordBoundary windows."""
+        sentences = [
+            part.strip()
+            for part in re.split(r"(?<=[.!?])\s+", text.strip())
+            if part.strip()
+        ]
+        if not sentences or not word_timestamps:
+            return []
+
+        sentence_timestamps = []
+        word_index = 0
+        for sentence_index, sentence in enumerate(sentences):
+            expected_words = len(
+                re.findall(r"\b[\wÀ-ÿ]+(?:[-'][\wÀ-ÿ]+)*\b", sentence)
+            )
+            if sentence_index == len(sentences) - 1:
+                sentence_words = word_timestamps[word_index:]
+            else:
+                sentence_words = word_timestamps[word_index:word_index + expected_words]
+            if not sentence_words:
+                continue
+            start = sentence_words[0]["start"]
+            end = sentence_words[-1]["end"]
+            sentence_timestamps.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "duration": round(end - start, 3),
+                "text": sentence,
+            })
+            word_index += len(sentence_words)
+        return sentence_timestamps
 
     def _get_duration(self, audio_path: str) -> float:
         """Get audio duration in seconds using ffprobe."""

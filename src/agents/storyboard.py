@@ -34,6 +34,7 @@ class StoryboardAgent(BaseAgent):
         episode_id: str,
         narration: str = "",
         sentence_timestamps: list[dict] | None = None,
+        audio_duration_s: float = 0.0,
         storyboard_dir: str = "",
         visual_style: str = "",
         **kwargs,
@@ -63,6 +64,16 @@ class StoryboardAgent(BaseAgent):
         for i, ts in enumerate(sentence_timestamps):
             scene_id = f"SC{i+1:03d}"
             text = ts["text"]
+            timeline_start = 0.0 if i == 0 and audio_duration_s > 0 else float(ts["start"])
+            if audio_duration_s > 0:
+                timeline_end = (
+                    float(sentence_timestamps[i + 1]["start"])
+                    if i + 1 < len(sentence_timestamps)
+                    else float(audio_duration_s)
+                )
+            else:
+                timeline_end = float(ts["end"])
+            timeline_duration = timeline_end - timeline_start
 
             sol_scene = None
             if sol_scenes:
@@ -108,9 +119,9 @@ class StoryboardAgent(BaseAgent):
             scene = {
                 "scene_id": scene_id,
                 "narration": text,
-                "start": ts["start"],
-                "end": ts["end"],
-                "duration": ts["duration"],
+                "start": timeline_start,
+                "end": timeline_end,
+                "duration": timeline_duration,
                 "characters": (
                     (sol_characters or self._extract_characters(text))
                     if humans_allowed else (["deus"] if "deus" in text.lower() else [])

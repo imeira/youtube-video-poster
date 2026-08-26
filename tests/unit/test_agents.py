@@ -94,6 +94,27 @@ class TestStoryboardAgent:
     """§33-34: Semantic scene division with timestamps."""
 
     @pytest.mark.asyncio
+    async def test_scene_windows_cover_audio_gaps_and_trailing_silence(self, tmp_path: Path):
+        agent = StoryboardAgent()
+        timestamps = [
+            {"start": 0.1, "end": 2.0, "duration": 1.9, "text": "Primeira frase."},
+            {"start": 2.5, "end": 4.5, "duration": 2.0, "text": "Segunda frase."},
+        ]
+
+        result = await agent.run(
+            episode_id="TEST_TIMELINE",
+            narration="Primeira frase. Segunda frase.",
+            sentence_timestamps=timestamps,
+            audio_duration_s=5.0,
+            storyboard_dir=str(tmp_path),
+        )
+
+        assert [(scene["start"], scene["end"], scene["duration"]) for scene in result.data["scenes"]] == [
+            (0.0, 2.5, 2.5),
+            (2.5, 5.0, 2.5),
+        ]
+
+    @pytest.mark.asyncio
     async def test_create_scenes(self, tmp_path: Path):
         """Should create scenes from timestamps."""
         agent = StoryboardAgent()
