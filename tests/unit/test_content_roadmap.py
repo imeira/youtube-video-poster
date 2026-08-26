@@ -100,6 +100,10 @@ class TestSensitiveThemes:
         _, ep3 = find_episode("Aventuras do Antigo Testamento", 3)
         assert ep3.theme in SENSITIVE_THEMES
 
+    def test_noah_flood_marked_sensitive(self):
+        _, ep4 = find_episode("Aventuras do Antigo Testamento", 4)
+        assert ep4.theme in SENSITIVE_THEMES
+
 
 class TestPrompt:
     def test_prompt_contains_playlist_and_theme_fields(self):

@@ -383,6 +383,7 @@ SERIES: tuple[tuple[str, int, int], ...] = (
 SENSITIVE_THEMES: frozenset[str] = frozenset({
     "Adão e Eva no Jardim do Éden",
     "Caim e Abel: aprendendo a controlar a raiva",
+    "Noé e a grande arca",
     "A fuga da família de Jesus para o Egito",
     "A última ceia",
     "Jesus ora no Getsêmani",
