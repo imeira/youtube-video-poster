@@ -390,7 +390,7 @@ SENSITIVE_THEMES: frozenset[str] = frozenset({
     "A ressurreição de Jesus",
 })
 
-EPISODES_PUBLISHED = 1  # EP1 "A criação do mundo" already produced/approved.
+EPISODES_PUBLISHED = 3  # EP1–EP3 are published and publicly verified.
 
 
 class ContentPlanError(ValueError):

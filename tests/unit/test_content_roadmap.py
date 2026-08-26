@@ -56,7 +56,11 @@ class TestNextEpisode:
         assert episode.theme == "A criação do mundo"
 
     def test_default_published_count_reflects_channel_state(self):
-        assert EPISODES_PUBLISHED == 1
+        assert EPISODES_PUBLISHED == 3
+
+    def test_default_next_episode_is_noah(self):
+        _, episode = next_episode()
+        assert episode.theme == "Noé e a grande arca"
 
     def test_exhausted_roadmap_raises(self):
         with pytest.raises(ContentPlanError):
