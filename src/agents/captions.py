@@ -149,7 +149,7 @@ class CaptionsAgent(BaseAgent):
         words = text.split()
         line1, line2 = "", ""
         for w in words:
-            if len(line1) + len(w) + 1 <= self.MAX_LINE_CHARS or not line1:
+            if not line2 and (len(line1) + len(w) + 1 <= self.MAX_LINE_CHARS or not line1):
                 line1 = f"{line1} {w}".strip()
             else:
                 line2 = f"{line2} {w}".strip()

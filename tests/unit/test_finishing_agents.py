@@ -15,6 +15,14 @@ from src.agents.thumbnail import ThumbnailAgent
 # ── Captions Agent (§31-32) ──────────────────────────────────────────────────
 
 class TestCaptionsAgent:
+    def test_wrap_preserves_word_order_after_second_line_starts(self):
+        agent = CaptionsAgent()
+        text = "cultivar o solo Uma névoa suave subia da terra regando o chão preparado para uma"
+
+        wrapped = agent._wrap(text)
+
+        assert wrapped.replace("\n", " ") == text
+
     @pytest.mark.asyncio
     async def test_generates_srt_vtt_transcript(self, tmp_path: Path):
         agent = CaptionsAgent()

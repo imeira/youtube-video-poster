@@ -46,13 +46,15 @@ class AudioAgent(BaseAgent):
         if not result.success:
             return AgentResult(success=False, error=f"TTS failed: {result.error}")
 
-        # Word-level alignment with faster-whisper
-        word_timestamps = []
-        try:
-            word_timestamps = await tts.word_align(result.audio_path, language="pt")
-        except Exception as e:
-            # Word alignment is a refinement — sentence timestamps are sufficient
-            pass
+        # Edge WordBoundary is authoritative. Whisper is only a fallback for
+        # providers or edge-tts versions that return no direct word events.
+        word_timestamps = result.word_timestamps
+        if not word_timestamps:
+            try:
+                word_timestamps = await tts.word_align(result.audio_path, language="pt")
+            except Exception:
+                # Sentence timestamps remain a valid fallback.
+                pass
 
         # Copy audio to episode dir if specified
         audio_path = result.audio_path
