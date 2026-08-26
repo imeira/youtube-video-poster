@@ -39,6 +39,7 @@ class ThumbnailAgent(BaseAgent):
         scenes: list[dict] | None = None,
         headline: str = "",
         subtitle: str = "",
+        book_subtitle: str = "",
         thumbnails_dir: str = "",
         **kwargs,
     ) -> AgentResult:
@@ -62,7 +63,7 @@ class ThumbnailAgent(BaseAgent):
             thumb_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            out_path = self._compose(hero_path, headline, subtitle, thumb_dir)
+            out_path = self._compose(hero_path, headline, subtitle, book_subtitle, thumb_dir)
         except (OSError, ValueError) as e:
             return AgentResult(success=False, error=f"Thumbnail composition failed: {e}")
 
@@ -73,6 +74,7 @@ class ThumbnailAgent(BaseAgent):
                 "hero_scene_image": hero_path,
                 "headline": headline,
                 "subtitle": subtitle,
+                "book_subtitle": book_subtitle,
                 "size": f"{THUMB_W}x{THUMB_H}",
             },
             next_state="",
@@ -111,6 +113,7 @@ class ThumbnailAgent(BaseAgent):
         hero_path: str,
         headline: str,
         subtitle: str,
+        book_subtitle: str,
         thumb_dir: Path | None,
     ) -> str:
         from PIL import Image, ImageDraw
@@ -147,7 +150,16 @@ class ThumbnailAgent(BaseAgent):
                 subtitle_bbox = draw.textbbox((0, 0), subtitle, font=subtitle_font)
                 subtitle_w = subtitle_bbox[2] - subtitle_bbox[0]
                 subtitle_h = subtitle_bbox[3] - subtitle_bbox[1]
-            y = THUMB_H - text_h - subtitle_h - 105
+            book_h = 0
+            book_font = None
+            book_w = 0
+            if book_subtitle:
+                book_subtitle = book_subtitle.upper().strip()
+                book_font = self._load_font(38)
+                book_bbox = draw.textbbox((0, 0), book_subtitle, font=book_font)
+                book_w = book_bbox[2] - book_bbox[0]
+                book_h = book_bbox[3] - book_bbox[1]
+            y = THUMB_H - text_h - subtitle_h - book_h - 135
 
             # Darkened band behind text for contrast (§91 mobile readability)
             band_pad = 30
@@ -173,6 +185,17 @@ class ThumbnailAgent(BaseAgent):
                     stroke_width=4,
                     stroke_fill=(0, 0, 0, 255),
                 )
+                if book_subtitle and book_font:
+                    book_x = (THUMB_W - book_w) // 2
+                    book_y = subtitle_y + subtitle_h + 14
+                    draw.text(
+                        (book_x, book_y),
+                        book_subtitle,
+                        font=book_font,
+                        fill=(255, 221, 51, 255),
+                        stroke_width=3,
+                        stroke_fill=(0, 0, 0, 255),
+                    )
 
         out_path = str((thumb_dir / "thumbnail.png") if thumb_dir else Path(hero_path).parent / "thumbnail.png")
         hero.save(out_path, "PNG")
