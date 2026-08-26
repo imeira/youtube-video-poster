@@ -1,0 +1,38 @@
+schema_version: 1
+character_id: cain_genesis_v1
+name: Caim
+episode_scope: "Caim e Abel — Gênesis 4:1-16"
+status: candidate_pending_episode_approval
+textual_certainty:
+  age: "não informada no texto; retratado como adulto jovem por segurança editorial"
+  appearance: "não informada no texto; identidade visual é dramatização respeitosa"
+reference_images:
+  face: assets/characters/genesis/cain/face_v1.png
+identity_lock:
+  portrayed_age: 24
+  ethnicity: Oriente Médio antigo
+  skin: oliva quente
+  face: oval angular suave, maçãs do rosto discretas, expressão intensa mas não ameaçadora
+  eyes: castanhos escuros, grandes e expressivos
+  hair: castanho-escuro, curto, ondulado e espesso
+  beard: cheia, escura e bem aparada, de comprimento curto a médio
+  body: adulto jovem, forte pelo trabalho no campo, proporções naturais
+  clothing: túnica terrosa ferrugem, mangas curtas, cinto simples de couro e sandálias
+  palette: [ferrugem, marrom-terra, ocre]
+  props: ferramentas agrícolas simples e cesta de frutos, nunca armas
+relationship_lock:
+  role: irmão mais velho de Abel
+  visual_distinction: cabelo mais escuro e curto, túnica ferrugem, postura de agricultor
+child_safety:
+  forbidden: [arma, ataque, sangue, ferimento, cadáver, horror, expressão demoníaca]
+  anger_depiction: emoção por rosto e postura, nunca agressão física
+  death_scene_presence: proibida
+  divine_depiction: apenas luz, vento, folhas e nuvens; nunca corpo humano
+continuity:
+  same_wardrobe_every_scene: true
+  never_swap_with_abel: true
+generation:
+  final_method: image-to-image
+  text_only_final_forbidden: true
+  same_reference_every_scene: true
+  seed_is_auxiliary_only: true

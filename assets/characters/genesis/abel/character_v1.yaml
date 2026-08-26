@@ -1,0 +1,37 @@
+schema_version: 1
+character_id: abel_genesis_v1
+name: Abel
+episode_scope: "Caim e Abel — Gênesis 4:1-10"
+status: candidate_pending_episode_approval
+textual_certainty:
+  age: "não informada no texto; retratado como adulto jovem por segurança editorial"
+  appearance: "não informada no texto; identidade visual é dramatização respeitosa"
+reference_images:
+  face: assets/characters/genesis/abel/face_v1.png
+identity_lock:
+  portrayed_age: 21
+  ethnicity: Oriente Médio antigo
+  skin: oliva quente ligeiramente mais clara
+  face: oval suave, expressão serena e bondosa
+  eyes: avelã, grandes e amigáveis
+  hair: castanho-claro, ondulado, comprimento médio até a nuca
+  beard: rala, curta e bem cuidada
+  body: adulto jovem, esguio e saudável, proporções naturais
+  clothing: túnica creme, manto azul suave, cinto simples de corda e sandálias
+  palette: [creme, azul-suave, bege]
+  props: cajado pastoral de madeira apenas para conduzir ovelhas, nunca como arma
+relationship_lock:
+  role: irmão mais novo de Caim
+  visual_distinction: cabelo mais claro e médio, manto azul, postura de pastor
+child_safety:
+  forbidden: [ataque, sangue, ferimento, cadáver, corpo caído, horror]
+  death_depiction: apenas campo vazio, cajado abandonado e ovelhas agrupadas; Abel nunca é mostrado ferido ou morto
+  divine_depiction: apenas luz, vento, folhas e nuvens; nunca corpo humano
+continuity:
+  same_wardrobe_every_scene: true
+  never_swap_with_cain: true
+generation:
+  final_method: image-to-image
+  text_only_final_forbidden: true
+  same_reference_every_scene: true
+  seed_is_auxiliary_only: true

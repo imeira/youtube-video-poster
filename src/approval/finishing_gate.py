@@ -98,7 +98,7 @@ class FinishingGate:
         lines += [
             "",
             "Responda exatamente:",
-            "• APROVAR — publicar com este arquivo",
+            "• APROVAR — aprovar este arquivo; publicação exige uma instrução separada",
             "• REJEITAR: <ajustes desejados> — gerar novo com os apontamentos",
             "• CANCELAR — encerrar o episódio sem publicar",
             "",
