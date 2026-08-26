@@ -31,6 +31,15 @@ class TestApproval:
         assert "APROVAR" in sent[0] and "REJEITAR" in sent[0]
 
     @pytest.mark.asyncio
+    async def test_approval_message_requires_separate_publication_instruction(self):
+        gate, sent = make_gate(["APROVAR"])
+
+        await gate.run(GateKind.VIDEO, "/tmp/final.mp4", "EP3")
+
+        assert "publicar com este arquivo" not in sent[0]
+        assert "publicação exige uma instrução separada" in sent[0]
+
+    @pytest.mark.asyncio
     async def test_rejection_then_approval_collects_feedback(self):
         gate, _ = make_gate([
             "REJEITAR: título muito pequeno e cores escuras",
