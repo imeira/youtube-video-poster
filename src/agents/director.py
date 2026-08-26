@@ -53,14 +53,16 @@ class DirectorAgent:
     """
 
     @staticmethod
-    def thumbnail_copy(theme: str) -> tuple[str, str]:
-        """Return concise mobile title and biblical subtitle for a theme."""
+    def thumbnail_copy(theme: str) -> tuple[str, str, str]:
+        """Return mobile headline, story subtitle, and biblical book reference."""
         title, separator, passage = theme.partition(" — ")
         if "adão e eva" in title.lower():
-            title = "ADÃO E EVA"
+            headline = "ADÃO E EVA"
+            subtitle = "O JARDIM DO ÉDEN" if "jardim do éden" in title.lower() else ""
         else:
-            title = title.upper()
-        return title, passage.upper() if separator else ""
+            headline = title.upper()
+            subtitle = ""
+        return headline, subtitle, passage.upper() if separator else ""
 
     def __init__(
         self,
@@ -467,13 +469,14 @@ class DirectorAgent:
         captions_files = captions_result.data.get("files", {}) if captions_result.success else {}
 
         # Thumbnail (§91)
-        headline, subtitle = self.thumbnail_copy(theme_str)
+        headline, subtitle, book_subtitle = self.thumbnail_copy(theme_str)
         thumb_result = await self.thumbnail.run(
             episode_id=episode_id,
             images=image_result.data["generated"],
             scenes=scenes,
             headline=headline,
             subtitle=subtitle,
+            book_subtitle=book_subtitle,
             thumbnails_dir=str(fs.paths.thumbnails_dir),
         )
         thumbnail_path = thumb_result.data.get("thumbnail_path", "") if thumb_result.success else ""

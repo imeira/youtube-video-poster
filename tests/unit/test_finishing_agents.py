@@ -117,20 +117,22 @@ class TestThumbnailAgent:
         assert img.size == (1280, 720)
 
     @pytest.mark.asyncio
-    async def test_generates_required_title_and_subtitle(self, test_images, tmp_path: Path):
+    async def test_generates_required_title_subtitle_and_book(self, test_images, tmp_path: Path):
         agent = ThumbnailAgent()
         result = await agent.run(
             episode_id="EP2",
             images=test_images,
             scenes=[{"scene_id": "SC001", "importance": "CRITICAL", "characters": ["adão", "eva"]}],
             headline="ADÃO E EVA",
-            subtitle="GÊNESIS 2–3",
+            subtitle="O JARDIM DO ÉDEN",
+            book_subtitle="GÊNESIS 2–3",
             thumbnails_dir=str(tmp_path),
         )
 
         assert result.success
         assert result.data["headline"] == "ADÃO E EVA"
-        assert result.data["subtitle"] == "GÊNESIS 2–3"
+        assert result.data["subtitle"] == "O JARDIM DO ÉDEN"
+        assert result.data["book_subtitle"] == "GÊNESIS 2–3"
         assert Path(result.data["thumbnail_path"]).stat().st_size > 1_000
 
     @pytest.mark.asyncio
