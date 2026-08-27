@@ -168,7 +168,22 @@ class TestThumbnailAgent:
         assert result.error == "Headline is required to render thumbnail text"
 
     @pytest.mark.asyncio
-    async def test_renders_book_subtitle_when_story_subtitle_is_empty(self, test_images, tmp_path: Path):
+    async def test_renders_book_subtitle_when_story_subtitle_is_empty(
+        self,
+        test_images,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        from PIL import ImageDraw
+
+        rendered_text: list[str] = []
+        original_text = ImageDraw.ImageDraw.text
+
+        def record_text(draw, xy, text, *args, **kwargs):
+            rendered_text.append(text)
+            return original_text(draw, xy, text, *args, **kwargs)
+
+        monkeypatch.setattr(ImageDraw.ImageDraw, "text", record_text)
         agent = ThumbnailAgent()
 
         result = await agent.run(
@@ -184,21 +199,7 @@ class TestThumbnailAgent:
         assert result.data["book_subtitle"] == "GÊNESIS 6–9"
         thumbnail_path = Path(result.data["thumbnail_path"])
         assert thumbnail_path.stat().st_size > 1_000
-
-        from PIL import Image
-
-        image = Image.open(thumbnail_path).convert("RGB")
-
-        def is_book_text_pixel(pixel: tuple[int, int, int]) -> bool:
-            return pixel[0] > 220 and pixel[1] > 180 and pixel[2] < 120
-
-        book_line_pixels = sum(
-            1
-            for y in range(580, image.height)
-            for x in range(image.width)
-            if is_book_text_pixel(image.getpixel((x, y)))
-        )
-        assert book_line_pixels > 100
+        assert "GÊNESIS 6–9" in rendered_text
 
     @pytest.mark.asyncio
     async def test_selects_critical_scene_as_hero(self, test_images, tmp_path: Path):
