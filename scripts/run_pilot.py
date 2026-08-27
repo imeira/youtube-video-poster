@@ -39,7 +39,7 @@ async def main():
 
     # Run the full pipeline (§98)
     result = await director.run_full_pipeline(
-        theme="História da criação do mundo",
+        theme="História da criação do mundo — Gênesis 1–2",
         episode_id=f"PILOT_{int(time.time())}",
     )
 

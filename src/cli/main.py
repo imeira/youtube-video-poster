@@ -1,8 +1,8 @@
 """CLI entry point — 'studio' command.
 
 Usage:
-    python -m src.cli.main "História da Criação do Mundo"
-    studio "História de Davi e Golias"
+    python -m src.cli.main "História da Criação do Mundo — Gênesis 1–2"
+    studio "História de Davi e Golias — 1 Samuel 17"
 
 §5: User provides theme, language, channel — everything else is automatic.
 """
@@ -25,7 +25,7 @@ def main():
     )
     parser.add_argument(
         "theme",
-        help='Biblical story theme (e.g., "História da Criação do Mundo")',
+        help='Biblical story theme and passage (e.g., "História da Criação do Mundo — Gênesis 1–2")',
     )
     parser.add_argument(
         "--language", "-l",

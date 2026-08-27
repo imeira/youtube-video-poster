@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from src.agents.animation import AnimationAgent
@@ -32,6 +33,49 @@ from src.storage.episode_fs import EpisodeFS
 from src.telegram.approval_gate import TelegramApprovalGate, format_decision_message
 
 logger = logging.getLogger(__name__)
+
+_BIBLICAL_BOOKS = tuple(sorted({
+    "Gênesis", "Êxodo", "Levítico", "Números", "Deuteronômio", "Josué",
+    "Juízes", "Rute", "1 Samuel", "2 Samuel", "1 Reis", "2 Reis",
+    "1 Crônicas", "2 Crônicas", "Esdras", "Neemias", "Ester", "Jó",
+    "Salmos", "Salmo", "Provérbios", "Eclesiastes", "Cântico dos Cânticos",
+    "Cantares", "Isaías", "Jeremias", "Lamentações", "Ezequiel", "Daniel",
+    "Oseias", "Joel", "Amós", "Obadias", "Jonas", "Miqueias", "Naum",
+    "Habacuque", "Sofonias", "Ageu", "Zacarias", "Malaquias", "Mateus",
+    "Marcos", "Lucas", "João", "Atos", "Romanos", "1 Coríntios",
+    "2 Coríntios", "Gálatas", "Efésios", "Filipenses", "Colossenses",
+    "1 Tessalonicenses", "2 Tessalonicenses", "1 Timóteo", "2 Timóteo",
+    "Tito", "Filemom", "Hebreus", "Tiago", "1 Pedro", "2 Pedro",
+    "1 João", "2 João", "3 João", "Judas", "Apocalipse",
+}, key=len, reverse=True))
+_BIBLICAL_LOCATOR = re.compile(
+    r"^\d+(?::\d+)?"
+    r"(?:(?:\s*[–—-]\s*|\s+(?:e|a)\s+|,\s*)\d+(?::\d+)?)*$",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_biblical_reference(passage: str) -> bool:
+    """Validate one or more Portuguese Bible references separated by semicolons."""
+    seen_book = False
+    for raw_part in passage.split(";"):
+        part = raw_part.strip()
+        folded = part.casefold()
+        book = next(
+            (candidate for candidate in _BIBLICAL_BOOKS
+             if folded.startswith(f"{candidate.casefold()} ")),
+            None,
+        )
+        if book:
+            numbers = part[len(book):].strip()
+            seen_book = True
+        elif seen_book and part[:1].isdigit():
+            numbers = part
+        else:
+            return False
+        if not _BIBLICAL_LOCATOR.fullmatch(numbers):
+            return False
+    return seen_book
 
 
 def _read_json_file(path) -> dict:
@@ -56,6 +100,12 @@ class DirectorAgent:
     def thumbnail_copy(theme: str) -> tuple[str, str, str]:
         """Return mobile headline, story subtitle, and biblical book reference."""
         title, separator, passage = theme.partition(" — ")
+        if not title.strip():
+            raise ValueError("Every thumbnail requires a headline")
+        if not separator or not passage.strip():
+            raise ValueError("Every thumbnail requires a biblical book reference")
+        if not _is_valid_biblical_reference(passage.strip()):
+            raise ValueError("Every thumbnail requires a valid biblical reference")
         if "adão e eva" in title.lower():
             headline = "ADÃO E EVA"
             subtitle = "O JARDIM DO ÉDEN" if "jardim do éden" in title.lower() else ""
@@ -101,6 +151,8 @@ class DirectorAgent:
         §5: User provides only theme, language, channel.
         §98: Full pipeline from REQUEST_RECEIVED to PUBLISHED.
         """
+        self.thumbnail_copy(theme)  # Fail before filesystem/model work if the passage is missing.
+
         # Generate episode ID if not provided
         if not episode_id:
             import time
@@ -453,7 +505,7 @@ class DirectorAgent:
             return {"error": assembly_result.error}
 
         # Step 12b: Finishing — captions, thumbnail, metadata (§31, §91, §92-93)
-        # These are non-fatal: a failure here logs but does not fail the episode.
+        # Captions and metadata are best-effort; the required thumbnail is fatal.
         _req = await asyncio.to_thread(_read_json_file, fs.paths.request_json)
         theme_str = _req.get("theme", "")
         language = _req.get("language", "pt-BR")
@@ -479,7 +531,15 @@ class DirectorAgent:
             book_subtitle=book_subtitle,
             thumbnails_dir=str(fs.paths.thumbnails_dir),
         )
-        thumbnail_path = thumb_result.data.get("thumbnail_path", "") if thumb_result.success else ""
+        if not thumb_result.success:
+            state.transition_to(
+                EpisodeState.FAILED,
+                agent=self.thumbnail.name,
+                note=thumb_result.error,
+            )
+            state.save(fs.paths.state_json)
+            return {"error": thumb_result.error}
+        thumbnail_path = thumb_result.data.get("thumbnail_path", "")
 
         # Metadata (§92-93)
         meta_result = await self.metadata.run(

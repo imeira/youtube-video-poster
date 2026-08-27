@@ -18,6 +18,9 @@ import pytest
 from src.agents.director import DirectorAgent
 from src.state.machine import EpisodeState
 
+CREATION_THEME = "História da criação do mundo — Gênesis 1–2"
+DAVID_THEME = "História de Davi e Golias — 1 Samuel 17"
+
 
 @pytest.fixture
 def episodes_dir(tmp_path, monkeypatch):
@@ -34,11 +37,11 @@ class TestDirectorPreProduction:
         """Start an episode for 'Criação do Mundo'."""
         director = DirectorAgent()
         result = await director.start_episode(
-            theme="História da criação do mundo",
+            theme=CREATION_THEME,
             episode_id="PILOT001",
         )
         assert result["episode_id"] == "PILOT001"
-        assert result["theme"] == "História da criação do mundo"
+        assert result["theme"] == CREATION_THEME
         assert result["state"] == "WAITING_PLAN_APPROVAL"
         assert "references" in result["plan"]
         assert "budget_check" in result["plan"]
@@ -50,7 +53,7 @@ class TestDirectorPreProduction:
         """Start an episode for 'Davi e Golias'."""
         director = DirectorAgent()
         result = await director.start_episode(
-            theme="História de Davi e Golias",
+            theme=DAVID_THEME,
         )
         assert result["state"] == "WAITING_PLAN_APPROVAL"
         assert result["plan"]["references"][0]["book"] == "1 Samuel"
@@ -60,7 +63,7 @@ class TestDirectorPreProduction:
         """Episode filesystem should be created (§15)."""
         director = DirectorAgent()
         result = await director.start_episode(
-            theme="História da criação do mundo",
+            theme=CREATION_THEME,
             episode_id="PILOT002",
         )
         ep_root = episodes_dir / "PILOT002"
@@ -75,7 +78,7 @@ class TestDirectorPreProduction:
         """State should be WAITING_PLAN_APPROVAL in state.json (§14 persistence)."""
         director = DirectorAgent()
         await director.start_episode(
-            theme="História da criação do mundo",
+            theme=CREATION_THEME,
             episode_id="PILOT003",
         )
         state_path = episodes_dir / "PILOT003" / "state.json"
@@ -93,7 +96,7 @@ class TestDirectorProduction:
         """After plan approval, production should run."""
         director = DirectorAgent()
         await director.start_episode(
-            theme="História da criação do mundo",
+            theme=CREATION_THEME,
             episode_id="PILOT004",
         )
         # Simulate plan approval
@@ -113,7 +116,7 @@ class TestDirectorProduction:
         """Production should create narration.txt, scenes.json, narration.mp3."""
         director = DirectorAgent()
         await director.start_episode(
-            theme="História da criação do mundo",
+            theme=CREATION_THEME,
             episode_id="PILOT005",
         )
         await director.continue_after_approval("PILOT005", "plan")
@@ -128,7 +131,7 @@ class TestDirectorProduction:
         """§32: Scene timestamps should come from real audio (not fixed heuristic)."""
         director = DirectorAgent()
         await director.start_episode(
-            theme="História da criação do mundo",
+            theme=CREATION_THEME,
             episode_id="PILOT006",
         )
         result = await director.continue_after_approval("PILOT006", "plan")

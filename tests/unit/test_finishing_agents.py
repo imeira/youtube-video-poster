@@ -107,6 +107,7 @@ class TestThumbnailAgent:
                 {"scene_id": "SC003", "importance": "NORMAL", "characters": []},
             ],
             headline="A Criação do Mundo",
+            book_subtitle="GÊNESIS 1–2",
             thumbnails_dir=str(thumb_dir),
         )
         assert result.success
@@ -136,6 +137,70 @@ class TestThumbnailAgent:
         assert Path(result.data["thumbnail_path"]).stat().st_size > 1_000
 
     @pytest.mark.asyncio
+    async def test_rejects_thumbnail_without_biblical_book_subtitle(self, test_images, tmp_path: Path):
+        agent = ThumbnailAgent()
+
+        result = await agent.run(
+            episode_id="EP4",
+            images=test_images,
+            headline="NOÉ E A GRANDE ARCA",
+            subtitle="A PORTA VAI FECHAR!",
+            book_subtitle="",
+            thumbnails_dir=str(tmp_path),
+        )
+
+        assert not result.success
+        assert result.error == "Biblical book subtitle is required for every thumbnail"
+
+    @pytest.mark.asyncio
+    async def test_rejects_thumbnail_without_headline(self, test_images, tmp_path: Path):
+        agent = ThumbnailAgent()
+
+        result = await agent.run(
+            episode_id="EP4",
+            images=test_images,
+            headline="",
+            book_subtitle="GÊNESIS 6–9",
+            thumbnails_dir=str(tmp_path),
+        )
+
+        assert not result.success
+        assert result.error == "Headline is required to render thumbnail text"
+
+    @pytest.mark.asyncio
+    async def test_renders_book_subtitle_when_story_subtitle_is_empty(self, test_images, tmp_path: Path):
+        agent = ThumbnailAgent()
+
+        result = await agent.run(
+            episode_id="EP4",
+            images=test_images,
+            headline="NOÉ E A GRANDE ARCA",
+            subtitle="",
+            book_subtitle="GÊNESIS 6–9",
+            thumbnails_dir=str(tmp_path),
+        )
+
+        assert result.success
+        assert result.data["book_subtitle"] == "GÊNESIS 6–9"
+        thumbnail_path = Path(result.data["thumbnail_path"])
+        assert thumbnail_path.stat().st_size > 1_000
+
+        from PIL import Image
+
+        image = Image.open(thumbnail_path).convert("RGB")
+
+        def is_book_text_pixel(pixel: tuple[int, int, int]) -> bool:
+            return pixel[0] > 220 and pixel[1] > 180 and pixel[2] < 120
+
+        book_line_pixels = sum(
+            1
+            for y in range(580, image.height)
+            for x in range(image.width)
+            if is_book_text_pixel(image.getpixel((x, y)))
+        )
+        assert book_line_pixels > 100
+
+    @pytest.mark.asyncio
     async def test_selects_critical_scene_as_hero(self, test_images, tmp_path: Path):
         agent = ThumbnailAgent()
         result = await agent.run(
@@ -147,6 +212,7 @@ class TestThumbnailAgent:
                 {"scene_id": "SC003", "importance": "LOW", "characters": []},
             ],
             headline="Teste",
+            book_subtitle="GÊNESIS 1–2",
             thumbnails_dir=str(tmp_path),
         )
         assert result.success
