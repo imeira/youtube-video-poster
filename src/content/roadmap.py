@@ -383,13 +383,14 @@ SERIES: tuple[tuple[str, int, int], ...] = (
 SENSITIVE_THEMES: frozenset[str] = frozenset({
     "Adão e Eva no Jardim do Éden",
     "Caim e Abel: aprendendo a controlar a raiva",
+    "Noé e a grande arca",
     "A fuga da família de Jesus para o Egito",
     "A última ceia",
     "Jesus ora no Getsêmani",
     "A ressurreição de Jesus",
 })
 
-EPISODES_PUBLISHED = 1  # EP1 "A criação do mundo" already produced/approved.
+EPISODES_PUBLISHED = 3  # EP1–EP3 are published and publicly verified.
 
 
 class ContentPlanError(ValueError):
