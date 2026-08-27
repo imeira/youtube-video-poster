@@ -53,6 +53,16 @@ class ThumbnailAgent(BaseAgent):
         """
         if not images:
             return AgentResult(success=False, error="No images provided for thumbnail")
+        if not headline.strip():
+            return AgentResult(
+                success=False,
+                error="Headline is required to render thumbnail text",
+            )
+        if not book_subtitle.strip():
+            return AgentResult(
+                success=False,
+                error="Biblical book subtitle is required for every thumbnail",
+            )
 
         hero_path = self._select_hero(images, scenes)
         if not hero_path or not os.path.exists(hero_path):
@@ -174,9 +184,9 @@ class ThumbnailAgent(BaseAgent):
                 for dy in range(-outline, outline + 1, 2):
                     draw.text((x + dx, y + dy), headline, font=font, fill=(0, 0, 0, 255))
             draw.text((x, y), headline, font=font, fill=(255, 221, 51, 255))  # warm yellow
+            subtitle_y = y + text_h + 22
             if subtitle and subtitle_font:
                 subtitle_x = (THUMB_W - subtitle_w) // 2
-                subtitle_y = y + text_h + 22
                 draw.text(
                     (subtitle_x, subtitle_y),
                     subtitle,
@@ -185,17 +195,17 @@ class ThumbnailAgent(BaseAgent):
                     stroke_width=4,
                     stroke_fill=(0, 0, 0, 255),
                 )
-                if book_subtitle and book_font:
-                    book_x = (THUMB_W - book_w) // 2
-                    book_y = subtitle_y + subtitle_h + 14
-                    draw.text(
-                        (book_x, book_y),
-                        book_subtitle,
-                        font=book_font,
-                        fill=(255, 221, 51, 255),
-                        stroke_width=3,
-                        stroke_fill=(0, 0, 0, 255),
-                    )
+            if book_subtitle and book_font:
+                book_x = (THUMB_W - book_w) // 2
+                book_y = subtitle_y + subtitle_h + 14
+                draw.text(
+                    (book_x, book_y),
+                    book_subtitle,
+                    font=book_font,
+                    fill=(255, 221, 51, 255),
+                    stroke_width=3,
+                    stroke_fill=(0, 0, 0, 255),
+                )
 
         out_path = str((thumb_dir / "thumbnail.png") if thumb_dir else Path(hero_path).parent / "thumbnail.png")
         hero.save(out_path, "PNG")

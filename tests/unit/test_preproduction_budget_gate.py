@@ -44,7 +44,7 @@ async def test_over_budget_plan_sends_telegram_alternatives(over_budget_director
     director, gate, _ = over_budget_director
 
     result = await director.start_episode(
-        theme="História de Davi e Golias",
+        theme="História de Davi e Golias — 1 Samuel 17",
         episode_id="OVER_BUDGET_NOTIFY",
     )
 
@@ -61,7 +61,7 @@ async def test_over_budget_plan_sends_telegram_alternatives(over_budget_director
 async def test_plan_approval_cannot_bypass_over_budget_gate(over_budget_director):
     director, _, episodes_dir = over_budget_director
     await director.start_episode(
-        theme="História de Davi e Golias",
+        theme="História de Davi e Golias — 1 Samuel 17",
         episode_id="OVER_BUDGET_BLOCK",
     )
     production_called = False
