@@ -130,6 +130,48 @@ class ResearchAgent(BaseAgent):
                 "Daniel saiu ileso da cova",
             ],
         },
+        "torre de babel": {
+            "references": [
+                {"book": "Gênesis", "chapter": 11, "verses": "1-9"},
+            ],
+            "source_urls": [
+                "https://www.bibliaonline.com.br/acf/gn/11/1-9",
+                "https://www.bibliaonline.com.br/nvi/gn/11/1-9",
+                "https://revista.abib.org.br/EB/article/view/262",
+            ],
+            "summary": (
+                "Pessoas que falavam a mesma língua se estabeleceram em Sinar e decidiram "
+                "construir uma cidade e uma torre para fazer um nome e evitar a dispersão. "
+                "O Senhor confundiu a língua delas, espalhou-as pela terra e a construção parou."
+            ),
+            "key_facts": [
+                "Toda a terra tinha uma só língua e as mesmas palavras",
+                "As pessoas seguiram para o leste, encontraram uma planície em Sinar e se estabeleceram ali",
+                "Elas fizeram tijolos queimados e usaram betume como argamassa",
+                "Planejaram uma cidade e uma torre que alcançasse os céus para fazer um nome e não serem espalhadas",
+                "O Senhor desceu para ver a cidade e a torre e observou a unidade daquele povo",
+                "O Senhor confundiu a língua para que não se entendessem, e a construção da cidade parou",
+                "O Senhor espalhou as pessoas por toda a terra, e o lugar recebeu o nome de Babel",
+            ],
+            "visual_constraints": {
+                "god_visual_representation": (
+                    "Presença divina somente por luz, vento, nuvens ou mudança ambiental; "
+                    "nunca corpo, rosto, mãos ou silhueta humana"
+                ),
+                "tower_continuity": (
+                    "Mesma cidade e mesma torre antiga de tijolos em construção em todas as cenas; "
+                    "não mostrar altura exata, topo concluído, queda ou destruição"
+                ),
+                "language_confusion": (
+                    "Mostrar desencontro de comunicação com gestos e expressões infantis seguras, "
+                    "sem pânico, violência, humilhação ou caricatura de idiomas reais"
+                ),
+                "unsupported_details": (
+                    "Não mostrar Ninrode, escravidão, chicotes, exército, ídolos, templo, raio, fogo, "
+                    "colapso da torre, número específico de línguas ou altura específica"
+                ),
+            },
+        },
         "noé e a arca": {
             "references": [{"book": "Gênesis", "chapter": 6, "verses": "9-22"}, {"book": "Gênesis", "chapter": 7, "verses": "1-24"}, {"book": "Gênesis", "chapter": 8, "verses": "1-19"}],
             "summary": "Noé construiu uma arca por ordem de Deus e salvou sua família e os animais do dilúvio.",
@@ -167,6 +209,7 @@ class ResearchAgent(BaseAgent):
                 "story": theme,
                 "references": matched["references"],
                 "summary": matched["summary"],
+                "source_urls": matched.get("source_urls", []),
                 "narrative_classification": {
                     "BIBLICAL_FACT": matched["key_facts"],
                     "NARRATIVE_INFERENCE": [
