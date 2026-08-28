@@ -228,8 +228,9 @@ class ResearchAgent(BaseAgent):
                 ),
                 "unsupported_details": (
                     "Não incluir fome, Egito, faraó ou pragas de Gênesis 12:10-20; não antecipar a mudança "
-                    "de nomes, o nascimento de Isaque ou os acontecimentos de Gênesis 13 em diante; não "
-                    "inventar diálogos de Sarai ou Ló, mapa sobrenatural, descendentes já presentes ou figura divina humana"
+                    "de nomes, o nascimento de Isaque, estrelas como sinal da promessa ou os acontecimentos "
+                    "de Gênesis 13 em diante; não incluir camelos; não inventar diálogos de Sarai ou Ló, "
+                    "mapa sobrenatural, descendentes já presentes ou figura divina humana"
                 ),
             },
         },
