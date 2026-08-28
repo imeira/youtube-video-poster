@@ -172,6 +172,68 @@ class ResearchAgent(BaseAgent):
                 ),
             },
         },
+        "chamado de abraão": {
+            "references": [
+                {"book": "Gênesis", "chapter": 12, "verses": "1-9"},
+            ],
+            "source_urls": [
+                "https://www.bibliaonline.com.br/acf/gn/12",
+                "https://www.bibliaonline.com.br/nvi/gn/12",
+            ],
+            "chapter_context": {
+                "read_scope": "Gênesis 12:1-20",
+                "episode_scope": "Gênesis 12:1-9",
+                "excluded_from_episode": "Gênesis 12:10-20 — Abrão no Egito",
+            },
+            "summary": (
+                "O Senhor chamou Abrão para deixar Harã e seguir até a terra que lhe mostraria, "
+                "prometendo abençoá-lo e, por meio dele, alcançar todos os povos. Abrão obedeceu, "
+                "partiu com Sarai e Ló, chegou a Canaã e construiu altares ao Senhor durante a jornada."
+            ),
+            "key_facts": [
+                "O Senhor mandou Abrão deixar sua terra, seus parentes e a casa de seu pai para ir à terra que lhe mostraria",
+                "O Senhor prometeu fazer de Abrão um grande povo, abençoá-lo, engrandecer seu nome e torná-lo uma bênção",
+                "O Senhor prometeu abençoar quem abençoasse Abrão e que, por meio dele, todos os povos da terra seriam abençoados",
+                "Abrão partiu como o Senhor havia ordenado; Ló foi com ele, e Abrão tinha setenta e cinco anos ao sair de Harã",
+                "Abrão levou Sarai, Ló, os bens acumulados e as pessoas de sua casa; eles partiram e chegaram a Canaã",
+                "Abrão atravessou a terra até Siquém, junto à árvore de Moré, quando os cananeus habitavam a região",
+                "O Senhor prometeu dar aquela terra à descendência de Abrão, e Abrão construiu ali um altar ao Senhor",
+                "Abrão armou suas tendas entre Betel e Ai, construiu outro altar e invocou o nome do Senhor",
+                "Abrão continuou sua jornada em direção ao Neguebe",
+            ],
+            "visual_constraints": {
+                "god_visual_representation": (
+                    "A aparição e a fala do Senhor são representadas somente por luz, vento, som e "
+                    "mudança ambiental abstrata; nunca por corpo, rosto, mãos ou silhueta humana"
+                ),
+                "name_continuity": (
+                    "Em Gênesis 12, usar Abrão e Sarai na narração e nas fichas da época; os nomes "
+                    "Abraão e Sara pertencem à mudança posterior de Gênesis 17. O título canônico "
+                    "do episódio pode manter Abraão para reconhecimento do público"
+                ),
+                "character_continuity": (
+                    "Criar e congelar fichas canônicas novas para Abrão, Sarai e Ló. Somente Abrão "
+                    "tem idade informada no escopo: setenta e cinco anos; não inventar idades para Sarai ou Ló"
+                ),
+                "journey_continuity": (
+                    "Manter as mesmas tendas, bagagens, roupas, paleta da caravana e direção geral da "
+                    "viagem entre Harã, Canaã, Siquém, Betel/Ai e Neguebe"
+                ),
+                "anachronism_guard": (
+                    "Sem mapas impressos, bússola, placas modernas, veículos, arquitetura clássica tardia, "
+                    "armas medievais ou animais específicos não citados em Gênesis 12:1-9"
+                ),
+                "altar_rule": (
+                    "Altares simples de pedras; o texto registra sua construção, mas não descreve sacrifício no escopo"
+                ),
+                "unsupported_details": (
+                    "Não incluir fome, Egito, faraó ou pragas de Gênesis 12:10-20; não antecipar a mudança "
+                    "de nomes, o nascimento de Isaque, estrelas como sinal da promessa ou os acontecimentos "
+                    "de Gênesis 13 em diante; não incluir camelos; não inventar diálogos de Sarai ou Ló, "
+                    "mapa sobrenatural, descendentes já presentes ou figura divina humana"
+                ),
+            },
+        },
         "noé e a arca": {
             "references": [{"book": "Gênesis", "chapter": 6, "verses": "9-22"}, {"book": "Gênesis", "chapter": 7, "verses": "1-24"}, {"book": "Gênesis", "chapter": 8, "verses": "1-19"}],
             "summary": "Noé construiu uma arca por ordem de Deus e salvou sua família e os animais do dilúvio.",
@@ -210,6 +272,7 @@ class ResearchAgent(BaseAgent):
                 "references": matched["references"],
                 "summary": matched["summary"],
                 "source_urls": matched.get("source_urls", []),
+                "chapter_context": matched.get("chapter_context", {}),
                 "narrative_classification": {
                     "BIBLICAL_FACT": matched["key_facts"],
                     "NARRATIVE_INFERENCE": [
