@@ -196,7 +196,7 @@ class ResearchAgent(BaseAgent):
                 "O Senhor prometeu abençoar quem abençoasse Abrão e que, por meio dele, todos os povos da terra seriam abençoados",
                 "Abrão partiu como o Senhor havia ordenado; Ló foi com ele, e Abrão tinha setenta e cinco anos ao sair de Harã",
                 "Abrão levou Sarai, Ló, os bens acumulados e as pessoas de sua casa; eles partiram e chegaram a Canaã",
-                "Abrão atravessou a terra até Siquém, junto ao carvalho de Moré, quando os cananeus habitavam a região",
+                "Abrão atravessou a terra até Siquém, junto à árvore de Moré, quando os cananeus habitavam a região",
                 "O Senhor prometeu dar aquela terra à descendência de Abrão, e Abrão construiu ali um altar ao Senhor",
                 "Abrão armou suas tendas entre Betel e Ai, construiu outro altar e invocou o nome do Senhor",
                 "Abrão continuou sua jornada em direção ao Neguebe",

@@ -28,6 +28,9 @@ async def test_abraham_call_research_is_grounded_scoped_and_child_safe(tmp_path)
         "excluded_from_episode": "Gênesis 12:10-20 — Abrão no Egito",
     }
     assert len(result.data["narrative_classification"]["BIBLICAL_FACT"]) == 9
+    facts = result.data["narrative_classification"]["BIBLICAL_FACT"]
+    assert any("árvore de Moré" in fact for fact in facts)
+    assert all("carvalho de Moré" not in fact for fact in facts)
     assert result.data["source_urls"] == [
         "https://www.bibliaonline.com.br/acf/gn/12",
         "https://www.bibliaonline.com.br/nvi/gn/12",
