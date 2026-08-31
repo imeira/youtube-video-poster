@@ -37,33 +37,27 @@ async def test_abram_and_lot_separation_research_is_grounded_scoped_and_child_sa
     }
 
     facts = result.data["narrative_classification"]["BIBLICAL_FACT"]
-    assert len(facts) == 10
-    required_fact_fragments = {
-        "Egito para o Neguebe",
-        "gado, prata e ouro",
-        "entre Betel e Ai",
-        "invocou o nome do Senhor",
-        "rebanhos, gado e tendas",
-        "cananeus e ferezeus",
-        "parentes próximos",
-        "planície do Jordão",
-        "em direção a Zoar",
-        "partiu para o leste",
-        "Abrão morou em Canaã",
-        "perto de Sodoma",
-        "norte, sul, leste e oeste",
-        "para sempre",
-        "pó da terra",
-        "Manre, em Hebrom",
-        "construiu ali um altar",
-    }
-    for fragment in required_fact_fragments:
-        assert any(fragment in fact for fact in facts), fragment
+    assert facts == [
+        "Abrão subiu do Egito para o Neguebe com sua mulher, tudo o que possuía e Ló; Abrão tinha muitos bens, gado, prata e ouro",
+        "Abrão voltou do Neguebe em direção a Betel, ao lugar entre Betel e Ai onde sua tenda e um altar já haviam estado; ali invocou o nome do Senhor",
+        "Ló também possuía rebanhos, gado e tendas",
+        "A terra não comportava os dois grupos juntos porque seus bens eram muitos; houve desavença entre os pastores de Abrão e os de Ló, quando cananeus e ferezeus habitavam a terra",
+        "Abrão pediu que não houvesse contenda entre eles e seus pastores porque eram parentes próximos; disse que toda a terra estava diante de Ló e propôs direções opostas: se Ló fosse para a esquerda, Abrão iria para a direita, e vice-versa",
+        "Ló viu toda a planície do Jordão bem irrigada em direção a Zoar; o texto compara sua aparência ao jardim do Senhor e à terra do Egito. Ló escolheu a planície e partiu para o leste; os dois se separaram",
+        "Abrão morou em Canaã; Ló morou entre as cidades da planície e mudou seu acampamento para perto de Sodoma. O texto registra que os habitantes de Sodoma eram perversos e pecadores contra o Senhor, sem descrever atos específicos",
+        "Depois que Ló se separou, o Senhor disse a Abrão que olhasse para norte, sul, leste e oeste e prometeu dar a terra para sempre a Abrão e à sua descendência",
+        "O Senhor comparou a descendência de Abrão ao pó da terra e ordenou que ele percorresse o comprimento e a largura da terra, porque a daria a ele",
+        "Abrão mudou seu acampamento para perto de Manre, em Hebrom, e construiu ali um altar dedicado ao Senhor",
+    ]
 
     narrative_body = " ".join([result.data["summary"], *facts])
     biblical_narrative = narrative_body.casefold()
+    downstream_narrative = json.dumps(
+        result.data["narrative_classification"], ensure_ascii=False
+    )
     assert result.data["story"].startswith("Abraão e Ló")
     assert "Abraão" not in narrative_body
+    assert "Abraão" not in downstream_narrative
     assert "Abrão" in narrative_body
     for excluded in (
         "destruição de sodoma",
@@ -110,7 +104,13 @@ async def test_abram_and_lot_separation_research_is_grounded_scoped_and_child_sa
         "ep6_character_continuity": ("identidades canônicas", "EP6", "sem gerar substituições"),
         "herd_and_household_safety": ("apenas adultos", "não incluir camelos", "Não mostrar crianças"),
         "conflict_rule": ("não violenta", "sem agressão física", "Não inventar falas"),
-        "lot_choice_and_sodom_rule": ("bem irrigada", "Não dramatizar Sodoma", "destruição futura"),
+        "lot_choice_and_sodom_rule": (
+            "bem irrigada",
+            "comparações são apenas narradas",
+            "sem cutaway ou reencenação do jardim do Senhor ou do Egito",
+            "Não dramatizar Sodoma",
+            "destruição futura",
+        ),
         "promise_and_altar_rule": (
             "pó da terra",
             "sem transformar poeira em pessoas, estrelas ou milagre visual",

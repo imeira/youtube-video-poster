@@ -269,11 +269,11 @@ class ResearchAgent(BaseAgent):
                 "Abrão voltou do Neguebe em direção a Betel, ao lugar entre Betel e Ai onde sua tenda e um altar já haviam estado; ali invocou o nome do Senhor",
                 "Ló também possuía rebanhos, gado e tendas",
                 "A terra não comportava os dois grupos juntos porque seus bens eram muitos; houve desavença entre os pastores de Abrão e os de Ló, quando cananeus e ferezeus habitavam a terra",
-                "Abrão pediu que não houvesse contenda entre eles e seus pastores porque eram parentes próximos; propôs que Ló escolhesse uma direção e Abrão seguiria a outra",
-                "Ló viu a planície do Jordão bem irrigada em direção a Zoar, escolheu a planície e partiu para o leste; os dois se separaram",
+                "Abrão pediu que não houvesse contenda entre eles e seus pastores porque eram parentes próximos; disse que toda a terra estava diante de Ló e propôs direções opostas: se Ló fosse para a esquerda, Abrão iria para a direita, e vice-versa",
+                "Ló viu toda a planície do Jordão bem irrigada em direção a Zoar; o texto compara sua aparência ao jardim do Senhor e à terra do Egito. Ló escolheu a planície e partiu para o leste; os dois se separaram",
                 "Abrão morou em Canaã; Ló morou entre as cidades da planície e mudou seu acampamento para perto de Sodoma. O texto registra que os habitantes de Sodoma eram perversos e pecadores contra o Senhor, sem descrever atos específicos",
                 "Depois que Ló se separou, o Senhor disse a Abrão que olhasse para norte, sul, leste e oeste e prometeu dar a terra para sempre a Abrão e à sua descendência",
-                "O Senhor comparou a descendência de Abrão ao pó da terra e ordenou que ele percorresse a terra, porque a daria a ele",
+                "O Senhor comparou a descendência de Abrão ao pó da terra e ordenou que ele percorresse o comprimento e a largura da terra, porque a daria a ele",
                 "Abrão mudou seu acampamento para perto de Manre, em Hebrom, e construiu ali um altar dedicado ao Senhor",
             ],
             "visual_constraints": {
@@ -301,8 +301,9 @@ class ResearchAgent(BaseAgent):
                     "falas para os pastores"
                 ),
                 "lot_choice_and_sodom_rule": (
-                    "A planície do Jordão pode ser mostrada como bem irrigada. Não dramatizar Sodoma, "
-                    "não mostrar atos perversos, destruição, fogo, sofrimento ou a destruição futura"
+                    "A planície do Jordão pode ser mostrada como bem irrigada. As comparações são apenas "
+                    "narradas, sem cutaway ou reencenação do jardim do Senhor ou do Egito. Não dramatizar "
+                    "Sodoma, não mostrar atos perversos, destruição, fogo, sofrimento ou a destruição futura"
                 ),
                 "promise_and_altar_rule": (
                     "A comparação ao pó da terra pertence a Gênesis 13 e pode ser narrada sem "
