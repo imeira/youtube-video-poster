@@ -234,6 +234,89 @@ class ResearchAgent(BaseAgent):
                 ),
             },
         },
+        "abraão e ló escolhem caminhos diferentes": {
+            "references": [
+                {"book": "Gênesis", "chapter": 13, "verses": "1-18"},
+            ],
+            "source_urls": [
+                "https://www.bibliaonline.com.br/nvi/gn/13",
+                "https://www.bibliaonline.com.br/acf/gn/13",
+            ],
+            "chapter_context": {
+                "read_scope": "Gênesis 13:1-18",
+                "episode_scope": "Gênesis 13:1-18",
+                "previous_context_not_retold": (
+                    "Gênesis 12:10-20 explica a menção inicial ao Egito, mas não será "
+                    "reencenado ou narrado além do que Gênesis 13 registra."
+                ),
+                "excluded_from_episode": (
+                    "Não antecipar Gênesis 14 em diante, a mudança de nomes de Gênesis 17, "
+                    "o nascimento de Isaque, a destruição de Sodoma e Gomorra de Gênesis 19 "
+                    "ou outros eventos posteriores."
+                ),
+            },
+            "summary": (
+                "Abrão, Sarai e Ló seguiram para o Neguebe. Como Abrão e Ló tinham muitos bens, "
+                "rebanhos e tendas, a terra não comportava os dois grupos juntos e houve "
+                "desavença entre seus pastores. Abrão propôs uma separação pacífica e deixou Ló "
+                "escolher primeiro. Ló escolheu a planície do Jordão e partiu para o leste; Abrão "
+                "permaneceu em Canaã. Depois, o Senhor prometeu a Abrão a terra para sempre e uma "
+                "descendência comparada ao pó da terra. Abrão se estabeleceu perto de Manre, em Hebrom, e "
+                "construiu um altar ao Senhor."
+            ),
+            "key_facts": [
+                "Abrão subiu do Egito para o Neguebe com sua mulher, tudo o que possuía e Ló; Abrão tinha muitos bens, gado, prata e ouro",
+                "Abrão voltou do Neguebe em direção a Betel, ao lugar entre Betel e Ai onde sua tenda e um altar já haviam estado; ali invocou o nome do Senhor",
+                "Ló também possuía rebanhos, gado e tendas",
+                "A terra não comportava os dois grupos juntos porque seus bens eram muitos; houve desavença entre os pastores de Abrão e os de Ló, quando cananeus e ferezeus habitavam a terra",
+                "Abrão pediu que não houvesse contenda entre eles e seus pastores porque eram parentes próximos; propôs que Ló escolhesse uma direção e Abrão seguiria a outra",
+                "Ló viu a planície do Jordão bem irrigada em direção a Zoar, escolheu a planície e partiu para o leste; os dois se separaram",
+                "Abrão morou em Canaã; Ló morou entre as cidades da planície e mudou seu acampamento para perto de Sodoma. O texto registra que os habitantes de Sodoma eram perversos e pecadores contra o Senhor, sem descrever atos específicos",
+                "Depois que Ló se separou, o Senhor disse a Abrão que olhasse para norte, sul, leste e oeste e prometeu dar a terra para sempre a Abrão e à sua descendência",
+                "O Senhor comparou a descendência de Abrão ao pó da terra e ordenou que ele percorresse a terra, porque a daria a ele",
+                "Abrão mudou seu acampamento para perto de Manre, em Hebrom, e construiu ali um altar dedicado ao Senhor",
+            ],
+            "visual_constraints": {
+                "god_visual_representation": (
+                    "Toda fala ou promessa do Senhor será representada apenas por mudança ambiental "
+                    "abstrata, luz, vento ou som não localizado; nunca por corpo, rosto, mãos, "
+                    "silhueta humana, anjo humanoide ou figura nas nuvens"
+                ),
+                "name_continuity": (
+                    "Usar Abrão, Sarai e Ló na narração e nos ativos; Abraão fica restrito ao título "
+                    "editorial. As mudanças de nome pertencem a Gênesis 17 e são excluídas"
+                ),
+                "ep6_character_continuity": (
+                    "Reutilizar as identidades canônicas aprovadas de Abrão, Sarai e Ló do EP6 sem "
+                    "gerar substituições de personagem. Sarai não recebe idade, fala ou papel adicional"
+                ),
+                "herd_and_household_safety": (
+                    "Mostrar apenas adultos dignos como membros da casa e pastores; rebanhos e gado "
+                    "são citados, mas não incluir camelos, arreios específicos ou contagens não bíblicas. "
+                    "Não mostrar crianças como filhos de Abrão, Sarai ou Ló"
+                ),
+                "conflict_rule": (
+                    "A desavença entre pastores deve ser compreensível e não violenta: sem agressão "
+                    "física, armas, gritos, ameaças, perseguição ou disputa teatralizada. Não inventar "
+                    "falas para os pastores"
+                ),
+                "lot_choice_and_sodom_rule": (
+                    "A planície do Jordão pode ser mostrada como bem irrigada. Não dramatizar Sodoma, "
+                    "não mostrar atos perversos, destruição, fogo, sofrimento ou a destruição futura"
+                ),
+                "promise_and_altar_rule": (
+                    "A comparação ao pó da terra pertence a Gênesis 13 e pode ser narrada sem "
+                    "transformar poeira em pessoas, estrelas ou milagre visual. Mostrar o altar sem "
+                    "identificar ou detalhar material; não há sacrifício, sangue, fogo ou fumaça "
+                    "descritos no escopo"
+                ),
+                "anachronism_and_scope_guard": (
+                    "Sem mapas impressos, bússola, placas, veículos, arquitetura moderna ou clássica "
+                    "tardia, armas medievais, eventos de Gênesis 14+, mudança de nomes, Isaque, resgate "
+                    "de Ló, destruição de Sodoma, nem detalhes de Gênesis 12:10-20 além da menção inicial"
+                ),
+            },
+        },
         "noé e a arca": {
             "references": [{"book": "Gênesis", "chapter": 6, "verses": "9-22"}, {"book": "Gênesis", "chapter": 7, "verses": "1-24"}, {"book": "Gênesis", "chapter": 8, "verses": "1-19"}],
             "summary": "Noé construiu uma arca por ordem de Deus e salvou sua família e os animais do dilúvio.",
