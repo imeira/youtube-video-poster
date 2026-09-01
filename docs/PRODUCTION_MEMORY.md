@@ -1,6 +1,6 @@
 # Memória de produção aprovada
 
-**Versão:** 2.0
+**Versão:** 2.1
 **Episódios de referência:** Episódio 1 — A Criação e Episódio 4 — Noé e a Grande Arca
 **Status:** padrão obrigatório para episódios futuros
 
@@ -44,6 +44,14 @@
 - Orçamento padrão do estúdio: **US$ 4 alvo, US$ 5 alerta e US$ 6 limite rígido**, salvo configuração explícita diferente para o episódio.
 - Se o custo máximo estimado ultrapassar o limite, enviar pelo Telegram as alternativas: reduzir clipes, usar 100% animação local, dividir a história ou aumentar o orçamento.
 - Aprovar o plano narrativo não aprova estouro de orçamento. Somente autorização humana explícita da opção de aumento permite ultrapassar o limite; silêncio e escolhas de replanejamento não autorizam cobrança.
+
+### Contrato operacional do pipeline híbrido
+
+- O Diretor produz uma recomendação explícita — e não uma duração fixa — baseada na complexidade bíblica, no número de acontecimentos indispensáveis, na idade de 6–10 anos, na retenção esperada e no orçamento.
+- O gate pré-pago declara três cenários: custo mínimo, provável e máximo. Deve informar também palavras estimadas, cenas, imagens, clipes generativos, duração por clipe, segundos generativos totais, fontes bíblicas e justificativa da duração.
+- A referência curta de 3–5 min opera normalmente com 20–35 imagens, 390–750 palavras e, quando houver ganho narrativo claro, 3–5 clipes de 4–6 s. Esses números são referências econômicas; nunca metas que obriguem cortes, repetição ou geração desnecessária.
+- A prioridade é imagem consistente aprovada + animação local com FFmpeg ou Remotion. Vídeo por API entra somente em cenas decisivas e sob limites configuráveis de quantidade, duração e custo.
+- Ao prever ultrapassagem do orçamento, interromper antes da cobrança e entregar no Telegram opções comparáveis: reduzir clipes, usar apenas animação local, dividir a narrativa em episódios ou aumentar o teto. Só a aprovação humana explícita de uma alternativa de aumento autoriza gasto acima do limite.
 
 ## 3. Voz e áudio
 
