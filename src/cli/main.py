@@ -14,12 +14,19 @@ import asyncio
 import json
 import sys
 
-from src.agents.director import DirectorAgent
 from src.config.loader import get_config
+
+
+def _throughput_main(argv: list[str]) -> int:
+    """Local controller commands; import no provider/director on this path."""
+    from src.throughput.cli import main as throughput_main
+    return throughput_main(argv)
 
 
 def main():
     """Main CLI entry point."""
+    if len(sys.argv) > 1 and sys.argv[1] == "throughput":
+        return _throughput_main(sys.argv[2:])
     parser = argparse.ArgumentParser(
         description="Hybrid AI Animation Studio — produce a children's Bible YouTube video",
     )
@@ -49,6 +56,7 @@ def main():
 
     args = parser.parse_args()
 
+    from src.agents.director import DirectorAgent
     config = get_config()
     director = DirectorAgent(config)
 
