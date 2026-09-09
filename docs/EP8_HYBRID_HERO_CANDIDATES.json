@@ -1,0 +1,15 @@
+[
+  {"scene_id":"R004","action":"Abraão examina os bens do acampamento e baixa o olhar","impact":0.72,"movement":0.60,"start":20.121},
+  {"scene_id":"R006","action":"Abraão caminha até a clareira e ergue os olhos","impact":0.92,"movement":0.88,"start":47.295},
+  {"scene_id":"R008","action":"Abraão acompanha as estrelas com o olhar e a mão","impact":0.90,"movement":0.78,"start":59.292},
+  {"scene_id":"R010","action":"Passagem do tempo transforma a luz ao redor da tenda","impact":0.95,"movement":0.95,"start":76.276},
+  {"scene_id":"R011","action":"Abraão atravessa o quadro durante a mudança de etapa","impact":0.88,"movement":0.90,"start":82.418},
+  {"scene_id":"R012","action":"Sara entra no quadro e assume postura mais firme","impact":0.88,"movement":0.85,"start":90.693},
+  {"scene_id":"R014","action":"Transição visual liga o casal antes e depois da mudança","impact":0.93,"movement":0.92,"start":105.366},
+  {"scene_id":"R015","action":"Abraão ri discretamente e olha para Sara","impact":0.84,"movement":0.66,"start":112.852},
+  {"scene_id":"R020","action":"Abraão organiza o espaço simples sob a árvore","impact":0.68,"movement":0.72,"start":169.714},
+  {"scene_id":"R023","action":"Abraão e Sara preparam uma refeição em movimentos ágeis","impact":0.86,"movement":0.94,"start":188.993},
+  {"scene_id":"R025","action":"O casal pausa as tarefas e troca um olhar atento","impact":0.80,"movement":0.62,"start":203.927},
+  {"scene_id":"R027","action":"Sara ri discretamente e fica pensativa junto de Abraão","impact":0.96,"movement":0.76,"start":211.344},
+  {"scene_id":"R030","action":"Sara demonstra medo e hesitação e baixa o olhar","impact":0.98,"movement":0.70,"start":232.446}
+]

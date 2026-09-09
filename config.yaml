@@ -439,3 +439,17 @@ benchmark:
   runpod_a5000_secure: 0.27   # $/hr
   episode_cost_external: 0.35  # USD (projected)
   episode_time_local: 12      # minutes (projected)
+hybrid_fast:
+  capacity: {first: 39, alternative: 39, correction: 10, thumbnail: 4}
+  flux_endpoint: fal-ai/flux-2/klein/9b/edit
+  flux_per_mp: '0.011'
+  flare_endpoint: ''
+  flare_prices: {}
+  video_endpoint: seedance-v1-5-pro-i2v
+  video_per_second: '0.052'
+  hero_slots: 12
+  retry_slots: 3
+  clip_seconds: 5
+  resolution: 720p
+  concurrency: 3
+  limit: '10'
