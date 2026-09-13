@@ -15,9 +15,10 @@ python -m src.hybrid --duration-seconds 480 --essential-events 9 \
   --narration-words 1040 --scene-count 39 --closing-seconds 4 --images 2.024
 ```
 
-Com 39 cenas, os 12 hero clips de 5 s usam 60 s; as 27 janelas restantes são
-compostas/localmente animadas por FFmpeg. A reserva de 15 s de retry permanece
-condicional e requer preflight, autorização unitária e orçamento disponível.
+Com 39 cenas, até 12 hero clips de 5 s podem usar 60 s; o plano usa somente os
+heroes semanticamente selecionados. As janelas restantes são compostas/localmente
+animadas por FFmpeg. A reserva de 15 s de retry permanece condicional e requer
+preflight, autorização unitária e orçamento disponível.
 
 Implementação opt-in em `src/hybrid/`, sem imports de SDK, acesso a credenciais,
 geração durante planejamento, acoplamento a R027 ou episódios específicos.
@@ -28,8 +29,8 @@ O comando legado `studio` não foi alterado para iniciar esta arquitetura sozinh
 `config.yaml:hybrid_fast` e `Config.load()` definem capacidade **máxima**, não fila:
 39 primeiras versões + 39 alternativas + 10 correções + 4 thumbnails.
 O planner sempre retorna `requests: []` e `execution_authorized: false`.
-Alternativas são pedidos explícitos; correções exigem QA reprovada do predecessor.
-Uma primeira versão alterada não pode disfarçar uma correção.
+Alternativas e correções exigem QA reprovada do predecessor, vinculada ao hash do
+resultado. Uma primeira versão alterada não pode disfarçar uma correção.
 
 ```powershell
 $env:PYTHONPATH=''
@@ -37,19 +38,39 @@ $env:PYTHONPATH=''
 & C:/Users/meira/hermes-studio-venv/Scripts/python.exe -m src.hybrid --committed 7.98 --images 1.36
 ```
 
-O segundo comando apresenta US$ 12,46 e `WAITING_BUDGET_APPROVAL` pelo BudgetGuard
-existente. O cálculo conservador inclui US$ 0,78 de retries, totalizando US$ 13,24.
-`committed` representa compromissos adicionais ao gasto já informado no ledger;
-não se deve informar o mesmo gasto nos dois lugares. Local-only custa zero API;
-master e rerender também custam zero API. Um orçamento de US$ 10 não autoriza
-US$ 7,98 + US$ 1,36 + US$ 3,12.
+`--images` é sempre o envelope máximo das 92 imagens, não a estimativa de um único
+pedido. O plano separa custo imediato, provável e máximo conservador. Para `--images 2.024`,
+o imediato é a baseline de 39 imagens (US$ 0,858), o provável soma somente heroes
+selecionados e o máximo mantém as 92 imagens, 60 s de hero e 15 s de retry como
+exposição condicional (US$ 5,924). `committed` representa compromissos adicionais
+ao gasto já informado no ledger; não se deve informar o mesmo gasto nos dois lugares.
+Local-only custa zero API; master e rerender também custam zero API.
+O retorno expõe `immediate_projected`, `probable_projected` e
+`conservative_projected` com seus três vereditos de orçamento separados; nenhuma
+reserva condicional pode ser tratada como trabalho já liberado.
 
 `--candidates arquivo.json` aceita uma lista de objetos `Hero` com `scene_id`,
 `action`, `impact`, `movement` e `start`. A seleção usa impacto vezes necessidade
 de movimento, desempata deterministicamente e reordena os selecionados na timeline.
 Não há seleção por intervalos uniformes. São até 12 slots hero de 5 s, 720p, com
-pool compartilhado de até 3 retries condicionais à QA. O planner mostra a reserva
-integral de 60 s mesmo quando há menos candidatos; não preenche slots por geração.
+pool compartilhado de até 3 retries condicionais à QA. O planner mostra os heroes
+realmente selecionados e mantém a capacidade máxima de 60 s separada; nunca preenche
+slots por geração.
+
+## Fluxo por fases e throughput
+
+O plano não materializa a reserva como fila. Ele declara quatro fases:
+
+1. **baseline**: as 39 primeiras imagens, seguidas de `IMAGE_QA`;
+2. **hero**: apenas para uma imagem da mesma cena, aprovada por QA e vinculada ao
+   recibo exato, além de uma seleção semântica explícita;
+3. **remediação**: alternativa, correção ou retry somente após `REJECTED_QA_BOUND_TO_RESULT_HASH`;
+4. **render**: somente após `ALL_ACTIVE_ASSETS_APPROVED`, seguido de `FINAL_QA`.
+
+Assim, uma rejeição não paralisa baselines independentes, reservas não geram custo
+nem ocupam workers, e o orçamento imediato usa `actual_spend + pending_cap + next_job`.
+O envelope máximo continua obrigatório no gate pré-pago, mas não deve ser contabilizado
+como cobrança nem liberar chamadas automáticas.
 
 O planejamento adaptativo de 3–15 minutos em `src/agents/duration_planner.py`
 e `src/content/roadmap.py` foi preservado sem alterações. O planejamento híbrido
@@ -126,8 +147,9 @@ sempre atrás de autorização humana e evidência de preço frescas.
    parcial existente usa apenas `recover`. Intent sem ID/parcial bloqueia por
    reconciliação: não há retry de timeout nem resubmissão cega.
 9. `Executor.qa(id, result_sha256, False, reviewer)` vincula rejeição ao resultado
-   exato. Um predecessor só admite um sucessor e deve ser da mesma cena/categoria
-   compatível. O pool é cumulativo, persistente e compartilhado. Overrun real é
+   exato. Alternativas, correções e retries exigem esse predecessor da mesma cena e
+   categoria compatível. Um predecessor só admite um sucessor. O pool é cumulativo,
+   persistente e compartilhado. Overrun real é
    registrado e bloqueia trabalho posterior; custo acima da reserva não é ocultado.
 
 Use um banco por produção/conta e encaminhe todos os seus pedidos por ele. Dois
@@ -138,6 +160,9 @@ separados e não podem compartilhar assets/aprovações entre modos.
 
 `LocalRenderer.render(scenes, manifest, audio, srt, output, hold=4)` não recebe
 provider nem orçamento de API. Recebe somente inputs aprovados e saída nova.
+`LocalRenderer(..., filter_complex_threads=N)` permite estabelecer explicitamente
+um teto de threads para o grafo final; sem valor, o FFmpeg decide. O valor usado
+fica no receipt para permitir benchmark e reprodução.
 `Scene(image, seconds)` produz zoom/pan real com FFmpeg. `Scene(image, 5, clip=...)`
 usa um hero aprovado real, verificado por ffprobe; LIVE exige 1280×720.
 
@@ -253,9 +278,9 @@ $env:PYTHONPATH=''
 ### Integração de planejamento EP8
 
 `docs/EP8_HYBRID_HERO_CANDIDATES.json` registra 13 candidatos semânticos derivados
-das ações e tempos do storyboard V10 real. O planner selecionou 12 por impacto e
-movimento em `docs/EP8_HYBRID_BUDGET_PLAN.json`, mas deixou `requests: []`,
-`execution_authorized: false` e `WAITING_BUDGET_APPROVAL`: US$ 8,08 comprometidos +
-US$ 1,36 projetados + US$ 3,12 de heróis = US$ 12,56; com reserva de três retries,
-US$ 13,34. `docs/EP8_HYBRID_LOCAL_ONLY_PLAN.json` comprova a rota sem API em US$ 9,44,
-também sem autorização automática. Nenhum clip Seedance foi submetido.
+das ações e tempos do storyboard V10 real. `docs/EP8_HYBRID_BUDGET_PLAN.json` e
+`docs/EP8_HYBRID_LOCAL_ONLY_PLAN.json` são snapshots históricos do schema anterior:
+não autorizam execução, não são ledger e não devem ser usados como preflight após a
+refatoração por fases. Um novo preflight deve ser gerado pelo planner atual, com
+`selected_work`, `conditional_reserve`, `cost_envelope` e os dois estados de orçamento.
+Nenhum clip Seedance foi submetido.

@@ -167,6 +167,8 @@ def plan(
                 raise ValueError(f"{name} must be a nonnegative integer")
         if recommended_duration_seconds <= closing_seconds:
             raise ValueError("closing duration must fit inside episode duration")
+    if scene_count is not None and scene_count > config.capacity["first"]:
+        raise ValueError("scene_count exceeds baseline capacity")
     if guard is None:
         guard = BudgetGuard(
             CostLedger("hybrid-plan", BudgetConfig(hard_limit_usd=float(config.limit)))
@@ -177,20 +179,41 @@ def plan(
         (h for h in candidates if h.movement > 0),
         key=lambda h: (-(h.impact * h.movement), h.start, h.scene_id),
     )[: config.hero_slots]
-    hero_cost = config.hero_slots * config.clip_seconds * config.video_per_second
+    selected_baseline_count = scene_count if scene_count is not None else config.capacity["first"]
+    selected_hero_count = 0 if local_only else len(heroes)
+    selected_hero_seconds = selected_hero_count * config.clip_seconds
+    hero_cost = selected_hero_seconds * config.video_per_second
+    reserved_hero_cost = (
+        config.hero_slots * config.clip_seconds * config.video_per_second
+    )
     retry_cost = config.retry_slots * config.clip_seconds * config.video_per_second
-    api = Decimal(0) if local_only else images + hero_cost
-    estimate = CostEstimate(provider="hybrid", estimated_cost=float(committed + api))
-    check = guard.approve_job(estimate)
-    conservative = committed + api + (0 if local_only else retry_cost)
+    total_image_capacity = sum(config.capacity.values())
+    baseline_image_cost = (
+        Decimal(0)
+        if local_only
+        else images * Decimal(selected_baseline_count) / Decimal(total_image_capacity)
+    )
+    api = Decimal(0) if local_only else baseline_image_cost + hero_cost
+    immediate = committed + baseline_image_cost
+    immediate_check = guard.approve_job(
+        CostEstimate(provider="hybrid", estimated_cost=float(immediate))
+    )
+    probable = committed + api
+    probable_check = guard.approve_job(
+        CostEstimate(provider="hybrid", estimated_cost=float(probable))
+    )
+    conservative_api = (
+        Decimal(0) if local_only else images + reserved_hero_cost + retry_cost
+    )
+    conservative = committed + conservative_api
     conservative_check = guard.approve_job(
         CostEstimate(provider="hybrid", estimated_cost=float(conservative))
     )
     delivery = None
     if recommended_duration_seconds is not None:
-        active_hero_seconds = 0 if local_only else config.hero_slots * config.clip_seconds
+        active_hero_seconds = selected_hero_seconds
         effective_scene_count = scene_count if scene_count is not None else len(candidates)
-        local_window_count = max(0, effective_scene_count - config.hero_slots)
+        local_window_count = max(0, effective_scene_count - selected_hero_count)
         local_animation_seconds = (
             recommended_duration_seconds - active_hero_seconds - closing_seconds
         )
@@ -212,17 +235,54 @@ def plan(
         "requests": [],
         "delivery": delivery,
         "capacity": dict(config.capacity),
+        "selected_work": {
+            "baseline_images": selected_baseline_count,
+            "hero_clips": selected_hero_count,
+            "hero_seconds": selected_hero_seconds,
+        },
+        "conditional_reserve": {
+            "alternative_images": config.capacity["alternative"],
+            "correction_images": config.capacity["correction"],
+            "thumbnail_images": config.capacity["thumbnail"],
+            "hero_retries": config.retry_slots,
+            "hero_retry_seconds": config.retry_slots * config.clip_seconds,
+        },
+        "phase_plan": {
+            "baseline": {"gate": "IMAGE_QA", "selected": selected_baseline_count},
+            "hero": {
+                "gate": "HERO_QA",
+                "requires": "APPROVED_IMAGE_QA",
+                "selected": selected_hero_count,
+            },
+            "remediation": {
+                "gate": "IMAGE_QA",
+                "requires": "REJECTED_QA_BOUND_TO_RESULT_HASH",
+                "selected": 0,
+            },
+            "render": {"gate": "FINAL_QA", "requires": "ALL_ACTIVE_ASSETS_APPROVED"},
+        },
         "hero_capacity": config.hero_slots,
         "retry_capacity": config.retry_slots,
-        "hero_seconds": 60,
+        "hero_seconds": selected_hero_seconds,
+        "reserved_hero_seconds": config.hero_slots * config.clip_seconds,
         "hero_cost": hero_cost,
+        "reserved_hero_cost": reserved_hero_cost,
         "retry_cost": retry_cost,
         "api_cost": api,
-        "projected": committed + api + money(guard.ledger.spent),
+        "cost_envelope": {
+            "immediate": baseline_image_cost,
+            "probable": api,
+            "maximum": conservative_api,
+        },
+        "immediate_projected": immediate + money(guard.ledger.spent),
+        "probable_projected": probable + money(guard.ledger.spent),
+        "projected": probable + money(guard.ledger.spent),
         "conservative_projected": conservative + money(guard.ledger.spent),
+        "immediate_budget_action": immediate_check.action,
+        "probable_budget_action": probable_check.action,
         "conservative_budget_action": conservative_check.action,
-        "conservative_api_cost": api + (0 if local_only else retry_cost),
-        "budget_action": check.action,
+        "conservative_api_cost": conservative_api,
+        "budget_action": conservative_check.action,
         "heroes": [] if local_only else sorted(heroes, key=lambda h: h.start),
         "local_only": local_only,
         "execution_authorized": False,

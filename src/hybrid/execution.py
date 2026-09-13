@@ -177,7 +177,20 @@ class Executor:
                 raise ValueError(
                     "changed first pass requires rejected QA and retry reserve"
                 )
-            if job.category in {"correction", "hero_retry"} or job.predecessor:
+            if job.category == "hero":
+                previous = next(
+                    (r for r in rows if r["request_id"] == job.predecessor), None
+                )
+                if (
+                    not previous
+                    or previous.get("qa") is not True
+                    or previous["scene"] != job.scene
+                    or previous["status"] != "COMPLETE"
+                    or previous["category"] != "first"
+                ):
+                    raise ValueError("hero requires exact approved baseline predecessor")
+                self._verify_receipt(previous)
+            elif job.category in {"alternative", "correction", "hero_retry"} or job.predecessor:
                 previous = next(
                     (r for r in rows if r["request_id"] == job.predecessor), None
                 )
@@ -195,6 +208,7 @@ class Executor:
                     else {"first", "alternative", "correction", "thumbnail"}
                 )
                 if previous["category"] not in allowed or job.category not in {
+                    "alternative",
                     "correction",
                     "hero_retry",
                 }:
