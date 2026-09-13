@@ -18,6 +18,20 @@ def main():
         "--images", default="0", help="Explicit image request estimate, USD"
     )
     parser.add_argument("--candidates", type=Path, help="JSON semantic Hero candidates")
+    parser.add_argument(
+        "--duration-seconds",
+        type=int,
+        help="Adaptive duration selected by biblical/story analysis (180--900)",
+    )
+    parser.add_argument("--essential-events", type=int)
+    parser.add_argument("--narration-words", type=int)
+    parser.add_argument("--scene-count", type=int)
+    parser.add_argument(
+        "--closing-seconds",
+        type=int,
+        default=4,
+        help="Required emotional/theological closing beat (3--5; default 4)",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     candidates = []
@@ -32,6 +46,11 @@ def main():
         local_only=args.local_only,
         committed=money(args.committed),
         images=money(args.images),
+        recommended_duration_seconds=args.duration_seconds,
+        essential_events=args.essential_events,
+        narration_words=args.narration_words,
+        scene_count=args.scene_count,
+        closing_seconds=args.closing_seconds,
     )
     result["heroes"] = [asdict(hero) for hero in result["heroes"]]
     if args.output:

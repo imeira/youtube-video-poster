@@ -136,8 +136,37 @@ def plan(
     guard: BudgetGuard | None = None,
     committed=Decimal(0),
     images=Decimal(0),
+    recommended_duration_seconds: int | None = None,
+    essential_events: int | None = None,
+    narration_words: int | None = None,
+    scene_count: int | None = None,
+    closing_seconds: int = 4,
 ):
+    """Build a costed hybrid plan without fixing the episode duration.
+
+    The caller supplies the duration determined by biblical/story analysis. When
+    present it must stay within the approved 3--15 minute range and reserves a
+    3--5 second final teaching/comfort beat instead of ending on an action cut.
+    No provider call is made here.
+    """
     committed, images = money(committed), money(images)
+    if closing_seconds not in (3, 4, 5):
+        raise ValueError("closing_seconds must be 3 to 5 seconds")
+    if recommended_duration_seconds is not None:
+        if (
+            type(recommended_duration_seconds) is not int
+            or not 180 <= recommended_duration_seconds <= 900
+        ):
+            raise ValueError("recommended_duration_seconds must be 180 to 900")
+        for name, value in {
+            "essential_events": essential_events,
+            "narration_words": narration_words,
+            "scene_count": scene_count,
+        }.items():
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if recommended_duration_seconds <= closing_seconds:
+            raise ValueError("closing duration must fit inside episode duration")
     if guard is None:
         guard = BudgetGuard(
             CostLedger("hybrid-plan", BudgetConfig(hard_limit_usd=float(config.limit)))
@@ -157,8 +186,31 @@ def plan(
     conservative_check = guard.approve_job(
         CostEstimate(provider="hybrid", estimated_cost=float(conservative))
     )
+    delivery = None
+    if recommended_duration_seconds is not None:
+        active_hero_seconds = 0 if local_only else config.hero_slots * config.clip_seconds
+        effective_scene_count = scene_count if scene_count is not None else len(candidates)
+        local_window_count = max(0, effective_scene_count - config.hero_slots)
+        local_animation_seconds = (
+            recommended_duration_seconds - active_hero_seconds - closing_seconds
+        )
+        if local_animation_seconds < 0:
+            raise ValueError("duration is shorter than hero and closing contract")
+        delivery = {
+            "duration_seconds": recommended_duration_seconds,
+            "essential_events": essential_events,
+            "narration_words": narration_words,
+            "scene_count": effective_scene_count,
+            "hero_seconds": active_hero_seconds,
+            "local_window_count": local_window_count,
+            "local_animation_seconds": local_animation_seconds,
+            "closing_seconds": closing_seconds,
+            "closing_required": True,
+        }
+
     return {
         "requests": [],
+        "delivery": delivery,
         "capacity": dict(config.capacity),
         "hero_capacity": config.hero_slots,
         "retry_capacity": config.retry_slots,

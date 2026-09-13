@@ -1,5 +1,24 @@
 # Arquitetura híbrida rápida
 
+## Duração adaptativa e encerramento obrigatório
+
+A duração não é fixa: a pré-produção bíblica escolhe de **180 a 900 segundos**
+(3--15 min) e registra acontecimentos indispensáveis, palavras da narração,
+cenas e custo antes de qualquer job. O plano reserva obrigatoriamente **3--5 s**
+para uma lição ou resolução emocional/teológica infantil; não é permitido acabar
+em um corte de ação.
+
+O planejador offline aceita essa decisão sem fazer chamadas de provedor:
+
+```bash
+python -m src.hybrid --duration-seconds 480 --essential-events 9 \
+  --narration-words 1040 --scene-count 39 --closing-seconds 4 --images 2.024
+```
+
+Com 39 cenas, os 12 hero clips de 5 s usam 60 s; as 27 janelas restantes são
+compostas/localmente animadas por FFmpeg. A reserva de 15 s de retry permanece
+condicional e requer preflight, autorização unitária e orçamento disponível.
+
 Implementação opt-in em `src/hybrid/`, sem imports de SDK, acesso a credenciais,
 geração durante planejamento, acoplamento a R027 ou episódios específicos.
 O comando legado `studio` não foi alterado para iniciar esta arquitetura sozinho.
