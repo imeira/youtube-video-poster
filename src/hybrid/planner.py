@@ -152,19 +152,19 @@ def plan(
     committed, images = money(committed), money(images)
     if closing_seconds not in (3, 4, 5):
         raise ValueError("closing_seconds must be 3 to 5 seconds")
+    for name, value in {
+        "essential_events": essential_events,
+        "narration_words": narration_words,
+        "scene_count": scene_count,
+    }.items():
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"{name} must be a nonnegative integer")
     if recommended_duration_seconds is not None:
         if (
             type(recommended_duration_seconds) is not int
             or not 180 <= recommended_duration_seconds <= 900
         ):
             raise ValueError("recommended_duration_seconds must be 180 to 900")
-        for name, value in {
-            "essential_events": essential_events,
-            "narration_words": narration_words,
-            "scene_count": scene_count,
-        }.items():
-            if value is not None and (type(value) is not int or value < 0):
-                raise ValueError(f"{name} must be a nonnegative integer")
         if recommended_duration_seconds <= closing_seconds:
             raise ValueError("closing duration must fit inside episode duration")
     if scene_count is not None and scene_count > config.capacity["first"]:
@@ -175,11 +175,11 @@ def plan(
         )
     if len({h.scene_id for h in candidates}) != len(candidates):
         raise ValueError("duplicate scene IDs")
+    selected_baseline_count = scene_count if scene_count is not None else config.capacity["first"]
     heroes = sorted(
         (h for h in candidates if h.movement > 0),
         key=lambda h: (-(h.impact * h.movement), h.start, h.scene_id),
-    )[: config.hero_slots]
-    selected_baseline_count = scene_count if scene_count is not None else config.capacity["first"]
+    )[: min(config.hero_slots, selected_baseline_count)]
     selected_hero_count = 0 if local_only else len(heroes)
     selected_hero_seconds = selected_hero_count * config.clip_seconds
     hero_cost = selected_hero_seconds * config.video_per_second
