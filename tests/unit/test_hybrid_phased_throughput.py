@@ -87,3 +87,21 @@ def test_plan_uses_real_scene_count_and_keeps_maximum_as_preflight_gate():
     with pytest.raises(ValueError, match="scene_count exceeds baseline capacity"):
         plan(Config(), scene_count=40)
 
+
+def test_scene_count_is_nonnegative_even_without_duration():
+    with pytest.raises(ValueError, match="scene_count must be a nonnegative integer"):
+        plan(Config(), scene_count=-1)
+
+
+def test_heroes_cannot_exceed_the_selected_baseline_count():
+    result = plan(
+        Config(),
+        candidates=_heroes(12),
+        images=Decimal("2.024"),
+        scene_count=4,
+    )
+
+    assert result["selected_work"]["baseline_images"] == 4
+    assert result["selected_work"]["hero_clips"] == 4
+    assert result["delivery"] is None
+
