@@ -187,3 +187,10 @@ def test_publish_new_never_clobbers_a_racing_output(tmp_path):
 
     assert output.read_bytes() == b"existing"
     assert source.read_bytes() == b"new"
+
+
+def test_renderer_accepts_a_bounded_ffmpeg_thread_budget():
+    renderer = LocalRenderer(width=320, height=180, filter_complex_threads=2)
+    assert renderer.filter_complex_threads == 2
+    with pytest.raises(ValueError, match="thread"):
+        LocalRenderer(width=320, height=180, filter_complex_threads=0)

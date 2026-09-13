@@ -15,7 +15,9 @@ def main():
     parser.add_argument("--local-only", action="store_true")
     parser.add_argument("--committed", default="0", help="Existing commitments, USD")
     parser.add_argument(
-        "--images", default="0", help="Explicit image request estimate, USD"
+        "--images",
+        default="0",
+        help="Maximum image-capacity envelope (all 92 slots), USD",
     )
     parser.add_argument("--candidates", type=Path, help="JSON semantic Hero candidates")
     parser.add_argument(

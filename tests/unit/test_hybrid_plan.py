@@ -19,8 +19,10 @@ def test_capacity_is_not_generation_and_local_only_is_zero():
     assert result["requests"] == []
     assert result["hero_capacity"] == 12
     assert result["retry_capacity"] == 3
-    assert result["hero_seconds"] == 60
-    assert result["hero_cost"] == Decimal("3.120")
+    assert result["hero_seconds"] == 0
+    assert result["reserved_hero_seconds"] == 60
+    assert result["hero_cost"] == Decimal(0)
+    assert result["reserved_hero_cost"] == Decimal("3.120")
     assert result["retry_cost"] == Decimal("0.780")
     assert plan(config, local_only=True)["api_cost"] == 0
 
@@ -55,7 +57,9 @@ def test_budget_guard_blocks_full_plan_and_semantic_selection():
         images=Decimal("1.36"),
     )
     assert result["budget_action"] == BudgetAction.WAITING_BUDGET_APPROVAL
-    assert result["projected"] == Decimal("12.46")
+    assert result["projected"] == (
+        Decimal("7.98") + Decimal("1.36") * Decimal(39) / Decimal(92) + Decimal("3.120")
+    )
     assert {h.scene_id for h in result["heroes"]} == {str(i) for i in range(8, 20)}
     assert [h.start for h in result["heroes"]] == sorted(
         h.start for h in result["heroes"]
@@ -72,6 +76,7 @@ def test_invalid_plans_fail_closed():
 
 def test_planner_always_consults_guard_even_without_injection():
     result = plan(Config(), committed=Decimal("7.98"), images=Decimal("1.36"))
+    assert result["immediate_budget_action"] == BudgetAction.PROCEED_WITH_WARNING
     assert result["budget_action"] == BudgetAction.WAITING_BUDGET_APPROVAL
     assert result["conservative_projected"] == Decimal("13.24")
     assert result["conservative_budget_action"] == BudgetAction.WAITING_BUDGET_APPROVAL

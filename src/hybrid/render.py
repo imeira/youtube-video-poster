@@ -120,7 +120,7 @@ def validate_srt(path, duration):
 
 
 class LocalRenderer:
-    def __init__(self, width=1280, height=720, fps=24):
+    def __init__(self, width=1280, height=720, fps=24, *, filter_complex_threads=None):
         if (
             any(type(n) is not int or n <= 0 for n in (width, height, fps))
             or width % 2
@@ -128,7 +128,12 @@ class LocalRenderer:
             or fps % 4
         ):
             raise ValueError("even geometry and fps divisible by four required")
+        if filter_complex_threads is not None and (
+            type(filter_complex_threads) is not int or filter_complex_threads < 1
+        ):
+            raise ValueError("positive filter-complex thread budget required")
         self.width, self.height, self.fps = width, height, fps
+        self.filter_complex_threads = filter_complex_threads
 
     def render(self, scenes, manifest, audio, srt, output, *, hold=4):
         timeline = timing(scenes, hold=hold, fps=self.fps)
@@ -245,7 +250,9 @@ class LocalRenderer:
                         str(root / f"scene{index}.mp4"),
                     ]
                 )
-            args = ["ffmpeg", "-v", "error", "-filter_complex_threads", "1"]
+            args = ["ffmpeg", "-v", "error"]
+            if self.filter_complex_threads is not None:
+                args += ["-filter_complex_threads", str(self.filter_complex_threads)]
             for index in range(len(scenes)):
                 args += ["-i", str(root / f"scene{index}.mp4")]
             filters = [
@@ -329,6 +336,7 @@ class LocalRenderer:
             "hold_seconds": hold,
             "audio_operation": "stream_copy",
             "hero_sha256": [s.clip.sha256 for s in scenes if s.clip is not None],
+            "filter_complex_threads": self.filter_complex_threads,
         }
         atomic_json(output.with_name(output.name + ".receipt.json"), receipt)
         return receipt

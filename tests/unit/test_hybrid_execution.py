@@ -209,10 +209,19 @@ async def test_budget_reservation_is_atomic_and_durable(tmp_path):
 async def test_retries_require_exact_failed_qa_and_shared_reserve(tmp_path):
     executor = Executor(tmp_path / "jobs.db", Config())
     provider = Provider(tmp_path)
-    request = job(tmp_path, category="hero", cost=Decimal(".26"))
+    baseline = job(tmp_path)
+    request = replace(
+        baseline,
+        category="hero",
+        cost=Decimal(".26"),
+        predecessor=baseline.request_id,
+        payload={"prompt": "approved source becomes hero"},
+    )
     retry = replace(request, category="hero_retry", predecessor=request.request_id)
     with pytest.raises(ValueError, match="QA"):
         await executor.run(retry, provider)
+    baseline_receipt = await executor.run(baseline, provider)
+    executor.qa(baseline.request_id, baseline_receipt["result_sha256"], True, "reviewer")
     receipt = await executor.run(request, provider)
     executor.qa(request.request_id, receipt["result_sha256"], False, "reviewer")
     for _ in range(3):
@@ -221,7 +230,48 @@ async def test_retries_require_exact_failed_qa_and_shared_reserve(tmp_path):
         retry = replace(retry, predecessor=retry.request_id)
     with pytest.raises(RuntimeError, match="capacity"):
         await executor.run(retry, provider)
-    assert provider.calls == 4
+    assert provider.calls == 5
+
+
+@pytest.mark.asyncio
+async def test_hero_requires_its_approved_baseline_receipt(tmp_path):
+    executor = Executor(tmp_path / "jobs.db", Config())
+    provider = Provider(tmp_path)
+    baseline = job(tmp_path)
+    hero = replace(
+        baseline,
+        category="hero",
+        cost=Decimal(".26"),
+        predecessor=baseline.request_id,
+        payload={"prompt": "approved source becomes a hero clip"},
+    )
+
+    with pytest.raises(ValueError, match="approved baseline"):
+        await executor.run(hero, provider)
+
+    receipt = await executor.run(baseline, provider)
+    executor.qa(baseline.request_id, receipt["result_sha256"], True, "reviewer")
+    assert (await executor.run(hero, provider))["status"] == "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_alternative_requires_exact_rejected_qa_predecessor(tmp_path):
+    executor = Executor(tmp_path / "jobs.db", Config())
+    provider = Provider(tmp_path)
+    first = job(tmp_path)
+    receipt = await executor.run(first, provider)
+
+    with pytest.raises(ValueError, match="retry requires exact rejected QA predecessor"):
+        await executor.run(replace(first, category="alternative"), provider)
+
+    executor.qa(first.request_id, receipt["result_sha256"], False, "reviewer")
+    alternative = replace(
+        first,
+        category="alternative",
+        predecessor=first.request_id,
+        payload={"prompt": "an alternative"},
+    )
+    assert (await executor.run(alternative, provider))["status"] == "COMPLETE"
 
 
 @pytest.mark.asyncio
