@@ -5,6 +5,8 @@
 > [`ONE_HOUR_PRODUCTION_SLA.md`](ONE_HOUR_PRODUCTION_SLA.md). O SLA não
 > autoriza provider, promoção ou publicação; ele falha fechado ou usa a rota
 > local já aprovada quando a espera externa ameaça o prazo.
+> O escritor determinístico e os estados por ativo estão definidos em
+> [`CONTROL_PLANE.md`](CONTROL_PLANE.md).
 
 ## Duração adaptativa e encerramento obrigatório
 
