@@ -20,6 +20,23 @@ production:
     - runpod_on_demand
     - other_providers
 
+# --- Production SLA: ready for video approval within one hour ---
+# Planning and orchestration only. This never bypasses price, budget, QA or
+# publication gates; an external queue that misses its stage budget falls back
+# to the approved local-animation route instead of extending the run.
+production_sla:
+  ready_for_video_approval_seconds: 3600
+  baseline_provider_concurrency: 8
+  qa_concurrency: 8
+  baseline_stage_seconds: 45
+  qa_stage_seconds: 30
+  remediation_slots: 4
+  remediation_stage_seconds: 90
+  local_render_stage_seconds: 600
+  final_qa_stage_seconds: 180
+  reserve_seconds: 120
+  policy: "fail_closed_before_paid_submit; degrade_to_approved_local_animation_on_deadline_risk"
+
 # --- §3 OBJETIVO FINANCEIRO ---
 budget:
   currency: USD

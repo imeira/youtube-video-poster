@@ -1,5 +1,11 @@
 # Arquitetura híbrida rápida
 
+> A execução tem SLA de 60 minutos até o master pronto para aprovação. A
+> arquitetura de ondas, cortes de prazo e invariantes preservados está em
+> [`ONE_HOUR_PRODUCTION_SLA.md`](ONE_HOUR_PRODUCTION_SLA.md). O SLA não
+> autoriza provider, promoção ou publicação; ele falha fechado ou usa a rota
+> local já aprovada quando a espera externa ameaça o prazo.
+
 ## Duração adaptativa e encerramento obrigatório
 
 A duração não é fixa: a pré-produção bíblica escolhe de **180 a 900 segundos**
