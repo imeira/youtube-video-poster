@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -87,7 +85,7 @@ class TestScriptAgent:
         """Children adaptation should add dramatic pauses."""
         agent = ScriptAgent()
         adapted = agent._adapt_for_children("Deus criou a luz.")
-        assert "..." in adapted  # dramatic pause
+        assert "..." in adapted
 
 
 class TestStoryboardAgent:
@@ -100,7 +98,6 @@ class TestStoryboardAgent:
             {"start": 0.1, "end": 2.0, "duration": 1.9, "text": "Primeira frase."},
             {"start": 2.5, "end": 4.5, "duration": 2.0, "text": "Segunda frase."},
         ]
-
         result = await agent.run(
             episode_id="TEST_TIMELINE",
             narration="Primeira frase. Segunda frase.",
@@ -108,7 +105,6 @@ class TestStoryboardAgent:
             audio_duration_s=5.0,
             storyboard_dir=str(tmp_path),
         )
-
         assert [(scene["start"], scene["end"], scene["duration"]) for scene in result.data["scenes"]] == [
             (0.0, 2.5, 2.5),
             (2.5, 5.0, 2.5),
@@ -131,9 +127,7 @@ class TestStoryboardAgent:
         assert result.success
         assert result.data["scene_count"] == 2
         assert (tmp_path / "scenes.json").exists()
-        # Verify scene schema (§34)
-        with open(tmp_path / "scenes.json") as f:
-            data = json.load(f)
+        data = json.loads((tmp_path / "scenes.json").read_text(encoding="utf-8"))
         scene = data["scenes"][0]
         assert "scene_id" in scene
         assert "start" in scene
@@ -157,7 +151,6 @@ class TestStoryboardAgent:
             storyboard_dir=str(tmp_path),
         )
         assert result.success
-        # "criou" should make first scene HIGH or CRITICAL
         scenes = result.data["scenes"]
         assert scenes[0]["importance"] in ("HIGH", "CRITICAL")
 
@@ -171,3 +164,23 @@ class TestStoryboardAgent:
             sentence_timestamps=None,
         )
         assert not result.success
+
+    @pytest.mark.asyncio
+    async def test_compiled_storyboard_never_calls_llm_once_per_scene(self):
+        class ExplodingLLM:
+            def available(self):
+                return True
+
+            async def complete(self, **_kwargs):
+                raise AssertionError("compiled prompts must not invoke per-scene LLM")
+
+        result = await StoryboardAgent(llm_provider=ExplodingLLM()).run(
+            episode_id="COMPILED",
+            narration="Abraão olha para o céu.",
+            sentence_timestamps=[
+                {"start": 0, "end": 2, "duration": 2, "text": "Abraão olha para o céu."}
+            ],
+        )
+
+        assert result.success
+        assert result.data["scenes"][0]["image_prompt"]

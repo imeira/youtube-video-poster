@@ -15,7 +15,6 @@ from pathlib import Path
 
 from src.config.loader import StudioConfig
 
-
 # Directory names within an episode (§15)
 EPISODE_SUBDIRS = [
     "research",
@@ -29,6 +28,7 @@ EPISODE_SUBDIRS = [
     "images",
     "animation",
     "cloud_clips",
+    "compiled",
     "subtitles",
     "thumbnails",
     "metadata",
@@ -55,6 +55,7 @@ class EpisodePaths:
     images_dir: Path
     animation_dir: Path
     cloud_clips_dir: Path
+    compiled_dir: Path
     subtitles_dir: Path
     thumbnails_dir: Path
     metadata_dir: Path
@@ -99,6 +100,7 @@ class EpisodeFS:
             images_dir=root / "images",
             animation_dir=root / "animation",
             cloud_clips_dir=root / "cloud_clips",
+            compiled_dir=root / "compiled",
             subtitles_dir=root / "subtitles",
             thumbnails_dir=root / "thumbnails",
             metadata_dir=root / "metadata",

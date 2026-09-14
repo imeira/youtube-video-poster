@@ -8,11 +8,21 @@ only the next hash-bound work eligible in the durable ``Executor`` ledger.
 from __future__ import annotations
 
 import asyncio
+import json
+import shutil
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from itertools import pairwise
+from pathlib import Path
 
-from src.hybrid.artifacts import FrozenAsset, Manifest, digest
+from src.hybrid.artifacts import (
+    FrozenAsset,
+    Manifest,
+    atomic_json,
+    contact_sheet,
+    digest,
+    sha256,
+)
 from src.hybrid.execution import Executor, Job, Provider
 
 
@@ -64,6 +74,36 @@ class CompiledEpisode:
     @property
     def checksum(self):
         return digest(asdict(self))
+
+    def save(self, path):
+        atomic_json(path, {"episode": asdict(self), "checksum": self.checksum})
+
+    @classmethod
+    def load(cls, path):
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        episode = raw["episode"]
+        audio = FrozenAsset(**{**episode["audio"], "path": Path(episode["audio"]["path"])})
+        result = cls.compile(episode["episode_id"], audio, (FrameSpec(**frame) for frame in episode["frames"]))
+        if raw.get("checksum") != result.checksum:
+            raise ValueError("compiled episode checksum mismatch")
+        return result
+
+
+def compile_storyboard(episode_id: str, audio: FrozenAsset, scenes) -> CompiledEpisode:
+    """Compile already-authored visual prompts; it never asks a model per frame."""
+    frames = []
+    for scene in scenes:
+        frames.append(
+            FrameSpec(
+                scene_id=str(scene.get("scene_id", "")),
+                start=float(scene["start"]),
+                end=float(scene["end"]),
+                prompt=str(scene.get("image_prompt", "")),
+                semantic_action=str(scene.get("visual_action") or scene.get("action") or ""),
+                hero=bool(scene.get("hero", False)),
+            )
+        )
+    return CompiledEpisode.compile(episode_id, audio, frames)
 
 
 class ProductionRun:
@@ -181,3 +221,84 @@ class ProductionRun:
             return False
         heroes = [self.executor.inspect(job.request_id) for job in self._heroes.values()]
         return all(row and row.get("qa") is True for row in heroes)
+
+
+class OperationalPipeline:
+    """Persisted operational boundary for compiled image production and QA."""
+
+    def __init__(
+        self,
+        episode: CompiledEpisode,
+        executor: Executor,
+        source_manifest: Manifest,
+        *,
+        workspace: Path,
+        endpoint: str,
+        image_cost: Decimal,
+    ):
+        self.workspace = Path(workspace)
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.episode = episode
+        self.run = ProductionRun(
+            episode,
+            executor,
+            source_manifest,
+            endpoint=endpoint,
+            image_cost=image_cost,
+        )
+        self.episode.save(self.workspace / "compiled_episode.json")
+
+    async def dispatch_baselines(self, provider: Provider):
+        return await self.run.dispatch_baselines(provider)
+
+    def _promote_candidate(self, scene_id: str, result_sha256: str, reviewer: str):
+        job = self.run._completed_job_for_result(scene_id, result_sha256)
+        receipt = self.run.executor.inspect(job.request_id)
+        source = Path(receipt["result"])
+        if sha256(source) != result_sha256:
+            raise ValueError("candidate bytes changed after receipt")
+        output = self.workspace / "approved_images" / f"{scene_id}-{result_sha256}{source.suffix}"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if output.exists():
+            if sha256(output) != result_sha256:
+                raise ValueError("approved candidate path collision")
+        else:
+            shutil.copyfile(source, output)
+            if sha256(output) != result_sha256:
+                output.unlink(missing_ok=True)
+                raise ValueError("approved candidate copy hash mismatch")
+        return FrozenAsset.approve(output, reviewer, self.episode.audio.mode)
+
+    def record_visual_qa(self, scene_id: str, result_sha256: str, approved: bool, reviewer: str):
+        self.run.record_visual_qa(scene_id, result_sha256, approved, reviewer)
+        qa = {
+            "scene_id": scene_id,
+            "result_sha256": result_sha256,
+            "approved": approved,
+            "reviewer": reviewer,
+            "compilation": self.episode.checksum,
+        }
+        atomic_json(self.workspace / "qa" / f"{scene_id}.json", qa)
+        return self._promote_candidate(scene_id, result_sha256, reviewer) if approved else None
+
+    def approved_manifest(self):
+        assets = []
+        for frame in self.episode.frames:
+            receipt = self.run.executor.inspect(self.run._baselines[frame.scene_id].request_id)
+            if not receipt or receipt.get("qa") is not True:
+                raise ValueError("all active images require approved QA")
+            qa_path = self.workspace / "qa" / f"{frame.scene_id}.json"
+            if not qa_path.is_file():
+                raise ValueError("approved QA report missing")
+            qa = json.loads(qa_path.read_text(encoding="utf-8"))
+            assets.append(self._promote_candidate(frame.scene_id, receipt["result_sha256"], qa["reviewer"]))
+        sheet = self.workspace / "contact_sheet.png"
+        contact_sheet(assets, sheet)
+        manifest = Manifest.freeze(
+            assets,
+            FrozenAsset.approve(sheet, "compiled-qa", self.episode.audio.mode),
+            "compiled-qa",
+            self.episode.audio.mode,
+        )
+        manifest.save(self.workspace / "manifest.json")
+        return manifest

@@ -29,22 +29,27 @@ usa request ID determinístico, lock exclusivo, orçamento atômico e recuperaç
 novo POST. Uma retomada recompila o mesmo request ID e não reemite um hero já
 persistido.
 
-## Limites deliberados
+## Operação
 
-- Esta etapa não altera `DirectorAgent` nem executa mídia, provider, render,
-  Telegram ou YouTube.
-- Não migra nem reabre R029, R030 ou R031 do EP8. Requests já consumidos continuam
-  congelados; qualquer ponte futura deve importar somente manifestos aprovados e
-  iniciar novos trabalhos com IDs sucessores.
+`DirectorAgent.create_operational_pipeline()` é a única fachada de ativação. Ela
+lê o storyboard já compilado e exige explicitamente áudio congelado, manifest de
+referências image-to-image, banco SQLite, endpoint e custo máximo. O Diretor não
+executa mais o loop serial de imagem/animação depois do storyboard.
+
+`OperationalPipeline` persiste o pacote, recibos de QA, cópias hash-bound dos
+quadros aprovados, contact sheet e manifesto dentro de `episodes/<id>/compiled/`.
+O provider é injetado no despacho e toda chamada passa por `Executor.run()`.
+
+Não migra nem reabre R029, R030 ou R031 do EP8. Requests já consumidos continuam
+congelados; qualquer ponte futura deve importar somente manifestos aprovados e
+iniciar novos trabalhos com IDs sucessores.
+
+## Regras restantes
+
 - A autoridade LIVE, preço atualizado e recibo continuam requisitos por chamada.
 - A QA visual continua individual. Contact sheets agrupam apresentação, não
   substituem a decisão por quadro.
-
-## Migração segura
-
-1. Usar o compilador em shadow mode em um episódio novo ou numa cópia de metadados;
-2. comparar IDs, custos, quadro a quadro, hashes e decisões contra a rota atual;
-3. integrar o `DirectorAgent` somente como fachada que envia o pacote compilado ao
-   control plane, sem writer paralelo;
-4. depois de validação, migrar o renderer para exigir os recibos de QA do mesmo
-   ledger antes de iniciar FFmpeg.
+- `LocalRenderer.render_compiled()` exige que o control plane tenha QA completa
+  antes de iniciar FFmpeg.
+- Thumbnail, vídeo e publicação continuam gates humanos separados; nenhuma rota
+  desta camada publica ou agenda YouTube.
