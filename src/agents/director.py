@@ -12,6 +12,8 @@ import asyncio
 import json
 import logging
 import re
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from src.agents.animation import AnimationAgent
@@ -137,6 +139,40 @@ class DirectorAgent:
         self.thumbnail = ThumbnailAgent()
         self.metadata = MetadataAgent(llm_provider=llm_metadata)
         self._episodes: dict[str, dict] = {}  # in-memory cache
+
+    def create_operational_pipeline(
+        self,
+        episode_id: str,
+        *,
+        approved_audio,
+        source_manifest,
+        database: Path,
+        endpoint: str,
+        image_cost: Decimal,
+    ):
+        """Open the sole compiled writer after audio/reference approval.
+
+        This façade deliberately requires frozen audio and references instead of
+        accepting paths. It cannot silently turn a generated draft into an
+        approved source or invoke the legacy per-scene production loop.
+        """
+        from src.hybrid.compiled import OperationalPipeline, compile_storyboard
+        from src.hybrid.execution import Executor
+        from src.hybrid.planner import Config
+
+        fs = EpisodeFS(episode_id, self.config)
+        if not fs.exists():
+            raise FileNotFoundError(f"episode does not exist: {episode_id}")
+        storyboard = _read_json_file(fs.paths.storyboard_dir / "scenes.json")
+        episode = compile_storyboard(episode_id, approved_audio, storyboard.get("scenes", []))
+        return OperationalPipeline(
+            episode,
+            Executor(database, Config.load(), prior_spend=Decimal(0)),
+            source_manifest,
+            workspace=fs.paths.compiled_dir,
+            endpoint=endpoint,
+            image_cost=Decimal(image_cost),
+        )
 
     async def start_episode(
         self,
@@ -429,6 +465,24 @@ class DirectorAgent:
 
         state.transition_to(EpisodeState.GENERATING_IMAGES, agent=self.name, note="production ready for image gen")
         state.save(fs.paths.state_json)
+
+        # The Director stops at the compiled hand-off. A caller must provide the
+        # independently approved audio and immutable image-to-image references
+        # to create_operational_pipeline(); this prevents the legacy serial
+        # ImageGen/Animation agents from becoming a second production writer.
+        return {
+            "episode_id": episode_id,
+            "state": state.current_state.value,
+            "narration_preview": narration[:200],
+            "word_count": script_result.data["word_count"],
+            "audio_duration_s": round(audio_result.data["duration_s"], 1),
+            "scene_count": storyboard_result.data["scene_count"],
+            "compiled_activation": {
+                "storyboard": str(fs.paths.storyboard_dir / "scenes.json"),
+                "audio": audio_result.data["audio_path"],
+                "requires": ["approved_audio", "source_manifest", "executor", "provider"],
+            },
+        }
 
         # Step 10: Generate images (§42)
         scenes = storyboard_result.data["scenes"]

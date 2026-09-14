@@ -263,14 +263,14 @@ class StoryboardAgent(BaseAgent):
         
         char_desc = build_character_prompt(characters)
         
-        # Use LLM to convert Portuguese narration → English visual description
-        visual_desc = await self._narration_to_visual(
+        # The compiled path must not create one model request per visual window.
+        # Story planning may supply an explicit prompt once; otherwise derive a
+        # deterministic English description from the semantic scene fields.
+        visual_desc = self._fallback_visual(
             narration,
             characters,
             location,
-            mood,
             humans_allowed=scene.get("humans_allowed", True),
-            forbidden_characters=scene.get("forbidden_characters", []),
         )
         
         # Build the full styled prompt with the ENGLISH visual description

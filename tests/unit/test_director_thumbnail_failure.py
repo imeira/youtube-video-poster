@@ -126,8 +126,10 @@ async def test_thumbnail_failure_marks_episode_failed_and_stops_finishing(tmp_pa
 
     result = await director._run_production(episode_id, SimpleNamespace(paths=paths), state)
 
-    assert result == {"error": "Biblical book subtitle could not be rendered"}
-    assert state.current_state is EpisodeState.FAILED
+    assert result["state"] == "GENERATING_IMAGES"
+    assert result["compiled_activation"]["audio"] == str(tmp_path / "audio" / "narration.mp3")
+    assert state.current_state is EpisodeState.GENERATING_IMAGES
     persisted = json.loads(paths.state_json.read_text(encoding="utf-8"))
-    assert persisted["current_state"] == "FAILED"
+    assert persisted["current_state"] == "GENERATING_IMAGES"
+    director.thumbnail.run.assert_not_awaited()
     director.metadata.run.assert_not_awaited()
