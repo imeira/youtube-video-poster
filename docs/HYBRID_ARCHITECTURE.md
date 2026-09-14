@@ -76,6 +76,15 @@ O planejamento adaptativo de 3–15 minutos em `src/agents/duration_planner.py`
 e `src/content/roadmap.py` foi preservado sem alterações. O planejamento híbrido
 consome cenas sem impor duração ao roteiro e sem adicionar narração de preenchimento.
 
+## Produção compilada
+
+`docs/COMPILED_PRODUCTION.md` descreve a próxima camada de throughput:
+um pacote determinístico de áudio aprovado, timestamps semânticos e prompts já
+compilados, sem chamadas LLM por quadro. `ProductionRun` libera baselines
+concorrentes pelo `Executor`, heroes somente após QA da baseline exata e render
+somente após QA de todos os ativos. O objetivo é eliminar handoffs e scripts por
+microetapa, não impor um prazo rígido de entrega.
+
 ## Preços e providers
 
 Preços e esquemas foram conferidos em documentação oficial em 2026-09-09. Eles
