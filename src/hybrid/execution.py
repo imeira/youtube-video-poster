@@ -268,6 +268,10 @@ class Executor:
         ):
             raise ValueError("QA must bind a completed receipt hash and reviewer")
         self._verify_receipt(row)
+        if "qa" in row:
+            if row["qa"] == approved and row.get("qa_reviewer") == reviewer:
+                return
+            raise ValueError("QA receipt is immutable; create a remediation successor")
         self._change(request_id, qa=approved, qa_reviewer=reviewer)
 
     async def run(self, job: Job, provider: Provider, authorization=None, price=None):

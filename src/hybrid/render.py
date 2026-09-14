@@ -120,20 +120,25 @@ def validate_srt(path, duration):
 
 
 class LocalRenderer:
-    def __init__(self, width=1280, height=720, fps=24, *, filter_complex_threads=None):
+    def __init__(self, width=1920, height=1080, fps=30, *, filter_complex_threads=None):
         if (
             any(type(n) is not int or n <= 0 for n in (width, height, fps))
             or width % 2
             or height % 2
-            or fps % 4
         ):
-            raise ValueError("even geometry and fps divisible by four required")
+            raise ValueError("positive fps and even geometry required")
         if filter_complex_threads is not None and (
             type(filter_complex_threads) is not int or filter_complex_threads < 1
         ):
             raise ValueError("positive filter-complex thread budget required")
         self.width, self.height, self.fps = width, height, fps
         self.filter_complex_threads = filter_complex_threads
+
+    def render_compiled(self, production, scenes, manifest, audio, srt, output, *, hold=4):
+        """Render only after the compiled control plane has immutable QA receipts."""
+        if not production.render_ready():
+            raise ValueError("compiled QA receipts are incomplete; rendering blocked")
+        return self.render(scenes, manifest, audio, srt, output, hold=hold)
 
     def render(self, scenes, manifest, audio, srt, output, *, hold=4):
         timeline = timing(scenes, hold=hold, fps=self.fps)

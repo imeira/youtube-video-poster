@@ -194,3 +194,9 @@ def test_renderer_accepts_a_bounded_ffmpeg_thread_budget():
     assert renderer.filter_complex_threads == 2
     with pytest.raises(ValueError, match="thread"):
         LocalRenderer(width=320, height=180, filter_complex_threads=0)
+
+
+def test_renderer_defaults_to_delivery_geometry_and_fps():
+    renderer = LocalRenderer()
+
+    assert (renderer.width, renderer.height, renderer.fps) == (1920, 1080, 30)
