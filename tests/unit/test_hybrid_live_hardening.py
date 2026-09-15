@@ -7,7 +7,7 @@ from PIL import Image
 
 from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
 from src.hybrid.execution import Job
-from src.hybrid.live import RunPodSeedanceProvider
+from src.hybrid.live import FalFluxProvider, RunPodSeedanceProvider, _url
 
 
 def job(tmp_path):
@@ -23,6 +23,13 @@ def job(tmp_path):
                    "resolution": "720p", "aspect_ratio": "16:9", "camera_fixed": True,
                    "generate_audio": False}}, manifest, Decimal(".26")
     )
+
+
+def test_fal_current_documented_cdn_host_is_allowed():
+    assert _url(
+        "https://v3b.fal.media/files/b/example/result.png",
+        hosts=FalFluxProvider.allowed_result_hosts,
+    ) == "https://v3b.fal.media/files/b/example/result.png"
 
 
 class AsyncTransport:

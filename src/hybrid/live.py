@@ -161,7 +161,8 @@ class FalFluxProvider(_QuarantineProvider):
     """FAL FLUX image-edit adapter with exact-reference staging and GET recovery."""
 
     suffix = ".png"
-    allowed_result_hosts = {"v3.fal.media"}
+    # FAL documents both legacy ``v3`` and current ``v3b`` CDN result URLs.
+    allowed_result_hosts = {"v3.fal.media", "v3b.fal.media"}
 
     def __init__(
         self, quarantine: Path, *, client=None, submitter=None, downloader: Callable | None = None
