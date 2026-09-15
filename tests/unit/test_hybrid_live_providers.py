@@ -89,7 +89,7 @@ async def test_fal_stages_exact_references_checkpoints_and_quarantines(tmp_path)
     assert client.submits == 1
     assert client.uploads == [tmp_path / "reference.png"]
     assert checkpoints[0] == {"provider_id": "fal-remote-1"}
-    assert checkpoints[1]["partial"].endswith("quarantine\\local-request\\result.png")
+    assert checkpoints[1]["partial"].replace("\\", "/").endswith("quarantine/local-request/result.png")
     assert result.path.parent == tmp_path / "quarantine" / "local-request"
     assert result.path.name == "result.png"
     assert result.actual_cost == Decimal("0.04")
@@ -183,7 +183,7 @@ async def test_runpod_checkpoints_and_recovery_never_posts(tmp_path):
     with pytest.raises(ValueError, match="video validation"):
         await provider.submit(request, "local-request", lambda **values: checkpoints.append(values))
     assert checkpoints[0] == {"provider_id": "runpod-remote-1"}
-    assert checkpoints[1]["partial"].endswith("quarantine\\local-request\\result.mp4")
+    assert checkpoints[1]["partial"].replace("\\", "/").endswith("quarantine/local-request/result.mp4")
     assert transport.posts == 1
 
     with pytest.raises(ValueError, match="video validation"):

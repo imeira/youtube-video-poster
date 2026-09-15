@@ -59,4 +59,4 @@ async def test_async_run_checkpoints_then_recovers_same_id_without_second_post(t
     assert transport.posts == 1
     assert transport.gets == 1
     assert checkpoints[0] == {"provider_id": "async-id"}
-    assert checkpoints[1]["partial"].endswith("quarantine\\request-id\\result.mp4")
+    assert checkpoints[1]["partial"].replace("\\", "/").endswith("quarantine/request-id/result.mp4")
