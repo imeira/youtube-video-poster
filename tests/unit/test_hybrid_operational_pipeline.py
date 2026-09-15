@@ -110,6 +110,29 @@ async def test_operational_pipeline_promotes_only_hash_bound_approved_candidates
     assert (tmp_path / "compiled" / "manifest.json").is_file()
 
 
+@pytest.mark.asyncio
+async def test_operational_pipeline_prepares_hash_bound_technical_qa_packets(tmp_path):
+    from src.hybrid.compiled import OperationalPipeline, compile_storyboard
+
+    audio = tmp_path / "approved.wav"
+    audio.write_bytes(b"approved audio")
+    episode = compile_storyboard(
+        "EPX", FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        [{"scene_id": "R001", "start": 0, "end": 2, "image_prompt": "céu", "action": "céu"}],
+    )
+    pipeline = OperationalPipeline(
+        episode, Executor(tmp_path / "control.db", Config()), source_manifest(tmp_path),
+        workspace=tmp_path / "compiled", endpoint="flux", image_cost=Decimal(".02"),
+    )
+    receipts = await pipeline.dispatch_baselines(ImageProvider(tmp_path))
+
+    packets = pipeline.prepare_qa_packets()
+
+    assert packets["R001"]["result_sha256"] == receipts["R001"]["result_sha256"]
+    assert packets["R001"]["dimensions"] == [64, 64]
+    assert packets["R001"]["promotion_authorized"] is False
+
+
 def test_operational_pipeline_cannot_freeze_manifest_before_all_visual_qa(tmp_path):
     from src.hybrid.compiled import OperationalPipeline, compile_storyboard
 
