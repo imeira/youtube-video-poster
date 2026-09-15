@@ -110,6 +110,39 @@ async def test_compiled_episode_batches_baselines_and_releases_only_approved_her
     assert run.render_ready() is True
 
 
+@pytest.mark.asyncio
+async def test_compiled_run_skips_imported_frames_and_rejects_consumed_frames(tmp_path):
+    from src.hybrid.compiled import CompiledEpisode, FrameSpec, ProductionRun
+
+    audio = tmp_path / "narration.wav"
+    audio.write_bytes(b"approved narration")
+    episode = CompiledEpisode.compile(
+        "EP8",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        (
+            FrameSpec("R029", 0, 2, "imported", "ação"),
+            FrameSpec("R030", 2, 4, "imported", "ação"),
+            FrameSpec("R031", 4, 6, "blocked", "ação"),
+            FrameSpec("R032", 6, 8, "new", "ação"),
+        ),
+    )
+    provider = Provider(tmp_path)
+    run = ProductionRun(
+        episode,
+        Executor(tmp_path / "control.db", Config()),
+        source_manifest(tmp_path),
+        endpoint="flux",
+        image_cost=Decimal(".02"),
+        imported_scenes={"R029", "R030"},
+        blocked_scenes={"R029", "R030", "R031"},
+    )
+
+    receipts = await run.dispatch_baselines(provider)
+
+    assert set(receipts) == {"R032"}
+    assert [job.scene for job in provider.calls] == ["R032"]
+
+
 def test_compiled_run_allows_one_remediation_only_after_hash_bound_rejection(tmp_path):
     from src.hybrid.compiled import CompiledEpisode, FrameSpec, ProductionRun
 
