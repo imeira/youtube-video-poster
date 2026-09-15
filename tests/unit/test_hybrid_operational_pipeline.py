@@ -161,3 +161,45 @@ def test_director_opens_compiled_pipeline_from_approved_episode_inputs(tmp_path,
 
     assert pipeline.episode.episode_id == "EPX"
     assert (fs.paths.compiled_dir / "compiled_episode.json").is_file()
+
+
+def test_director_accepts_ep8_timestamp_field_names_and_import_bridge(tmp_path, monkeypatch):
+    from src.agents.director import DirectorAgent
+    from src.config.loader import get_config
+    from src.storage.episode_fs import EpisodeFS
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    fs = EpisodeFS("EP8", get_config())
+    fs.create_dirs()
+    storyboard = tmp_path / "ep8-storyboard.json"
+    storyboard.write_text(
+        '{"frames":[{"frame_id":"R001","start_s":0,"end_s":2,'
+        '"prompt_en":"calm sky","action_visual_pt":"céu calmo"},'
+        '{"frame_id":"R032","start_s":2,"end_s":4,'
+        '"prompt_en":"calm room","action_visual_pt":"sala calma"}]}',
+        encoding="utf-8",
+    )
+    audio = tmp_path / "approved.wav"
+    audio.write_bytes(b"approved audio")
+    source = tmp_path / "imported.png"
+    Image.new("RGB", (64, 64), "green").save(source)
+    imported = FrozenAsset.approve(source, "qa", "TEST")
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = get_config()
+
+    pipeline = director.create_operational_pipeline(
+        "EP8",
+        approved_audio=FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        source_manifest=source_manifest(tmp_path),
+        database=tmp_path / "control.db",
+        endpoint="flux",
+        image_cost=Decimal(".02"),
+        storyboard_path=storyboard,
+        imported_assets={"R001": imported},
+        blocked_scenes={"R001"},
+        prior_spend=Decimal(".50"),
+    )
+
+    assert [frame.scene_id for frame in pipeline.episode.frames] == ["R001", "R032"]
+    assert set(pipeline.run._baselines) == {"R032"}
+    assert pipeline.run.executor.prior_spend == Decimal(".50")
