@@ -138,6 +138,9 @@ class LocalRenderer:
         """Render only after the compiled control plane has immutable QA receipts."""
         if not production.render_ready():
             raise ValueError("compiled QA receipts are incomplete; rendering blocked")
+        approved = production.approved_manifest()
+        if manifest.checksum != approved.checksum:
+            raise ValueError("render manifest is not the compiled approved manifest")
         return self.render(scenes, manifest, audio, srt, output, hold=hold)
 
     def render(self, scenes, manifest, audio, srt, output, *, hold=4):

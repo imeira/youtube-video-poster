@@ -154,6 +154,7 @@ class ProductionRun:
             if frame.scene_id not in self.blocked_scenes
         }
         self._heroes: dict[str, Job] = {}
+        self._active_images = dict(self._baselines)
 
     def _job_for(self, frame: FrameSpec, category: str, cost: Decimal, *, predecessor="", prompt=None):
         return Job(
@@ -177,13 +178,18 @@ class ProductionRun:
     async def dispatch_baselines(self, provider: Provider):
         if not self._baselines:
             return {}
-        receipts = await asyncio.gather(
-            *(self.executor.run(job, provider) for job in self._baselines.values())
-        )
-        return {job.scene: receipt for job, receipt in zip(self._baselines.values(), receipts)}
+        completed = {}
+        pending = [
+            asyncio.create_task(self.executor.run(job, provider))
+            for job in self._baselines.values()
+        ]
+        for task in asyncio.as_completed(pending):
+            receipt = await task
+            completed[receipt["request"]["scene"]] = receipt
+        return completed
 
     def _completed_job_for_result(self, scene_id: str, result_sha256: str):
-        jobs = [self._baselines.get(scene_id), self._heroes.get(scene_id)]
+        jobs = [self._active_images.get(scene_id), self._heroes.get(scene_id)]
         for job in jobs:
             if job is None:
                 continue
@@ -203,7 +209,7 @@ class ProductionRun:
         for frame in self.episode.frames:
             if not frame.hero or frame.scene_id in self._heroes:
                 continue
-            baseline = self.executor.inspect(self._baselines[frame.scene_id].request_id)
+            baseline = self.executor.inspect(self._active_images[frame.scene_id].request_id)
             if baseline and baseline.get("qa") is True:
                 hero = Job(
                     scene=frame.scene_id,
@@ -218,7 +224,7 @@ class ProductionRun:
                     },
                     manifest=self.source_manifest,
                     cost=cost,
-                    predecessor=self._baselines[frame.scene_id].request_id,
+                    predecessor=self._active_images[frame.scene_id].request_id,
                 )
                 self._heroes[frame.scene_id] = hero
                 if self.executor.inspect(hero.request_id) is None:
@@ -226,22 +232,26 @@ class ProductionRun:
         return tuple(eligible)
 
     def remediation_job(self, scene_id: str, correction_prompt: str):
-        baseline = self._baselines.get(scene_id)
+        baseline = self._active_images.get(scene_id)
         receipt = self.executor.inspect(baseline.request_id) if baseline else None
         if not receipt or receipt.get("qa") is not False:
             raise ValueError("remediation requires rejected hash-bound baseline QA")
         frame = next(frame for frame in self.episode.frames if frame.scene_id == scene_id)
-        return self._job_for(
+        correction = self._job_for(
             frame,
             "correction",
             self.image_cost,
             predecessor=baseline.request_id,
             prompt=correction_prompt,
         )
+        self._active_images[scene_id] = correction
+        return correction
 
     def render_ready(self):
-        baselines = [self.executor.inspect(job.request_id) for job in self._baselines.values()]
+        baselines = [self.executor.inspect(job.request_id) for job in self._active_images.values()]
         if not all(row and row.get("qa") is True for row in baselines):
+            return False
+        if any(frame.hero and frame.scene_id not in self._heroes for frame in self.episode.frames):
             return False
         heroes = [self.executor.inspect(job.request_id) for job in self._heroes.values()]
         return all(row and row.get("qa") is True for row in heroes)
@@ -296,7 +306,7 @@ class OperationalPipeline:
         path without granting a promotion.
         """
         packets = {}
-        for scene_id, job in self.run._baselines.items():
+        for scene_id, job in self.run._active_images.items():
             receipt = self.run.executor.inspect(job.request_id)
             if not receipt or receipt.get("status") != "COMPLETE":
                 continue
@@ -316,7 +326,7 @@ class OperationalPipeline:
                     "technical_pass": True,
                     "promotion_authorized": False,
                 }
-            atomic_json(self.workspace / "qa_packets" / f"{scene_id}.json", packet)
+            atomic_json(self.workspace / "qa_packets" / f"{job.request_id}.json", packet)
             packets[scene_id] = packet
         return packets
 
@@ -339,6 +349,7 @@ class OperationalPipeline:
         return FrozenAsset.approve(output, reviewer, self.episode.audio.mode)
 
     def record_visual_qa(self, scene_id: str, result_sha256: str, approved: bool, reviewer: str):
+        job = self.run._completed_job_for_result(scene_id, result_sha256)
         self.run.record_visual_qa(scene_id, result_sha256, approved, reviewer)
         qa = {
             "scene_id": scene_id,
@@ -347,7 +358,8 @@ class OperationalPipeline:
             "reviewer": reviewer,
             "compilation": self.episode.checksum,
         }
-        atomic_json(self.workspace / "qa" / f"{scene_id}.json", qa)
+        qa.update(request_id=job.request_id, category=job.category, predecessor=job.predecessor)
+        atomic_json(self.workspace / "qa" / f"{job.request_id}.json", qa)
         return self._promote_candidate(scene_id, result_sha256, reviewer) if approved else None
 
     def approved_manifest(self):
@@ -357,13 +369,17 @@ class OperationalPipeline:
             if imported is not None:
                 assets.append(imported)
                 continue
-            receipt = self.run.executor.inspect(self.run._baselines[frame.scene_id].request_id)
+            job = self.run._active_images[frame.scene_id]
+            receipt = self.run.executor.inspect(job.request_id)
             if not receipt or receipt.get("qa") is not True:
                 raise ValueError("all active images require approved QA")
-            qa_path = self.workspace / "qa" / f"{frame.scene_id}.json"
+            qa_path = self.workspace / "qa" / f"{job.request_id}.json"
             if not qa_path.is_file():
                 raise ValueError("approved QA report missing")
             qa = json.loads(qa_path.read_text(encoding="utf-8"))
+            if (qa.get("request_id") != job.request_id or qa.get("result_sha256") != receipt["result_sha256"]
+                    or qa.get("compilation") != self.episode.checksum or qa.get("approved") is not True):
+                raise ValueError("approved QA report does not bind active receipt")
             assets.append(self._promote_candidate(frame.scene_id, receipt["result_sha256"], qa["reviewer"]))
         sheet = self.workspace / "contact_sheet.png"
         contact_sheet(assets, sheet)
