@@ -101,3 +101,22 @@ def test_director_uses_profile_d_codex_routes() -> None:
     assert director.storyboard._llm.model == "gpt-5.6-sol"
     assert director.metadata._llm.model == "gpt-5.6-luna"
     assert director.metadata._llm.reasoning_effort == "low"
+
+
+def test_director_defers_legacy_agent_and_model_initialization() -> None:
+    from src.agents.director import DirectorAgent
+
+    class SpyRouter:
+        def __init__(self):
+            self.tasks = []
+
+        def provider_for(self, task, **kwargs):
+            self.tasks.append(task)
+            return object()
+
+    router = SpyRouter()
+    director = DirectorAgent(model_router=router)
+
+    assert router.tasks == []
+    assert director.script is not None
+    assert router.tasks == ["script"]

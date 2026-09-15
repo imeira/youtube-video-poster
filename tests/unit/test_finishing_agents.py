@@ -242,6 +242,27 @@ def research_criacao():
 
 class TestMetadataAgent:
     @pytest.mark.asyncio
+    async def test_defaults_to_deterministic_templates_even_with_available_llm(self, research_criacao):
+        class SpyLLM:
+            def __init__(self):
+                self.calls = 0
+
+            def available(self):
+                return True
+
+            async def complete(self, **kwargs):
+                self.calls += 1
+                return "não deve ser chamado"
+
+        llm = SpyLLM()
+        result = await MetadataAgent(llm_provider=llm).run(
+            episode_id="T", theme="Criação", research_data=research_criacao,
+        )
+
+        assert result.success
+        assert llm.calls == 0
+
+    @pytest.mark.asyncio
     async def test_generates_metadata_template(self, research_criacao, tmp_path: Path):
         # No LLM → template fallback
         agent = MetadataAgent(llm_provider=None)
