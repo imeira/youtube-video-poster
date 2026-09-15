@@ -15,6 +15,8 @@ from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
 
+from PIL import Image
+
 from src.hybrid.artifacts import (
     FrozenAsset,
     Manifest,
@@ -285,6 +287,38 @@ class OperationalPipeline:
 
     async def dispatch_baselines(self, provider: Provider):
         return await self.run.dispatch_baselines(provider)
+
+    def prepare_qa_packets(self):
+        """Write deterministic, exact-hash technical QA packets in one pass.
+
+        Visual reviewers still make independent semantic decisions.  This removes
+        repeated decoding, hash checks, and receipt lookups from their critical
+        path without granting a promotion.
+        """
+        packets = {}
+        for scene_id, job in self.run._baselines.items():
+            receipt = self.run.executor.inspect(job.request_id)
+            if not receipt or receipt.get("status") != "COMPLETE":
+                continue
+            source = Path(receipt["result"])
+            result_sha256 = receipt.get("result_sha256")
+            if not source.is_file() or sha256(source) != result_sha256:
+                raise ValueError("candidate bytes changed after receipt")
+            with Image.open(source) as image:
+                image.load()
+                packet = {
+                    "scene_id": scene_id,
+                    "result_sha256": result_sha256,
+                    "format": image.format,
+                    "mode": image.mode,
+                    "dimensions": list(image.size),
+                    "compilation": self.episode.checksum,
+                    "technical_pass": True,
+                    "promotion_authorized": False,
+                }
+            atomic_json(self.workspace / "qa_packets" / f"{scene_id}.json", packet)
+            packets[scene_id] = packet
+        return packets
 
     def _promote_candidate(self, scene_id: str, result_sha256: str, reviewer: str):
         job = self.run._completed_job_for_result(scene_id, result_sha256)
