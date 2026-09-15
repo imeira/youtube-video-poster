@@ -93,13 +93,23 @@ def compile_storyboard(episode_id: str, audio: FrozenAsset, scenes) -> CompiledE
     """Compile already-authored visual prompts; it never asks a model per frame."""
     frames = []
     for scene in scenes:
+        start = scene.get("start", scene.get("start_s"))
+        end = scene.get("end", scene.get("end_s"))
+        prompt = scene.get("image_prompt", scene.get("prompt_en", ""))
+        action = (
+            scene.get("visual_action")
+            or scene.get("action")
+            or scene.get("action_visual_pt")
+            or scene.get("action_en")
+            or ""
+        )
         frames.append(
             FrameSpec(
-                scene_id=str(scene.get("scene_id", "")),
-                start=float(scene["start"]),
-                end=float(scene["end"]),
-                prompt=str(scene.get("image_prompt", "")),
-                semantic_action=str(scene.get("visual_action") or scene.get("action") or ""),
+                scene_id=str(scene.get("scene_id", scene.get("frame_id", ""))),
+                start=float(start),
+                end=float(end),
+                prompt=str(prompt),
+                semantic_action=str(action),
                 hero=bool(scene.get("hero", False)),
             )
         )

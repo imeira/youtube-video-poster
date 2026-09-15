@@ -149,6 +149,10 @@ class DirectorAgent:
         database: Path,
         endpoint: str,
         image_cost: Decimal,
+        storyboard_path: Path | None = None,
+        imported_assets=None,
+        blocked_scenes=(),
+        prior_spend: Decimal = Decimal(0),
     ):
         """Open the sole compiled writer after audio/reference approval.
 
@@ -163,15 +167,19 @@ class DirectorAgent:
         fs = EpisodeFS(episode_id, self.config)
         if not fs.exists():
             raise FileNotFoundError(f"episode does not exist: {episode_id}")
-        storyboard = _read_json_file(fs.paths.storyboard_dir / "scenes.json")
-        episode = compile_storyboard(episode_id, approved_audio, storyboard.get("scenes", []))
+        storyboard_file = Path(storyboard_path) if storyboard_path else fs.paths.storyboard_dir / "scenes.json"
+        storyboard = _read_json_file(storyboard_file)
+        scenes = storyboard.get("scenes", storyboard.get("frames", []))
+        episode = compile_storyboard(episode_id, approved_audio, scenes)
         return OperationalPipeline(
             episode,
-            Executor(database, Config.load(), prior_spend=Decimal(0)),
+            Executor(database, Config.load(), prior_spend=Decimal(prior_spend)),
             source_manifest,
             workspace=fs.paths.compiled_dir,
             endpoint=endpoint,
             image_cost=Decimal(image_cost),
+            imported_assets=imported_assets,
+            blocked_scenes=blocked_scenes,
         )
 
     async def start_episode(
