@@ -265,7 +265,7 @@ class _RunPodHttpTransport:
             return __import__("json").loads(body.decode())
 
     def post(self, endpoint: str, payload: dict) -> dict:
-        return self._request("POST", endpoint, "run", payload)
+        return self._request("POST", endpoint, "runsync", payload)
 
     def get(self, endpoint: str, remote_id: str) -> dict:
         return self._request("GET", endpoint, f"status/{remote_id}")
@@ -375,6 +375,8 @@ class RunPodSeedanceProvider(_QuarantineProvider):
         if not isinstance(provider_id, str) or not provider_id:
             raise RuntimeError("RunPod submit did not return a durable request ID")
         checkpoint(provider_id=provider_id)
+        if response.get("status") == "COMPLETED":
+            return await asyncio.to_thread(self._resolve_response, job, request_id, response, checkpoint)
         return await asyncio.to_thread(self._resolve, job, request_id, provider_id, checkpoint)
 
     async def recover(
