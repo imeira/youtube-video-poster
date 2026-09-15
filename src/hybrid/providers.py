@@ -66,6 +66,7 @@ def video_job(config, scene, manifest, prompt, *, predecessor=""):
             "duration": config.clip_seconds,
             "resolution": config.resolution,
             "aspect_ratio": "16:9",
+            "camera_fixed": True,
             "generate_audio": False,
         }
     }

@@ -117,6 +117,8 @@ class ProductionRun:
         *,
         endpoint: str,
         image_cost: Decimal,
+        imported_scenes=(),
+        blocked_scenes=(),
     ):
         if not endpoint.strip() or image_cost <= 0:
             raise ValueError("explicit endpoint and positive image cost required")
@@ -127,9 +129,17 @@ class ProductionRun:
         self.source_manifest = source_manifest
         self.endpoint = endpoint
         self.image_cost = image_cost
+        self.imported_scenes = frozenset(imported_scenes)
+        self.blocked_scenes = frozenset(blocked_scenes)
+        if not self.imported_scenes <= self.blocked_scenes:
+            raise ValueError("imported scenes must be permanently non-submittable")
+        known_scenes = {frame.scene_id for frame in episode.frames}
+        if not self.blocked_scenes <= known_scenes:
+            raise ValueError("blocked scene is absent from compiled episode")
         self._baselines = {
             frame.scene_id: self._job_for(frame, "first", image_cost)
             for frame in episode.frames
+            if frame.scene_id not in self.blocked_scenes
         }
         self._heroes: dict[str, Job] = {}
 
@@ -153,6 +163,8 @@ class ProductionRun:
         )
 
     async def dispatch_baselines(self, provider: Provider):
+        if not self._baselines:
+            return {}
         receipts = await asyncio.gather(
             *(self.executor.run(job, provider) for job in self._baselines.values())
         )

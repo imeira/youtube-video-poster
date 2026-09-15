@@ -70,7 +70,7 @@ class Downloader:
 
     def __call__(self, url, destination):
         self.urls.append(url)
-        Path(destination).write_bytes(self.source.read_bytes())
+        destination.write(self.source.read_bytes())
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,8 @@ async def test_fal_stages_exact_references_checkpoints_and_quarantines(tmp_path)
 
     assert client.submits == 1
     assert client.uploads == [tmp_path / "reference.png"]
-    assert checkpoints == [{"provider_id": "fal-remote-1"}]
+    assert checkpoints[0] == {"provider_id": "fal-remote-1"}
+    assert checkpoints[1]["partial"].endswith("quarantine\\local-request\\result.png")
     assert result.path.parent == tmp_path / "quarantine" / "local-request"
     assert result.path.name == "result.png"
     assert result.actual_cost == Decimal("0.04")
@@ -132,12 +133,21 @@ class RunPodTransport:
     def post(self, endpoint, payload):
         self.posts += 1
         assert endpoint == "seedance-endpoint"
-        return {"id": "runpod-remote-1"}
+        assert payload["input"]["image"] == "https://staging.example/reference.png"
+        assert payload["input"]["duration"] == 5
+        assert payload["input"]["resolution"] == "720p"
+        assert payload["input"]["aspect_ratio"] == "16:9"
+        assert payload["input"]["camera_fixed"] is True
+        assert payload["input"]["generate_audio"] is False
+        return {"id": "runpod-remote-1", "status": "IN_QUEUE"}
 
     def get(self, endpoint, remote_id):
         self.gets += 1
         assert (endpoint, remote_id) == ("seedance-endpoint", "runpod-remote-1")
-        return {"status": "COMPLETED", "output": {"video": self.result_url}}
+        return {
+            "status": "COMPLETED",
+            "output": {"video_url": self.result_url, "cost": 0.20},
+        }
 
 
 @pytest.mark.asyncio
@@ -146,20 +156,34 @@ async def test_runpod_checkpoints_and_recovery_never_posts(tmp_path):
     remote.write_bytes(b"fake-video")
     transport = RunPodTransport("https://signed.example/video")
     provider = RunPodSeedanceProvider(
-        tmp_path / "quarantine", transport=transport, downloader=Downloader(remote)
+        tmp_path / "quarantine",
+        transport=transport,
+        image_stager=lambda _: "https://staging.example/reference.png",
+        downloader=Downloader(remote),
     )
     request = replace(
         image_job(tmp_path),
         category="hero",
         endpoint="seedance-endpoint",
-        payload={"input": {"image": "reference.png", "prompt": "subtle movement"}},
+        payload={
+            "input": {
+                "image": str(tmp_path / "reference.png"),
+                "prompt": "subtle movement",
+                "duration": 5,
+                "resolution": "720p",
+                "aspect_ratio": "16:9",
+                "camera_fixed": True,
+                "generate_audio": False,
+            }
+        },
         cost=Decimal("0.20"),
     )
     checkpoints = []
 
     with pytest.raises(ValueError, match="video validation"):
         await provider.submit(request, "local-request", lambda **values: checkpoints.append(values))
-    assert checkpoints == [{"provider_id": "runpod-remote-1"}]
+    assert checkpoints[0] == {"provider_id": "runpod-remote-1"}
+    assert checkpoints[1]["partial"].endswith("quarantine\\local-request\\result.mp4")
     assert transport.posts == 1
 
     with pytest.raises(ValueError, match="video validation"):

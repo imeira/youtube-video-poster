@@ -16,19 +16,60 @@ import urllib.request
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from PIL import Image
 
 from src.hybrid.execution import Job, ProviderResult
 
 
-def _download(url: str, destination: Path) -> None:
-    """Download ephemeral provider output without recording its signed URL."""
-    if not isinstance(url, str) or not url.startswith("https://"):
-        raise ValueError("provider result must be an HTTPS URL")
-    with urllib.request.urlopen(url, timeout=180) as response:
-        with destination.open("wb") as stream:
-            shutil.copyfileobj(response, stream)
+MAX_API_BYTES = 1 << 20
+MAX_MEDIA_BYTES = 256 << 20
+
+
+class _RejectRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        raise ValueError("provider redirects are forbidden")
+
+
+def _url(url: str, *, hosts: set[str]) -> str:
+    if not isinstance(url, str) or not url or url != url.strip() or "\\" in url:
+        raise ValueError("strict HTTPS provider URL required")
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in hosts
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or parsed.port not in (None, 443)
+        or len(parsed.path) > 2048
+        or len(parsed.query) > 4096
+    ):
+        raise ValueError("provider URL violates allowlist")
+    return url
+
+
+def _opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _RejectRedirect())
+
+
+def _download(url: str, destination: Path, *, hosts: set[str]) -> None:
+    """Bounded no-redirect/proxy download; URLs remain process-local."""
+    _url(url, hosts=hosts)
+    request = urllib.request.Request(url, method="GET")
+    with _opener().open(request, timeout=180) as response:
+        length = response.headers.get("Content-Length")
+        if length and int(length) > MAX_MEDIA_BYTES:
+            raise ValueError("provider media exceeds byte limit")
+        total = 0
+        while chunk := response.read(min(1 << 20, MAX_MEDIA_BYTES + 1 - total)):
+            total += len(chunk)
+            if total > MAX_MEDIA_BYTES:
+                raise ValueError("provider media exceeds byte limit")
+            destination.write(chunk)
+        if total == 0:
+            raise ValueError("provider media is empty")
 
 
 def _one_url(value: Any) -> str:
@@ -50,30 +91,39 @@ class _QuarantineProvider:
     mode = "LIVE"
     suffix = ""
 
+    allowed_result_hosts: set[str] = set()
+
     def __init__(self, quarantine: Path, *, downloader: Callable | None = None):
         self.quarantine = Path(quarantine).resolve()
-        self.downloader = downloader or _download
+        self.downloader = downloader
 
     def _destination(self, request_id: str) -> Path:
         if not request_id or Path(request_id).name != request_id:
             raise ValueError("safe local request ID required")
         return self.quarantine / request_id / f"result{self.suffix}"
 
-    def _quarantine(self, request_id: str, url: str) -> Path:
+    def _quarantine(self, request_id: str, url: str, checkpoint: Callable) -> Path:
         destination = self._destination(request_id)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
+            self._validate(destination)
             return destination
-        with tempfile.NamedTemporaryFile(
-            prefix="download-", suffix=self.suffix, dir=destination.parent, delete=False
-        ) as stream:
-            temporary = Path(stream.name)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        flags |= getattr(os, "O_BINARY", 0)
+        descriptor = os.open(destination, flags, 0o600)
         try:
-            self.downloader(url, temporary)
-            self._validate(temporary)
-            os.replace(temporary, destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+            with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                if self.downloader:
+                    self.downloader(url, stream)
+                else:
+                    _download(url, stream, hosts=self.allowed_result_hosts)
+                stream.flush()
+                os.fsync(stream.fileno())
+            checkpoint(partial=str(destination))
+            self._validate(destination)
+        except Exception:
+            # Keep exact invalid bytes for the bounded recovery audit.
+            raise
         return destination
 
     def _validate(self, path: Path) -> None:
@@ -111,6 +161,7 @@ class FalFluxProvider(_QuarantineProvider):
     """FAL FLUX image-edit adapter with exact-reference staging and GET recovery."""
 
     suffix = ".png"
+    allowed_result_hosts = {"v3.fal.media"}
 
     def __init__(
         self, quarantine: Path, *, client=None, submitter=None, downloader: Callable | None = None
@@ -162,10 +213,10 @@ class FalFluxProvider(_QuarantineProvider):
         payload["image_urls"] = [self.client.upload_file(asset.path) for asset in job.manifest.assets]
         return payload
 
-    def _resolve(self, job: Job, request_id: str, provider_id: str) -> ProviderResult:
+    def _resolve(self, job: Job, request_id: str, provider_id: str, checkpoint: Callable) -> ProviderResult:
         # ``fal_client`` exposes result(application, request_id), not ``get``.
         response = self.client.result(job.endpoint, provider_id) if hasattr(self.client, "result") else self.client.get(provider_id)
-        output = self._quarantine(request_id, _one_url(response))
+        output = self._quarantine(request_id, _one_url(response), checkpoint)
         self._validate_for_job(output, job)
         return ProviderResult(output, job.cost)
 
@@ -176,14 +227,14 @@ class FalFluxProvider(_QuarantineProvider):
         if not isinstance(provider_id, str) or not provider_id:
             raise RuntimeError("FAL submit did not return a durable request ID")
         checkpoint(provider_id=provider_id)
-        return await asyncio.to_thread(self._resolve, job, request_id, provider_id)
+        return await asyncio.to_thread(self._resolve, job, request_id, provider_id, checkpoint)
 
     async def recover(
         self, job: Job, request_id: str, provider_id: str, partial: str, checkpoint: Callable
     ) -> ProviderResult:
         if not provider_id:
             raise ValueError("FAL recovery requires durable provider request ID")
-        return await asyncio.to_thread(self._resolve, job, request_id, provider_id)
+        return await asyncio.to_thread(self._resolve, job, request_id, provider_id, checkpoint)
 
 
 class _RunPodHttpTransport:
@@ -195,17 +246,23 @@ class _RunPodHttpTransport:
             raise RuntimeError("RUNPOD_API_KEY is NOT CONFIGURED")
 
     def _request(self, method: str, endpoint: str, suffix: str, payload=None):
-        if not endpoint or "/" in endpoint:
-            raise ValueError("RunPod endpoint ID required")
-        data = None if payload is None else __import__("json").dumps(payload).encode()
+        if endpoint != "seedance-v1-5-pro-i2v" or not suffix or "?" in suffix or "#" in suffix:
+            raise ValueError("approved RunPod Seedance endpoint required")
+        data = None if payload is None else __import__("json").dumps(payload, separators=(",", ":")).encode()
         request = urllib.request.Request(
             f"https://api.runpod.ai/v2/{endpoint}/{suffix}",
             data=data,
             method=method,
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=180) as response:
-            return __import__("json").loads(response.read().decode())
+        with _opener().open(request, timeout=180) as response:
+            length = response.headers.get("Content-Length")
+            if length and int(length) > MAX_API_BYTES:
+                raise ValueError("provider API response exceeds byte limit")
+            body = response.read(MAX_API_BYTES + 1)
+            if len(body) > MAX_API_BYTES:
+                raise ValueError("provider API response exceeds byte limit")
+            return __import__("json").loads(body.decode())
 
     def post(self, endpoint: str, payload: dict) -> dict:
         return self._request("POST", endpoint, "run", payload)
@@ -218,10 +275,63 @@ class RunPodSeedanceProvider(_QuarantineProvider):
     """RunPod Seedance hero adapter with POST once and status GET-only recovery."""
 
     suffix = ".mp4"
+    allowed_result_hosts = {"video.runpod.ai"}
 
-    def __init__(self, quarantine: Path, *, transport=None, downloader: Callable | None = None):
+    def __init__(
+        self,
+        quarantine: Path,
+        *,
+        transport=None,
+        image_stager: Callable | None = None,
+        downloader: Callable | None = None,
+    ):
         super().__init__(quarantine, downloader=downloader)
         self.transport = transport or _RunPodHttpTransport()
+        self.image_stager = image_stager or self._stage_with_fal
+
+    @staticmethod
+    def _stage_with_fal(path: Path) -> str:
+        import fal_client
+
+        return fal_client.upload_file(path)
+
+    @staticmethod
+    def _input(job: Job) -> dict:
+        source = job.payload.get("input")
+        required = {
+            "image",
+            "prompt",
+            "duration",
+            "resolution",
+            "aspect_ratio",
+            "camera_fixed",
+            "generate_audio",
+        }
+        if not isinstance(source, dict) or set(source) != required:
+            raise ValueError("exact Seedance public input schema required")
+        if (
+            not isinstance(source["prompt"], str)
+            or not source["prompt"].strip()
+            or source["duration"] != 5
+            or source["resolution"] != "720p"
+            or source["aspect_ratio"] != "16:9"
+            or type(source["camera_fixed"]) is not bool
+            or source["generate_audio"] is not False
+        ):
+            raise ValueError("Seedance hero contract mismatch")
+        return dict(source)
+
+    def _staged_payload(self, job: Job) -> dict:
+        job.manifest.verify(job.mode)
+        source = self._input(job)
+        exact = [asset.path.resolve() for asset in job.manifest.assets]
+        local = Path(source["image"]).resolve()
+        if len(exact) != 1 or local != exact[0]:
+            raise ValueError("Seedance image must be the exact frozen source")
+        source["image"] = self.image_stager(local)
+        if not isinstance(source["image"], str) or not source["image"].startswith("https://"):
+            raise ValueError("Seedance staging must return an HTTPS image URL")
+        return {"input": source}
 
     def _validate(self, path: Path) -> None:
         result = subprocess.run(
@@ -237,27 +347,39 @@ class RunPodSeedanceProvider(_QuarantineProvider):
             streams = __import__("json").loads(result.stdout)["streams"]
         except (KeyError, ValueError) as error:
             raise ValueError("video validation failed") from error
-        if len([s for s in streams if s.get("codec_type") == "video"]) != 1:
+        videos = [s for s in streams if s.get("codec_type") == "video"]
+        if len(videos) != 1 or (videos[0].get("width"), videos[0].get("height")) != (1280, 720):
+            raise ValueError("video validation failed")
+        if any(s.get("codec_type") == "audio" for s in streams):
             raise ValueError("video validation failed")
 
-    def _resolve(self, job: Job, request_id: str, provider_id: str) -> ProviderResult:
-        response = self.transport.get(job.endpoint, provider_id)
+    def _resolve_response(self, job: Job, request_id: str, response: dict, checkpoint: Callable) -> ProviderResult:
         if response.get("status") != "COMPLETED":
             raise RuntimeError(f"RunPod remote job is not complete: {response.get('status', 'UNKNOWN')}")
-        output = self._quarantine(request_id, _one_url(response.get("output")))
-        return ProviderResult(output, job.cost)
+        output_data = response.get("output")
+        if not isinstance(output_data, dict) or type(output_data.get("cost")) not in (int, float):
+            raise ValueError("Seedance completed response schema mismatch")
+        url = output_data.get("video_url", output_data.get("result"))
+        if not isinstance(url, str):
+            raise ValueError("Seedance completed response has no video URL")
+        output = self._quarantine(request_id, url, checkpoint)
+        return ProviderResult(output, Decimal(str(output_data["cost"])))
+
+    def _resolve(self, job: Job, request_id: str, provider_id: str, checkpoint: Callable) -> ProviderResult:
+        return self._resolve_response(job, request_id, self.transport.get(job.endpoint, provider_id), checkpoint)
 
     async def submit(self, job: Job, request_id: str, checkpoint: Callable) -> ProviderResult:
-        response = await asyncio.to_thread(self.transport.post, job.endpoint, job.payload)
+        payload = await asyncio.to_thread(self._staged_payload, job)
+        response = await asyncio.to_thread(self.transport.post, job.endpoint, payload)
         provider_id = response.get("id") if isinstance(response, dict) else ""
         if not isinstance(provider_id, str) or not provider_id:
             raise RuntimeError("RunPod submit did not return a durable request ID")
         checkpoint(provider_id=provider_id)
-        return await asyncio.to_thread(self._resolve, job, request_id, provider_id)
+        return await asyncio.to_thread(self._resolve, job, request_id, provider_id, checkpoint)
 
     async def recover(
         self, job: Job, request_id: str, provider_id: str, partial: str, checkpoint: Callable
     ) -> ProviderResult:
         if not provider_id:
             raise ValueError("RunPod recovery requires durable provider request ID")
-        return await asyncio.to_thread(self._resolve, job, request_id, provider_id)
+        return await asyncio.to_thread(self._resolve, job, request_id, provider_id, checkpoint)
