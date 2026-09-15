@@ -247,16 +247,29 @@ class OperationalPipeline:
         workspace: Path,
         endpoint: str,
         image_cost: Decimal,
+        imported_assets=None,
+        blocked_scenes=(),
     ):
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.episode = episode
+        self.imported_assets = dict(imported_assets or {})
+        imported_scenes = frozenset(self.imported_assets)
+        if imported_scenes != frozenset(blocked_scenes):
+            raise ValueError("each blocked compiled scene needs one imported approved asset")
+        known_scenes = {frame.scene_id for frame in episode.frames}
+        if not imported_scenes <= known_scenes:
+            raise ValueError("imported asset is absent from compiled episode")
+        for asset in self.imported_assets.values():
+            asset.verify(episode.audio.mode)
         self.run = ProductionRun(
             episode,
             executor,
             source_manifest,
             endpoint=endpoint,
             image_cost=image_cost,
+            imported_scenes=imported_scenes,
+            blocked_scenes=blocked_scenes,
         )
         self.episode.save(self.workspace / "compiled_episode.json")
 
@@ -296,6 +309,10 @@ class OperationalPipeline:
     def approved_manifest(self):
         assets = []
         for frame in self.episode.frames:
+            imported = self.imported_assets.get(frame.scene_id)
+            if imported is not None:
+                assets.append(imported)
+                continue
             receipt = self.run.executor.inspect(self.run._baselines[frame.scene_id].request_id)
             if not receipt or receipt.get("qa") is not True:
                 raise ValueError("all active images require approved QA")
