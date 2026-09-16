@@ -578,6 +578,13 @@ class DirectorAgent:
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state != EpisodeState.FINAL_QA:
             raise ValueError("final render QA requires FINAL_QA state")
+        evidence_path = fs.paths.qa_dir / "production_evidence_qa.json"
+        try:
+            evidence = _read_json_file(evidence_path)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("passing production evidence QA is required before final render QA") from error
+        if evidence.get("approved") is not True:
+            raise ValueError("passing production evidence QA is required before final render QA")
         result = (checker or FinalRenderQA()).review(video_path, render_receipt)
         report = {
             "approved": result.approved,

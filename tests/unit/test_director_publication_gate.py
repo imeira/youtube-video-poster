@@ -79,6 +79,9 @@ async def test_director_enters_thumbnail_approval_only_after_independent_final_r
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
+    (fs.paths.qa_dir / "production_evidence_qa.json").write_text(
+        json.dumps({"approved": True, "findings": [], "report": {}}), encoding="utf-8"
+    )
     video = fs.paths.final_video
     video.write_bytes(b"final")
 
@@ -89,6 +92,25 @@ async def test_director_enters_thumbnail_approval_only_after_independent_final_r
     assert report["approved"] is True
     assert (fs.paths.qa_dir / "final_render_qa.json").is_file()
     assert EpisodeStateStore.load(fs.paths.state_json).current_state is EpisodeState.WAITING_THUMBNAIL_APPROVAL
+
+
+@pytest.mark.asyncio
+async def test_final_render_qa_requires_persisted_production_evidence(tmp_path, monkeypatch):
+    class PassingQA:
+        def review(self, video_path, render_receipt):
+            return FinalRenderQAResult(True, (), {})
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
+    fs.paths.final_video.write_bytes(b"final")
+
+    with pytest.raises(ValueError, match="production evidence QA"):
+        await director.record_final_render_qa(
+            "EP8", video_path=fs.paths.final_video, render_receipt={"hold_seconds": 4}, checker=PassingQA()
+        )
 
 
 def test_director_records_only_exact_approval_of_delivered_media(tmp_path, monkeypatch):
