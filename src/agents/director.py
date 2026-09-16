@@ -237,6 +237,63 @@ class DirectorAgent:
             prior_spend=prior_spend,
         )
 
+    async def dispatch_compiled_baselines(self, episode_id: str, pipeline, provider) -> dict[str, Any]:
+        """Dispatch compiled work once, then stop at independent visual QA."""
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.GENERATING_IMAGES:
+            raise ValueError("compiled baseline dispatch requires GENERATING_IMAGES state")
+        receipts = await pipeline.dispatch_baselines(provider)
+        qa_packets = pipeline.prepare_qa_packets()
+        if set(qa_packets) != set(receipts):
+            raise ValueError("every completed compiled baseline requires a QA packet")
+        state.transition_to(
+            EpisodeState.VISUAL_QA,
+            agent="CompiledProduction",
+            note="compiled candidates await independent visual QA",
+        )
+        state.save(fs.paths.state_json)
+        return {"receipts": receipts, "qa_packets": qa_packets, "state": state.current_state.value}
+
+    def record_compiled_visual_qa(self, episode_id: str, pipeline, decisions) -> dict[str, Any]:
+        """Persist independent hash-bound visual verdicts and open animation only on PASS."""
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.VISUAL_QA:
+            raise ValueError("compiled visual QA requires VISUAL_QA state")
+        packets = pipeline.prepare_qa_packets()
+        by_scene = {}
+        for decision in decisions:
+            if not isinstance(decision, dict) or set(decision) != {
+                "scene_id", "result_sha256", "approved", "reviewer"
+            }:
+                raise ValueError("visual QA decision schema is invalid")
+            scene_id = decision["scene_id"]
+            if scene_id in by_scene:
+                raise ValueError("visual QA decision duplicated a scene")
+            if not isinstance(decision["approved"], bool) or not isinstance(decision["reviewer"], str) or not decision["reviewer"].strip():
+                raise ValueError("visual QA decision requires boolean verdict and reviewer")
+            packet = packets.get(scene_id)
+            if packet is None or packet["result_sha256"] != decision["result_sha256"]:
+                raise ValueError("visual QA decision does not bind a current candidate")
+            by_scene[scene_id] = decision
+        if set(by_scene) != set(packets):
+            raise ValueError("independent visual QA must decide every current candidate")
+        approved = {}
+        for scene_id, decision in by_scene.items():
+            asset = pipeline.record_visual_qa(
+                scene_id, decision["result_sha256"], decision["approved"], decision["reviewer"]
+            )
+            approved[scene_id] = str(asset.path) if asset else ""
+        if all(decision["approved"] for decision in by_scene.values()) and pipeline.render_ready():
+            state.transition_to(
+                EpisodeState.PLANNING_ANIMATION,
+                agent="CompiledProduction",
+                note="all compiled visual QA passed",
+            )
+            state.save(fs.paths.state_json)
+        return {"approved": approved, "state": state.current_state.value}
+
     async def start_episode(
         self,
         theme: str,

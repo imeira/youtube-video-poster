@@ -324,3 +324,55 @@ def test_director_activates_compiled_pipeline_only_from_image_generation_state(t
 
     assert pipeline.episode.episode_id == "EPX"
     assert EpisodeStateStore.load(fs.paths.state_json).current_state == EpisodeState.GENERATING_IMAGES
+
+
+@pytest.mark.asyncio
+async def test_director_dispatches_compiled_baselines_to_independent_visual_qa(tmp_path, monkeypatch):
+    from src.agents.director import DirectorAgent
+    from src.config.loader import get_config
+    from src.state.machine import EpisodeState, EpisodeStateStore
+    from src.storage.episode_fs import EpisodeFS
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    fs = EpisodeFS("EPX", get_config())
+    fs.create_dirs()
+    (fs.paths.storyboard_dir / "scenes.json").write_text(
+        '{"scenes":[{"scene_id":"R001","start":0,"end":2,"image_prompt":"céu","action":"céu"}]}',
+        encoding="utf-8",
+    )
+    state = EpisodeStateStore.load_or_create(fs.paths.state_json, "EPX")
+    for target in (
+        EpisodeState.RESEARCHING, EpisodeState.PLANNING, EpisodeState.WAITING_PLAN_APPROVAL,
+        EpisodeState.SCRIPTING, EpisodeState.GENERATING_AUDIO, EpisodeState.STORYBOARDING,
+        EpisodeState.GENERATING_IMAGES,
+    ):
+        state.transition_to(target)
+    state.save(fs.paths.state_json)
+    audio = tmp_path / "approved.wav"
+    audio.write_bytes(b"approved audio")
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = get_config()
+    pipeline = director.activate_compiled_production(
+        "EPX", approved_audio=FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        source_manifest=source_manifest(tmp_path), database=tmp_path / "control.db",
+        endpoint="flux", image_cost=Decimal(".02"),
+    )
+
+    result = await director.dispatch_compiled_baselines("EPX", pipeline, ImageProvider(tmp_path))
+
+    assert result["qa_packets"]["R001"]["promotion_authorized"] is False
+    assert EpisodeStateStore.load(fs.paths.state_json).current_state == EpisodeState.VISUAL_QA
+
+    promoted = director.record_compiled_visual_qa(
+        "EPX",
+        pipeline,
+        [{
+            "scene_id": "R001",
+            "result_sha256": result["qa_packets"]["R001"]["result_sha256"],
+            "approved": True,
+            "reviewer": "independent-qa",
+        }],
+    )
+
+    assert promoted["approved"]["R001"]
+    assert EpisodeStateStore.load(fs.paths.state_json).current_state == EpisodeState.PLANNING_ANIMATION
