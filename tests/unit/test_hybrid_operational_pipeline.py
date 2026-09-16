@@ -32,7 +32,7 @@ class ImageProvider:
         checkpoint(provider_id=f"provider-{request_id}")
         await asyncio.sleep(0)
         output = self.root / f"{request_id}.png"
-        Image.new("RGB", (64, 64), "blue").save(output)
+        Image.new("RGB", (64, 64), "red" if job.category == "hero" else "blue").save(output)
         return ProviderResult(output, job.cost)
 
     async def recover(self, job, request_id, provider_id, partial, checkpoint):
@@ -181,6 +181,37 @@ async def test_remediation_becomes_the_only_active_promotable_image(tmp_path):
 
     assert manifest.assets[0].sha256 == corrected["result_sha256"]
     assert pipeline.run._active_images["R001"].request_id == correction.request_id
+
+
+@pytest.mark.asyncio
+async def test_operational_pipeline_promotes_approved_hero_into_render_scene(tmp_path):
+    from src.hybrid.compiled import OperationalPipeline, compile_storyboard
+
+    audio = tmp_path / "approved.wav"
+    audio.write_bytes(b"approved audio")
+    episode = compile_storyboard(
+        "EPX",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        [{"scene_id": "R001", "start": 0, "end": 5, "image_prompt": "céu", "action": "céu", "hero": True}],
+    )
+    pipeline = OperationalPipeline(
+        episode, Executor(tmp_path / "control.db", Config()), source_manifest(tmp_path),
+        workspace=tmp_path / "compiled", endpoint="flux", image_cost=Decimal(".02"),
+    )
+    provider = ImageProvider(tmp_path)
+    baseline = (await pipeline.dispatch_baselines(provider))["R001"]
+    pipeline.record_visual_qa("R001", baseline["result_sha256"], True, "independent-qa")
+    hero = pipeline.run.eligible_hero_jobs(Decimal(".26"), "seedance")[0]
+    hero_receipt = await pipeline.run.executor.run(hero, provider)
+    pipeline.record_visual_qa("R001", hero_receipt["result_sha256"], True, "independent-qa")
+    manifest = pipeline.approved_manifest()
+
+    scenes = pipeline.render_scenes(manifest)
+
+    assert scenes[0].image.sha256 == baseline["result_sha256"]
+    assert scenes[0].clip is not None
+    assert scenes[0].clip.sha256 == hero_receipt["result_sha256"]
+    assert scenes[0].seconds == 5
 
 
 def test_director_opens_compiled_pipeline_from_approved_episode_inputs(tmp_path, monkeypatch):

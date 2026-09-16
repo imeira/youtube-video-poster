@@ -294,6 +294,7 @@ class OperationalPipeline:
             imported_scenes=imported_scenes,
             blocked_scenes=blocked_scenes,
         )
+        self._approved_heroes: dict[str, FrozenAsset] = {}
         self.episode.save(self.workspace / "compiled_episode.json")
 
     async def dispatch_baselines(self, provider: Provider):
@@ -365,7 +366,31 @@ class OperationalPipeline:
         }
         qa.update(request_id=job.request_id, category=job.category, predecessor=job.predecessor)
         atomic_json(self.workspace / "qa" / f"{job.request_id}.json", qa)
-        return self._promote_candidate(scene_id, result_sha256, reviewer) if approved else None
+        if not approved:
+            return None
+        asset = self._promote_candidate(scene_id, result_sha256, reviewer)
+        if job.category == "hero":
+            self._approved_heroes[scene_id] = asset
+        return asset
+
+    def render_scenes(self, manifest: Manifest):
+        """Build renderer inputs only from the active image and approved hero receipts."""
+        from src.hybrid.render import Scene
+
+        if not self.render_ready():
+            raise ValueError("compiled QA receipts are incomplete; render scenes blocked")
+        approved = self.approved_manifest()
+        if manifest.checksum != approved.checksum:
+            raise ValueError("render manifest is not the compiled approved manifest")
+        if len(manifest.assets) != len(self.episode.frames):
+            raise ValueError("manifest does not cover every compiled frame")
+        scenes = []
+        for frame, image in zip(self.episode.frames, manifest.assets, strict=True):
+            hero = self._approved_heroes.get(frame.scene_id)
+            if frame.hero and hero is None:
+                raise ValueError("approved hero asset missing from operational pipeline")
+            scenes.append(Scene(image=image, seconds=frame.end - frame.start, clip=hero))
+        return tuple(scenes)
 
     def approved_manifest(self):
         assets = []
