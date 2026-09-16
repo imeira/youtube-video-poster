@@ -498,9 +498,9 @@ class DirectorAgent:
         await asyncio.to_thread(_write_json_file, fs.paths.qa_dir / "final_render_qa.json", report)
         if result.approved:
             state.transition_to(
-                EpisodeState.WAITING_FINAL_APPROVAL,
+                EpisodeState.WAITING_THUMBNAIL_APPROVAL,
                 agent="FinalRenderQA",
-                note="independent final media QA passed",
+                note="independent final media QA passed; thumbnail delivery approval required",
             )
             state.save(fs.paths.state_json)
         return report
@@ -520,7 +520,20 @@ class DirectorAgent:
         from src.approval.controller import ApprovalController
 
         fs = EpisodeFS(episode_id, self.config)
-        return ApprovalController().confirm_delivery(
+        expected_state = {
+            "thumbnail": EpisodeState.WAITING_THUMBNAIL_APPROVAL,
+            "video": EpisodeState.WAITING_VIDEO_APPROVAL,
+        }.get(artifact_kind)
+        next_state = {
+            "thumbnail": EpisodeState.WAITING_VIDEO_APPROVAL,
+            "video": EpisodeState.WAITING_FINAL_APPROVAL,
+        }.get(artifact_kind)
+        if expected_state is None or next_state is None:
+            raise ValueError("artifact_kind must be thumbnail or video")
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not expected_state:
+            raise ValueError(f"{artifact_kind} approval requires {expected_state.value} state")
+        receipt = ApprovalController().confirm_delivery(
             episode_id=episode_id,
             artifact_kind=artifact_kind,
             command=command,
@@ -530,6 +543,9 @@ class DirectorAgent:
             delivery_receipt_path=delivery_receipt_path,
             approval_receipt_path=fs.paths.qa_dir / f"approval-{artifact_kind}.json",
         )
+        state.transition_to(next_state, agent="ApprovalController", note=f"{artifact_kind} delivery approved")
+        state.save(fs.paths.state_json)
+        return receipt
 
     def _build_visual_strategy_engine(self, local_provider, cloud_provider):
         """Build the visual router from the central episode limits."""

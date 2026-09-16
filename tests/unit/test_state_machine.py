@@ -11,15 +11,14 @@ Tests:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from src.state.machine import (
+    Checkpoint,
     EpisodeState,
     EpisodeStateStore,
-    Checkpoint,
     InvalidTransitionError,
 )
 
@@ -54,6 +53,8 @@ class TestStateTransitions:
         store.transition_to(EpisodeState.ANIMATION_QA)
         store.transition_to(EpisodeState.ASSEMBLING)
         store.transition_to(EpisodeState.FINAL_QA)
+        store.transition_to(EpisodeState.WAITING_THUMBNAIL_APPROVAL)
+        store.transition_to(EpisodeState.WAITING_VIDEO_APPROVAL)
         store.transition_to(EpisodeState.WAITING_FINAL_APPROVAL)
         store.transition_to(EpisodeState.UPLOADING)
         store.transition_to(EpisodeState.PUBLISHED)
