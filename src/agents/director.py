@@ -505,6 +505,32 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
         return report
 
+    def confirm_delivered_artifact(
+        self,
+        episode_id: str,
+        *,
+        artifact_kind: str,
+        command: str,
+        expected_command: str,
+        approver: str,
+        artifact_path: Path,
+        delivery_receipt_path: Path,
+    ):
+        """Persist an explicit artifact approval bound to its delivered media bytes."""
+        from src.approval.controller import ApprovalController
+
+        fs = EpisodeFS(episode_id, self.config)
+        return ApprovalController().confirm_delivery(
+            episode_id=episode_id,
+            artifact_kind=artifact_kind,
+            command=command,
+            expected_command=expected_command,
+            approver=approver,
+            artifact_path=artifact_path,
+            delivery_receipt_path=delivery_receipt_path,
+            approval_receipt_path=fs.paths.qa_dir / f"approval-{artifact_kind}.json",
+        )
+
     def _build_visual_strategy_engine(self, local_provider, cloud_provider):
         """Build the visual router from the central episode limits."""
         from src.providers.gpu.gpu_compute_provider import GenerativeVideoConfig

@@ -89,3 +89,27 @@ async def test_director_enters_final_approval_only_after_independent_final_rende
     assert report["approved"] is True
     assert (fs.paths.qa_dir / "final_render_qa.json").is_file()
     assert EpisodeStateStore.load(fs.paths.state_json).current_state is EpisodeState.WAITING_FINAL_APPROVAL
+
+
+def test_director_records_only_exact_approval_of_delivered_media(tmp_path, monkeypatch):
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    thumbnail = fs.paths.thumbnails_dir / "approved.png"
+    thumbnail.write_bytes(b"thumbnail")
+    delivered = ApprovalReceipt.approve("thumbnail", thumbnail, "delivery")
+    delivery_path = fs.paths.qa_dir / "delivery-thumbnail.json"
+    delivery_path.write_text(
+        json.dumps({"episode_id": "EP8", "artifact_kind": "thumbnail", "approval": delivered.__dict__, "message_id": 1}),
+        encoding="utf-8",
+    )
+
+    receipt = director.confirm_delivered_artifact(
+        "EP8", artifact_kind="thumbnail", command="APROVAR THUMBNAIL EP8",
+        expected_command="APROVAR THUMBNAIL EP8", approver="human", artifact_path=thumbnail,
+        delivery_receipt_path=delivery_path,
+    )
+
+    assert receipt.artifact_kind == "thumbnail"
+    assert (fs.paths.qa_dir / "approval-thumbnail.json").is_file()
