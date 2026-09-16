@@ -218,6 +218,20 @@ def test_renderer_renders_a_manifest_from_the_operational_compiled_pipeline(tmp_
     assert receipt["subtitles_sha256"] is None
 
 
+def test_mp4_delivery_derives_aac_master_without_burning_subtitles(tmp_path):
+    manifest, audio, _srt = fixtures(tmp_path)
+    output = tmp_path / "delivery.mp4"
+
+    receipt = LocalRenderer(width=320, height=180).render(
+        [Scene(asset, 1.0) for asset in manifest.assets], manifest, audio, None, output, hold=3
+    )
+
+    streams = probe(output)["streams"]
+    assert next(stream for stream in streams if stream["codec_type"] == "audio")["codec_name"] == "aac"
+    assert receipt["audio_operation"] == "derived_master"
+    assert receipt["subtitles_sha256"] is None
+
+
 def test_publish_new_never_clobbers_a_racing_output(tmp_path):
     source = tmp_path / "source.mkv"
     output = tmp_path / "master.mkv"
