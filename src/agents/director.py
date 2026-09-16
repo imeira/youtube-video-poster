@@ -200,6 +200,43 @@ class DirectorAgent:
             blocked_scenes=blocked_scenes,
         )
 
+    def activate_compiled_production(
+        self,
+        episode_id: str,
+        *,
+        approved_audio,
+        source_manifest,
+        database: Path,
+        endpoint: str,
+        image_cost: Decimal,
+        storyboard_path: Path | None = None,
+        imported_assets=None,
+        blocked_scenes=(),
+        prior_spend: Decimal = Decimal(0),
+    ):
+        """Activate the sole compiled writer only at the image-generation hand-off.
+
+        The caller must still provide independently approved, frozen inputs. This
+        method intentionally dispatches no provider request and performs no
+        approval transition, so activation cannot turn a plan or draft into media.
+        """
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state != EpisodeState.GENERATING_IMAGES:
+            raise ValueError("compiled production activates only from GENERATING_IMAGES")
+        return self.create_operational_pipeline(
+            episode_id,
+            approved_audio=approved_audio,
+            source_manifest=source_manifest,
+            database=database,
+            endpoint=endpoint,
+            image_cost=image_cost,
+            storyboard_path=storyboard_path,
+            imported_assets=imported_assets,
+            blocked_scenes=blocked_scenes,
+            prior_spend=prior_spend,
+        )
+
     async def start_episode(
         self,
         theme: str,

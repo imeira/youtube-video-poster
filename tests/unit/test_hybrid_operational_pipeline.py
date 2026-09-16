@@ -253,3 +253,43 @@ def test_director_accepts_ep8_timestamp_field_names_and_import_bridge(tmp_path, 
     assert [frame.scene_id for frame in pipeline.episode.frames] == ["R001", "R032"]
     assert set(pipeline.run._baselines) == {"R032"}
     assert pipeline.run.executor.prior_spend == Decimal(".50")
+
+
+def test_director_activates_compiled_pipeline_only_from_image_generation_state(tmp_path, monkeypatch):
+    from src.agents.director import DirectorAgent
+    from src.config.loader import get_config
+    from src.state.machine import EpisodeState, EpisodeStateStore
+    from src.storage.episode_fs import EpisodeFS
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    fs = EpisodeFS("EPX", get_config())
+    fs.create_dirs()
+    (fs.paths.storyboard_dir / "scenes.json").write_text(
+        '{"scenes":[{"scene_id":"R001","start":0,"end":2,"image_prompt":"céu","action":"céu"}]}',
+        encoding="utf-8",
+    )
+    state = EpisodeStateStore.load_or_create(fs.paths.state_json, "EPX")
+    state.transition_to(EpisodeState.RESEARCHING)
+    state.transition_to(EpisodeState.PLANNING)
+    state.transition_to(EpisodeState.WAITING_PLAN_APPROVAL)
+    state.transition_to(EpisodeState.SCRIPTING)
+    state.transition_to(EpisodeState.GENERATING_AUDIO)
+    state.transition_to(EpisodeState.STORYBOARDING)
+    state.transition_to(EpisodeState.GENERATING_IMAGES)
+    state.save(fs.paths.state_json)
+    audio = tmp_path / "approved.wav"
+    audio.write_bytes(b"approved audio")
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = get_config()
+
+    pipeline = director.activate_compiled_production(
+        "EPX",
+        approved_audio=FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        source_manifest=source_manifest(tmp_path),
+        database=tmp_path / "control.db",
+        endpoint="flux",
+        image_cost=Decimal(".02"),
+    )
+
+    assert pipeline.episode.episode_id == "EPX"
+    assert EpisodeStateStore.load(fs.paths.state_json).current_state == EpisodeState.GENERATING_IMAGES
