@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 
@@ -258,4 +257,9 @@ class PublishProvider(BaseProvider):
     @abstractmethod
     async def add_to_playlist(self, video_id: str, playlist: str) -> None:
         """Add video to playlist."""
+        ...
+
+    @abstractmethod
+    async def readback(self, video_id: str) -> dict[str, Any]:
+        """Read published metadata/processing state from the authoritative platform."""
         ...
