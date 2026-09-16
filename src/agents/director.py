@@ -474,6 +474,37 @@ class DirectorAgent:
             captions_path=captions_path,
         )
 
+    async def record_final_render_qa(
+        self,
+        episode_id: str,
+        *,
+        video_path: Path,
+        render_receipt: dict[str, Any],
+        checker=None,
+    ) -> dict[str, Any]:
+        """Persist independent final-media QA before opening the video approval gate."""
+        from src.qa.final_render import FinalRenderQA
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state != EpisodeState.FINAL_QA:
+            raise ValueError("final render QA requires FINAL_QA state")
+        result = (checker or FinalRenderQA()).review(video_path, render_receipt)
+        report = {
+            "approved": result.approved,
+            "findings": list(result.findings),
+            "report": result.report,
+        }
+        await asyncio.to_thread(_write_json_file, fs.paths.qa_dir / "final_render_qa.json", report)
+        if result.approved:
+            state.transition_to(
+                EpisodeState.WAITING_FINAL_APPROVAL,
+                agent="FinalRenderQA",
+                note="independent final media QA passed",
+            )
+            state.save(fs.paths.state_json)
+        return report
+
     def _build_visual_strategy_engine(self, local_provider, cloud_provider):
         """Build the visual router from the central episode limits."""
         from src.providers.gpu.gpu_compute_provider import GenerativeVideoConfig

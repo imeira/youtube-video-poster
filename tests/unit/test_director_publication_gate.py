@@ -9,6 +9,7 @@ import pytest
 from src.agents.director import DirectorAgent
 from src.approval.receipts import ApprovalReceipt, save_approval_receipt
 from src.providers.base import PublishResult
+from src.qa.final_render import FinalRenderQAResult
 from src.state.machine import EpisodeState, EpisodeStateStore
 from src.storage.episode_fs import EpisodeFS
 
@@ -65,3 +66,26 @@ async def test_director_uses_explicit_publication_command_with_persisted_approva
 
     assert result["video_id"] == "published-id"
     assert EpisodeStateStore.load(fs.paths.state_json).current_state is EpisodeState.PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_director_enters_final_approval_only_after_independent_final_render_qa(tmp_path, monkeypatch):
+    class PassingQA:
+        def review(self, video_path, render_receipt):
+            return FinalRenderQAResult(True, (), {"video_codec": "h264", "audio_codec": "aac"})
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
+    video = fs.paths.final_video
+    video.write_bytes(b"final")
+
+    report = await director.record_final_render_qa(
+        "EP8", video_path=video, render_receipt={"hold_seconds": 4}, checker=PassingQA()
+    )
+
+    assert report["approved"] is True
+    assert (fs.paths.qa_dir / "final_render_qa.json").is_file()
+    assert EpisodeStateStore.load(fs.paths.state_json).current_state is EpisodeState.WAITING_FINAL_APPROVAL
