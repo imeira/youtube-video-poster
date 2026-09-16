@@ -689,17 +689,13 @@ class DirectorAgent:
         episode_id: str = "",
         skip_image_gen: bool = False,
     ) -> dict[str, Any]:
-        """Run the complete pipeline from request to final video (§98).
+        """Create the pre-production packet; never bypass the human plan gate.
 
-        §117: Pilot episode — do NOT auto-publish.
+        This compatibility entry point intentionally returns at
+        ``WAITING_PLAN_APPROVAL``. Continuing production requires a durable
+        approval receipt through the approval workflow.
         """
-        # Pre-production
-        pre_result = await self.start_episode(theme=theme, episode_id=episode_id)
-        eid = pre_result["episode_id"]
-
-        # Production (after plan approval — auto-approve for pilot)
-        result = await self.continue_after_approval(eid, "plan")
-        return result
+        return await self.start_episode(theme=theme, episode_id=episode_id)
 
     def cleanup_orphans(self) -> list[str]:
         """§56: Clean up orphaned RunPod pods on startup."""
