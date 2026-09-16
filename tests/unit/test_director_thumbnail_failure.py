@@ -153,6 +153,7 @@ async def test_thumbnail_failure_marks_episode_failed_and_stops_finishing(tmp_pa
 
     assert result["state"] == "GENERATING_IMAGES"
     assert result["compiled_activation"]["audio"] == str(tmp_path / "audio" / "narration.mp3")
+    assert director.storyboard.run.await_args.kwargs["audio_duration_s"] == 5.0
     assert state.current_state is EpisodeState.GENERATING_IMAGES
     persisted = json.loads(paths.state_json.read_text(encoding="utf-8"))
     assert persisted["current_state"] == "GENERATING_IMAGES"

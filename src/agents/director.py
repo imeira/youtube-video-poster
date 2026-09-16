@@ -596,6 +596,7 @@ class DirectorAgent:
             episode_id=episode_id,
             narration=narration,
             sentence_timestamps=audio_result.data["sentence_timestamps"],
+            audio_duration_s=float(audio_result.data["duration_s"]),
             storyboard_dir=str(fs.paths.storyboard_dir),
         )
 
