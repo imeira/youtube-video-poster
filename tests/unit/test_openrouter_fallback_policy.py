@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.providers.llm.openrouter_provider import (
-    DEFAULT_FREE_FALLBACK_MODEL,
-    OpenRouterLLMProvider,
-)
+from src.providers.llm.openrouter_provider import DEFAULT_FREE_FALLBACK_MODEL, OpenRouterLLMProvider
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEXT_CONFIG_SUFFIXES = {".py", ".yaml", ".yml", ".json", ".md", ".toml"}
+EXCLUDED_TREE_NAMES = {".git", ".venv", "venv", "__pycache__", "node_modules"}
 
 
 def test_openrouter_provider_defaults_to_most_used_free_model() -> None:
@@ -26,9 +24,7 @@ def test_repository_has_no_gemini_model_references() -> None:
     for path in REPO_ROOT.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in TEXT_CONFIG_SUFFIXES:
             continue
-        if path == Path(__file__).resolve():
-            continue
-        if any(part in {".git", "__pycache__"} for part in path.parts):
+        if path == Path(__file__).resolve() or any(part in EXCLUDED_TREE_NAMES for part in path.parts):
             continue
         text = path.read_text(encoding="utf-8-sig")
         lowered = text.lower()
