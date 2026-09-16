@@ -446,6 +446,34 @@ class DirectorAgent:
 
         return {"error": f"Unknown approval type: {approval_type}"}
 
+    async def publish_after_explicit_instruction(
+        self,
+        episode_id: str,
+        *,
+        command: str,
+        expected_command: str,
+        publisher,
+        video_receipt_path: Path,
+        thumbnail_receipt_path: Path,
+        metadata_path: Path,
+        captions_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """Publish only through durable separate authorization and remote readback."""
+        from src.approval.receipts import load_approval_receipt
+        from src.publishing.controller import PublicationController
+
+        fs = EpisodeFS(episode_id, self.config)
+        return await PublicationController(publisher).publish(
+            state_path=fs.paths.state_json,
+            expected_command=expected_command,
+            command=command,
+            video=load_approval_receipt(video_receipt_path),
+            thumbnail=load_approval_receipt(thumbnail_receipt_path),
+            metadata_path=metadata_path,
+            publication_receipt_path=fs.paths.qa_dir / "publication_receipt.json",
+            captions_path=captions_path,
+        )
+
     def _build_visual_strategy_engine(self, local_provider, cloud_provider):
         """Build the visual router from the central episode limits."""
         from src.providers.gpu.gpu_compute_provider import GenerativeVideoConfig
