@@ -38,9 +38,9 @@ def main():
         help="YouTube channel (default: @EraUmaVezBibliaAnimada)",
     )
     parser.add_argument(
-        "--auto-approve",
-        action="store_true",
-        help="Skip HITL approvals (for testing only)",
+        "--episode-id",
+        default="",
+        help="Stable episode identifier; generated when omitted.",
     )
     parser.add_argument(
         "--output", "-o",
@@ -57,11 +57,11 @@ def main():
     print(f"Channel: {args.channel}")
     print()
 
-    results = asyncio.run(director.produce_episode(
+    # CLI creates the pre-production packet only. Continuing requires a durable
+    # human approval receipt through the approval workflow.
+    results = asyncio.run(director.start_episode(
         theme=args.theme,
-        language=args.language,
-        channel=args.channel,
-        auto_approve=args.auto_approve,
+        episode_id=args.episode_id,
     ))
 
     # Print summary
