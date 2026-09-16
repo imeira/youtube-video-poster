@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import Path
-from typing import Iterable
 
 from src.pipeline.artifact_manifest import write_manifest_atomic
 

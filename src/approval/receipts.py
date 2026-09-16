@@ -29,7 +29,7 @@ class ApprovalReceipt:
     approved_at: str
 
     @classmethod
-    def approve(cls, artifact_kind: str, artifact_path: Path | str, approver: str) -> "ApprovalReceipt":
+    def approve(cls, artifact_kind: str, artifact_path: Path | str, approver: str) -> ApprovalReceipt:
         path = Path(artifact_path)
         if artifact_kind not in {"thumbnail", "video"} or not path.is_file() or not approver.strip():
             raise ValueError("A real video/thumbnail file and approver are required")

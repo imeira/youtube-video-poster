@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.providers.llm.openrouter_provider import DEFAULT_FREE_FALLBACK_MODEL, OpenRouterLLMProvider
+from src.providers.llm.openrouter_provider import (
+    DEFAULT_FREE_FALLBACK_MODEL,
+    OpenRouterLLMProvider,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEXT_CONFIG_SUFFIXES = {".py", ".yaml", ".yml", ".json", ".md", ".toml"}

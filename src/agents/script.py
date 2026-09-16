@@ -32,7 +32,7 @@ class ScriptAgent(BaseAgent):
         if self._llm and getattr(self._llm, "available", lambda: False)():
             try:
                 narration = await self._generate_llm_script(research_data.get("story", ""), research_data.get("summary", ""), facts, references, target_words)
-            except Exception as exc:
+            except (OSError, TimeoutError, ValueError) as exc:
                 logger.warning("LLM script generation failed, using source-bound template: %s", exc)
         narration = narration or self._build_template_narration(research_data.get("summary", ""), facts)
         word_count = len(narration.split())

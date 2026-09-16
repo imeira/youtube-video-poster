@@ -52,7 +52,7 @@ def test_plan_separates_immediate_probable_and_maximum_exposure():
     result = plan(
         Config(),
         candidates=_heroes(4),
-        committed=Decimal("7.98"),
+        committed=Decimal("4.2"),
         images=Decimal("2.024"),
     )
 
@@ -63,10 +63,10 @@ def test_plan_separates_immediate_probable_and_maximum_exposure():
     }
     assert result["api_cost"] == Decimal("1.898")
     assert result["conservative_api_cost"] == Decimal("5.924")
-    assert result["immediate_projected"] == Decimal("8.838")
-    assert result["probable_projected"] == Decimal("9.878")
+    assert result["immediate_projected"] == Decimal("5.058")
+    assert result["probable_projected"] == Decimal("6.098")
     assert result["immediate_budget_action"].value == "PROCEED_WITH_WARNING"
-    assert result["probable_budget_action"].value == "PROCEED_WITH_WARNING"
+    assert result["probable_budget_action"].value == "WAITING_BUDGET_APPROVAL"
 
 
 def test_plan_uses_real_scene_count_and_keeps_maximum_as_preflight_gate():
@@ -74,7 +74,7 @@ def test_plan_uses_real_scene_count_and_keeps_maximum_as_preflight_gate():
         Config(),
         candidates=_heroes(1),
         images=Decimal("2.024"),
-        committed=Decimal("7.98"),
+        committed=Decimal("4.98"),
         scene_count=4,
     )
 

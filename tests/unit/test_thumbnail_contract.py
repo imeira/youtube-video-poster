@@ -5,8 +5,11 @@ from __future__ import annotations
 import pytest
 from PIL import Image
 
-from src.agents.thumbnail import ThumbnailAgent, ThumbnailContract, ThumbnailContractError
-
+from src.agents.thumbnail import (
+    ThumbnailAgent,
+    ThumbnailContract,
+    ThumbnailContractError,
+)
 
 EP8 = ThumbnailContract(
     headline="A PROMESSA DE UM FILHO",

@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from src.pipeline.revision import ArtifactStatus, RevisionRegistry, SupersededArtifactError
+from src.pipeline.revision import (
+    ArtifactStatus,
+    RevisionRegistry,
+    SupersededArtifactError,
+)
 
 
 def test_rejection_supersedes_descendants_without_mutating_prior_receipts(tmp_path: Path):

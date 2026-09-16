@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from src.approval.receipts import ApprovalReceipt, PublicationAuthorizationError, require_publication_authorization
+from src.approval.receipts import (
+    ApprovalReceipt,
+    PublicationAuthorizationError,
+    require_publication_authorization,
+)
 
 
 def test_publication_needs_matching_thumbnail_video_and_separate_command(tmp_path: Path):
