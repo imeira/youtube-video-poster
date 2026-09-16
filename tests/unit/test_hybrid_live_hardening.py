@@ -1,6 +1,4 @@
-import asyncio
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -67,3 +65,24 @@ async def test_async_run_checkpoints_then_recovers_same_id_without_second_post(t
     assert transport.gets == 1
     assert checkpoints[0] == {"provider_id": "async-id"}
     assert checkpoints[1]["partial"].replace("\\", "/").endswith("quarantine/request-id/result.mp4")
+
+
+@pytest.mark.asyncio
+async def test_runpod_rejects_unsafe_remote_identifier_before_checkpoint(tmp_path):
+    class UnsafeTransport:
+        def post(self, endpoint, payload):
+            return {"id": "remote/../escape", "status": "IN_QUEUE"}
+
+        def get(self, endpoint, provider_id):
+            raise AssertionError("unsafe identifier must not be used for recovery")
+
+    provider = RunPodSeedanceProvider(
+        tmp_path / "quarantine", transport=UnsafeTransport(),
+        image_stager=lambda _: "https://staging.example/image.png",
+    )
+    checkpoints = []
+
+    with pytest.raises(ValueError, match="safe durable request ID"):
+        await provider.submit(job(tmp_path), "request-id", lambda **item: checkpoints.append(item))
+
+    assert checkpoints == []
