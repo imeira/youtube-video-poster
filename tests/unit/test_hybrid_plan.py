@@ -75,10 +75,10 @@ def test_invalid_plans_fail_closed():
 
 
 def test_planner_always_consults_guard_even_without_injection():
-    result = plan(Config(), committed=Decimal("7.98"), images=Decimal("1.36"))
+    result = plan(Config(), committed=Decimal("4.98"), images=Decimal("1.36"))
     assert result["immediate_budget_action"] == BudgetAction.PROCEED_WITH_WARNING
     assert result["budget_action"] == BudgetAction.WAITING_BUDGET_APPROVAL
-    assert result["conservative_projected"] == Decimal("13.24")
+    assert result["conservative_projected"] == Decimal("10.240")
     assert result["conservative_budget_action"] == BudgetAction.WAITING_BUDGET_APPROVAL
 
 

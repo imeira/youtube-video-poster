@@ -8,15 +8,11 @@ Then: approval → script → audio → storyboard → GENERATING_IMAGES
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-from pathlib import Path
 
 import pytest
 
 from src.agents.director import DirectorAgent
-from src.state.machine import EpisodeState
 
 CREATION_THEME = "História da criação do mundo — Gênesis 1–2"
 DAVID_THEME = "História de Davi e Golias — 1 Samuel 17"
@@ -62,7 +58,7 @@ class TestDirectorPreProduction:
     async def test_episode_files_created(self, episodes_dir):
         """Episode filesystem should be created (§15)."""
         director = DirectorAgent()
-        result = await director.start_episode(
+        await director.start_episode(
             theme=CREATION_THEME,
             episode_id="PILOT002",
         )
@@ -82,8 +78,7 @@ class TestDirectorPreProduction:
             episode_id="PILOT003",
         )
         state_path = episodes_dir / "PILOT003" / "state.json"
-        with open(state_path) as f:
-            state = json.load(f)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         assert state["current_state"] == "WAITING_PLAN_APPROVAL"
         assert len(state["state_history"]) >= 3  # REQUEST_RECEIVED, RESEARCHING, PLANNING, WAITING
 
@@ -123,6 +118,7 @@ class TestDirectorProduction:
 
         ep_root = episodes_dir / "PILOT005"
         assert (ep_root / "script" / "narration.txt").exists()
+        assert (ep_root / "script" / "script_qa.json").exists()
         assert (ep_root / "audio" / "narration.mp3").exists()
         assert (ep_root / "storyboard" / "scenes.json").exists()
 
@@ -134,10 +130,11 @@ class TestDirectorProduction:
             theme=CREATION_THEME,
             episode_id="PILOT006",
         )
-        result = await director.continue_after_approval("PILOT006", "plan")
+        await director.continue_after_approval("PILOT006", "plan")
 
-        with open(episodes_dir / "PILOT006" / "storyboard" / "scenes.json") as f:
-            scenes = json.load(f)["scenes"]
+        scenes = json.loads(
+            (episodes_dir / "PILOT006" / "storyboard" / "scenes.json").read_text(encoding="utf-8")
+        )["scenes"]
 
         for scene in scenes:
             assert scene["start"] >= 0

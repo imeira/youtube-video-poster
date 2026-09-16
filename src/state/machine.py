@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -71,7 +73,7 @@ _TRANSITIONS: dict[EpisodeState, set[EpisodeState]] = {
         EpisodeState.CANCELLED,
     },
     EpisodeState.SCRIPTING: {EpisodeState.SCRIPT_QA, EpisodeState.GENERATING_AUDIO, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
-    EpisodeState.SCRIPT_QA: {EpisodeState.CHARACTER_DESIGN, EpisodeState.SCRIPTING, EpisodeState.FAILED, EpisodeState.CANCELLED},
+    EpisodeState.SCRIPT_QA: {EpisodeState.CHARACTER_DESIGN, EpisodeState.SCRIPTING, EpisodeState.GENERATING_AUDIO, EpisodeState.FAILED, EpisodeState.CANCELLED},
     EpisodeState.CHARACTER_DESIGN: {EpisodeState.STORYBOARDING, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.STORYBOARDING: {EpisodeState.GENERATING_AUDIO, EpisodeState.GENERATING_IMAGES, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.GENERATING_AUDIO: {EpisodeState.STORYBOARDING, EpisodeState.GENERATING_IMAGES, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
@@ -229,6 +231,7 @@ class EpisodeStateStore:
             "previous_state": self.previous_state.value if self.previous_state else None,
             "state_history": self.state_history,
             "checkpoint": asdict(Checkpoint(**self.checkpoint)) if isinstance(self.checkpoint, dict) else asdict(self.checkpoint),
+            "paused_from": self._paused_from.value if self._paused_from else None,
             "updated_at": self.updated_at,
         }
 
@@ -243,13 +246,24 @@ class EpisodeStateStore:
             checkpoint=data.get("checkpoint", {}),
             updated_at=data.get("updated_at", datetime.now(UTC).isoformat()),
         )
+        paused_from = data.get("paused_from")
+        if store.current_state == EpisodeState.PAUSED and paused_from:
+            store._paused_from = EpisodeState(paused_from)
         return store
 
     def save(self, path: Path) -> None:
-        """Persist state to JSON file."""
+        """Atomically persist state so a crash cannot truncate the checkpoint."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(self.to_dict(), stream, indent=2, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, path)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
 
     @classmethod
     def load(cls, path: Path) -> EpisodeStateStore:

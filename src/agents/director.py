@@ -25,6 +25,7 @@ from src.agents.image_gen import ImageGenAgent
 from src.agents.metadata import MetadataAgent
 from src.agents.research import ResearchAgent
 from src.agents.script import ScriptAgent
+from src.agents.script_qa import ScriptQAAgent
 from src.agents.storyboard import StoryboardAgent
 from src.agents.thumbnail import ThumbnailAgent
 from src.budget.guard import BudgetGuard, CostLedger
@@ -399,10 +400,12 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
             return {"status": "budget approved", "state": state.current_state.value}
         elif approval_type == "final":
-            # Final approval — publish
-            state.transition_to(EpisodeState.UPLOADING, agent=self.name, note="final approved")
-            state.save(fs.paths.state_json)
-            return {"status": "publishing", "state": state.current_state.value}
+            # Approval grants delivery acceptance only. Upload/publication must be
+            # initiated later by a separate explicit command and hash-bound receipts.
+            return {
+                "status": "awaiting_separate_publication_instruction",
+                "state": state.current_state.value,
+            }
 
         return {"error": f"Unknown approval type: {approval_type}"}
 
@@ -456,6 +459,23 @@ class DirectorAgent:
             return {"error": script_result.error}
 
         narration = script_result.data["narration"]
+
+        # Script QA is an independent gate. Persist its source-bound verdict
+        # before creating immutable narration audio.
+        state.transition_to(EpisodeState.SCRIPT_QA, agent="ScriptQA")
+        state.save(fs.paths.state_json)
+        packet_path = Path(script_result.data.get("script_packet_path", ""))
+        if not packet_path.is_file():
+            state.transition_to(EpisodeState.FAILED, agent="ScriptQA", note="script packet missing")
+            state.save(fs.paths.state_json)
+            return {"error": "script packet missing"}
+        qa_result = ScriptQAAgent().review(await asyncio.to_thread(_read_json_file, packet_path))
+        qa_record = {"approved": qa_result.approved, "findings": list(qa_result.findings)}
+        await asyncio.to_thread(_write_json_file, fs.paths.script_dir / "script_qa.json", qa_record)
+        if not qa_result.approved:
+            state.transition_to(EpisodeState.FAILED, agent="ScriptQA", note="; ".join(qa_result.findings))
+            state.save(fs.paths.state_json)
+            return {"error": "script QA failed", "findings": list(qa_result.findings)}
 
         # Step 7: Audio (§27-28)
         state.transition_to(EpisodeState.GENERATING_AUDIO, agent=self.audio.name)
@@ -669,17 +689,13 @@ class DirectorAgent:
         episode_id: str = "",
         skip_image_gen: bool = False,
     ) -> dict[str, Any]:
-        """Run the complete pipeline from request to final video (§98).
+        """Create the pre-production packet; never bypass the human plan gate.
 
-        §117: Pilot episode — do NOT auto-publish.
+        This compatibility entry point intentionally returns at
+        ``WAITING_PLAN_APPROVAL``. Continuing production requires a durable
+        approval receipt through the approval workflow.
         """
-        # Pre-production
-        pre_result = await self.start_episode(theme=theme, episode_id=episode_id)
-        eid = pre_result["episode_id"]
-
-        # Production (after plan approval — auto-approve for pilot)
-        result = await self.continue_after_approval(eid, "plan")
-        return result
+        return await self.start_episode(theme=theme, episode_id=episode_id)
 
     def cleanup_orphans(self) -> list[str]:
         """§56: Clean up orphaned RunPod pods on startup."""
