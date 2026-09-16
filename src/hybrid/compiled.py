@@ -277,8 +277,9 @@ class OperationalPipeline:
         self.episode = episode
         self.imported_assets = dict(imported_assets or {})
         imported_scenes = frozenset(self.imported_assets)
-        if imported_scenes != frozenset(blocked_scenes):
-            raise ValueError("each blocked compiled scene needs one imported approved asset")
+        blocked_scenes = frozenset(blocked_scenes)
+        if not imported_scenes <= blocked_scenes:
+            raise ValueError("imported compiled scenes must be permanently non-submittable")
         known_scenes = {frame.scene_id for frame in episode.frames}
         if not imported_scenes <= known_scenes:
             raise ValueError("imported asset is absent from compiled episode")
@@ -297,6 +298,10 @@ class OperationalPipeline:
 
     async def dispatch_baselines(self, provider: Provider):
         return await self.run.dispatch_baselines(provider)
+
+    def render_ready(self):
+        """Expose the compiled run readiness at the persisted pipeline boundary."""
+        return self.run.render_ready()
 
     def prepare_qa_packets(self):
         """Write deterministic, exact-hash technical QA packets in one pass.
