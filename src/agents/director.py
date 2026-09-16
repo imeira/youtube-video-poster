@@ -399,10 +399,12 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
             return {"status": "budget approved", "state": state.current_state.value}
         elif approval_type == "final":
-            # Final approval — publish
-            state.transition_to(EpisodeState.UPLOADING, agent=self.name, note="final approved")
-            state.save(fs.paths.state_json)
-            return {"status": "publishing", "state": state.current_state.value}
+            # Approval grants delivery acceptance only. Upload/publication must be
+            # initiated later by a separate explicit command and hash-bound receipts.
+            return {
+                "status": "awaiting_separate_publication_instruction",
+                "state": state.current_state.value,
+            }
 
         return {"error": f"Unknown approval type: {approval_type}"}
 
