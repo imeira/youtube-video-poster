@@ -38,7 +38,7 @@ class Config:
     clip_seconds: int = 5
     resolution: str = "720p"
     concurrency: int = 3
-    limit: Decimal = Decimal(10)
+    limit: Decimal = Decimal(6)
 
     def __post_init__(self):
         if self.capacity != {
