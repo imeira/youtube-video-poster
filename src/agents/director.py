@@ -125,20 +125,37 @@ class DirectorAgent:
         self.config = config or get_config()
         self.model_router = model_router or CoreModelRouter.profile_d()
         self.approval_gate = approval_gate or TelegramApprovalGate()
-        self.research = ResearchAgent()
-        llm_script = self.model_router.provider_for("script", timeout=180)
-        llm_storyboard = self.model_router.provider_for("storyboard", timeout=120)
-        llm_metadata = self.model_router.provider_for("metadata", timeout=60)
-        self.script = ScriptAgent(llm_provider=llm_script)
-        self.audio = AudioAgent()
-        self.storyboard = StoryboardAgent(llm_provider=llm_storyboard)
-        self.image_gen = ImageGenAgent(mode="lcm")
-        self.animation = AnimationAgent()
-        self.assembly = AssemblyAgent()
-        self.captions = CaptionsAgent()
-        self.thumbnail = ThumbnailAgent()
-        self.metadata = MetadataAgent(llm_provider=llm_metadata)
+        self._agents: dict[str, Any] = {}
         self._episodes: dict[str, dict] = {}  # in-memory cache
+
+    def __getattr__(self, name: str):
+        """Initialize legacy agents only on the path that actually needs them."""
+        if name in self._agents:
+            return self._agents[name]
+        factories = {
+            "research": ResearchAgent,
+            "audio": AudioAgent,
+            "image_gen": lambda: ImageGenAgent(mode="lcm"),
+            "animation": AnimationAgent,
+            "assembly": AssemblyAgent,
+            "captions": CaptionsAgent,
+            "thumbnail": ThumbnailAgent,
+            "script": lambda: ScriptAgent(
+                llm_provider=self.model_router.provider_for("script", timeout=180)
+            ),
+            "storyboard": lambda: StoryboardAgent(
+                llm_provider=self.model_router.provider_for("storyboard", timeout=120)
+            ),
+            "metadata": lambda: MetadataAgent(
+                llm_provider=self.model_router.provider_for("metadata", timeout=60)
+            ),
+        }
+        factory = factories.get(name)
+        if factory is None:
+            raise AttributeError(name)
+        agent = factory()
+        self._agents[name] = agent
+        return agent
 
     def create_operational_pipeline(
         self,

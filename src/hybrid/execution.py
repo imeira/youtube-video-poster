@@ -258,21 +258,20 @@ class Executor:
             raise ValueError("receipt result hash mismatch")
 
     def qa(self, request_id, result_sha256, approved, reviewer):
-        row = self.inspect(request_id)
-        if (
-            not row
-            or row["status"] != "COMPLETE"
-            or type(approved) is not bool
-            or not reviewer
-            or result_sha256 != row["result_sha256"]
-        ):
-            raise ValueError("QA must bind a completed receipt hash and reviewer")
-        self._verify_receipt(row)
-        if "qa" in row:
-            if row["qa"] == approved and row.get("qa_reviewer") == reviewer:
-                return
-            raise ValueError("QA receipt is immutable; create a remediation successor")
-        self._change(request_id, qa=approved, qa_reviewer=reviewer)
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            found = db.execute("SELECT data FROM jobs WHERE id=?", (request_id,)).fetchone()
+            row = json.loads(found[0]) if found else None
+            if (not row or row["status"] != "COMPLETE" or type(approved) is not bool
+                    or not reviewer or result_sha256 != row["result_sha256"]):
+                raise ValueError("QA must bind a completed receipt hash and reviewer")
+            self._verify_receipt(row)
+            if "qa" in row:
+                if row["qa"] == approved and row.get("qa_reviewer") == reviewer:
+                    return
+                raise ValueError("QA receipt is immutable; create a remediation successor")
+            row.update(qa=approved, qa_reviewer=reviewer)
+            self._put(db, row)
 
     async def run(self, job: Job, provider: Provider, authorization=None, price=None):
         job = deepcopy(job)  # Caller mutation cannot change identity during await.
@@ -283,8 +282,6 @@ class Executor:
             raise ValueError(
                 "explicit scene, endpoint and positive maximum cost required"
             )
-        job.manifest.verify(job.mode)
-
         def live_gate():
             if job.mode != "LIVE":
                 return
@@ -307,79 +304,59 @@ class Executor:
                 )
 
         lock = self.locks.setdefault(job.request_id, asyncio.Lock())
-        async with (
-            lock,
-            self.semaphore,
-            file_slot([self.lock_dir / (job.request_id + ".lock")]),
-            file_slot(
+        async with lock, file_slot([self.lock_dir / (job.request_id + ".lock")]):
+            existing = self.inspect(job.request_id)
+            if existing and existing["status"] == "COMPLETE":
+                self._verify_receipt(existing)
+                return existing
+            async with self.semaphore, file_slot(
                 [
                     self.lock_dir / f"worker-{i}.lock"
                     for i in range(self.config.concurrency)
                 ]
-            ),
-        ):
-            job.manifest.verify(job.mode)
-            existing = self.inspect(job.request_id)
-            if existing is None:
-                live_gate()
-                fresh = self._reserve(job)
-            else:
-                fresh = False
-            row = self.inspect(job.request_id)
-            if row["status"] == "COMPLETE":
-                self._verify_receipt(row)
-                return row
-            if row["status"] == "OVERRUN":
-                raise RuntimeError("budget overrun requires reconciliation")
+            ):
+                job.manifest.verify(job.mode)
+                existing = self.inspect(job.request_id)
+                if existing is None:
+                    live_gate()
+                    fresh = self._reserve(job)
+                else:
+                    fresh = False
+                row = self.inspect(job.request_id)
+                if row["status"] == "COMPLETE":
+                    self._verify_receipt(row)
+                    return row
+                if row["status"] == "OVERRUN":
+                    raise RuntimeError("budget overrun requires reconciliation")
 
-            def checkpoint(*, provider_id=None, partial=None):
-                updates = {}
-                if provider_id:
-                    updates["provider_id"] = provider_id
-                if partial:
-                    updates["partial"] = str(Path(partial).resolve())
-                self._change(job.request_id, **updates)
+                def checkpoint(*, provider_id=None, partial=None):
+                    updates = {}
+                    if provider_id:
+                        updates["provider_id"] = provider_id
+                    if partial:
+                        updates["partial"] = str(Path(partial).resolve())
+                    self._change(job.request_id, **updates)
 
-            if fresh:
-                self._change(
-                    job.request_id,
-                    authorization=json.loads(
-                        json.dumps(asdict(authorization), default=str)
+                if fresh:
+                    self._change(
+                        job.request_id,
+                        authorization=json.loads(json.dumps(asdict(authorization), default=str)) if authorization else None,
+                        live_price=json.loads(json.dumps(asdict(price), default=str)) if price else None,
                     )
-                    if authorization
-                    else None,
-                    live_price=json.loads(json.dumps(asdict(price), default=str))
-                    if price
-                    else None,
-                )
-                result = await provider.submit(job, job.request_id, checkpoint)
-            elif row["provider_id"] or row["partial"]:
-                result = await provider.recover(
-                    job, job.request_id, row["provider_id"], row["partial"], checkpoint
-                )
-            else:
-                raise RuntimeError(
-                    "unknown submission requires reconciliation; no resubmit"
-                )
-            actual = money(result.actual_cost)
-            result_path = Path(result.path).resolve()
-            if actual > job.cost:
+                    result = await provider.submit(job, job.request_id, checkpoint)
+                elif row["provider_id"] or row["partial"]:
+                    result = await provider.recover(
+                        job, job.request_id, row["provider_id"], row["partial"], checkpoint
+                    )
+                else:
+                    raise RuntimeError("unknown submission requires reconciliation; no resubmit")
+                actual = money(result.actual_cost)
+                result_path = Path(result.path).resolve()
+                if actual > job.cost:
+                    self._change(job.request_id, status="OVERRUN", result=str(result_path), charged=str(actual), actual_cost=str(actual))
+                    raise RuntimeError("budget provider overrun recorded; execution blocked")
                 self._change(
-                    job.request_id,
-                    status="OVERRUN",
-                    result=str(result_path),
-                    charged=str(actual),
-                    actual_cost=str(actual),
+                    job.request_id, status="COMPLETE", result=str(result_path),
+                    result_sha256=sha256(result_path), charged=str(actual), actual_cost=str(actual),
                 )
-                raise RuntimeError(
-                    "budget provider overrun recorded; execution blocked"
-                )
-            self._change(
-                job.request_id,
-                status="COMPLETE",
-                result=str(result_path),
-                result_sha256=sha256(result_path),
-                charged=str(actual),
-                actual_cost=str(actual),
-            )
-            return self.inspect(job.request_id)
+                return self.inspect(job.request_id)

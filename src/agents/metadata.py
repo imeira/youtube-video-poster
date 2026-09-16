@@ -39,9 +39,10 @@ _HEROES = {"davi", "golias", "daniel", "jonas", "noé", "moisés", "josé"}
 class MetadataAgent(BaseAgent):
     """Generates YouTube metadata (§92-93). LLM-assisted with template fallback."""
 
-    def __init__(self, llm_provider=None):
+    def __init__(self, llm_provider=None, *, use_llm: bool = False):
         super().__init__(name="YouTubeMetadata")
         self._llm = llm_provider
+        self._use_llm = use_llm
 
     async def run(
         self,
@@ -96,7 +97,7 @@ class MetadataAgent(BaseAgent):
 
     async def _make_title(self, theme: str, research: dict) -> str:
         """Generate a compelling, non-clickbait title (§91/§97)."""
-        if self._llm and getattr(self._llm, "available", lambda: False)():
+        if self._use_llm and self._llm and getattr(self._llm, "available", lambda: False)():
             try:
                 prompt = (
                     f"Crie um título de vídeo do YouTube para crianças de 6 a 10 anos "
@@ -132,7 +133,7 @@ class MetadataAgent(BaseAgent):
             ref_lines.append(f"📖 {book} {ch}:{vs}".strip())
 
         llm_intro = ""
-        if self._llm and getattr(self._llm, "available", lambda: False)():
+        if self._use_llm and self._llm and getattr(self._llm, "available", lambda: False)():
             try:
                 prompt = (
                     f"Escreva um parágrafo curto (2-3 frases) de descrição de vídeo do YouTube, "

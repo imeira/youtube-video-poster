@@ -196,6 +196,16 @@ def test_renderer_accepts_a_bounded_ffmpeg_thread_budget():
         LocalRenderer(width=320, height=180, filter_complex_threads=0)
 
 
+def test_renderer_accepts_bounded_parallel_scene_workers_and_encoder_threads():
+    renderer = LocalRenderer(width=320, height=180, scene_workers=2, encoder_threads=1)
+
+    assert (renderer.scene_workers, renderer.encoder_threads) == (2, 1)
+    with pytest.raises(ValueError, match="scene worker"):
+        LocalRenderer(scene_workers=0)
+    with pytest.raises(ValueError, match="encoder thread"):
+        LocalRenderer(encoder_threads=0)
+
+
 def test_renderer_defaults_to_delivery_geometry_and_fps():
     renderer = LocalRenderer()
 

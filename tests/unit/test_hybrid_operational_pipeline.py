@@ -106,7 +106,7 @@ async def test_operational_pipeline_promotes_only_hash_bound_approved_candidates
 
     assert manifest.assets[0].path.parent.name == "approved_images"
     assert manifest.assets[0].sha256 == receipts["R001"]["result_sha256"]
-    assert (tmp_path / "compiled" / "qa" / "R001.json").is_file()
+    assert len(list((tmp_path / "compiled" / "qa").glob("*.json"))) == 1
     assert (tmp_path / "compiled" / "manifest.json").is_file()
 
 
@@ -154,6 +154,33 @@ def test_operational_pipeline_cannot_freeze_manifest_before_all_visual_qa(tmp_pa
 
     with pytest.raises(ValueError, match="approved QA"):
         pipeline.approved_manifest()
+
+
+@pytest.mark.asyncio
+async def test_remediation_becomes_the_only_active_promotable_image(tmp_path):
+    from src.hybrid.compiled import OperationalPipeline, compile_storyboard
+
+    audio = tmp_path / "approved.wav"
+    audio.write_bytes(b"approved audio")
+    episode = compile_storyboard(
+        "EPX", FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        [{"scene_id": "R001", "start": 0, "end": 2, "image_prompt": "céu", "action": "céu"}],
+    )
+    pipeline = OperationalPipeline(
+        episode, Executor(tmp_path / "control.db", Config()), source_manifest(tmp_path),
+        workspace=tmp_path / "compiled", endpoint="flux", image_cost=Decimal(".02"),
+    )
+    provider = ImageProvider(tmp_path)
+    initial = (await pipeline.dispatch_baselines(provider))["R001"]
+    pipeline.record_visual_qa("R001", initial["result_sha256"], False, "independent-qa")
+
+    correction = pipeline.run.remediation_job("R001", "sem defeito")
+    corrected = await pipeline.run.executor.run(correction, provider)
+    pipeline.record_visual_qa("R001", corrected["result_sha256"], True, "independent-qa")
+    manifest = pipeline.approved_manifest()
+
+    assert manifest.assets[0].sha256 == corrected["result_sha256"]
+    assert pipeline.run._active_images["R001"].request_id == correction.request_id
 
 
 def test_director_opens_compiled_pipeline_from_approved_episode_inputs(tmp_path, monkeypatch):

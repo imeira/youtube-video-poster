@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -120,7 +121,7 @@ def validate_srt(path, duration):
 
 
 class LocalRenderer:
-    def __init__(self, width=1920, height=1080, fps=30, *, filter_complex_threads=None):
+    def __init__(self, width=1920, height=1080, fps=30, *, filter_complex_threads=None, scene_workers=1, encoder_threads=1):
         if (
             any(type(n) is not int or n <= 0 for n in (width, height, fps))
             or width % 2
@@ -131,13 +132,21 @@ class LocalRenderer:
             type(filter_complex_threads) is not int or filter_complex_threads < 1
         ):
             raise ValueError("positive filter-complex thread budget required")
+        if type(scene_workers) is not int or scene_workers < 1:
+            raise ValueError("positive scene worker budget required")
+        if type(encoder_threads) is not int or encoder_threads < 1:
+            raise ValueError("positive encoder thread budget required")
         self.width, self.height, self.fps = width, height, fps
         self.filter_complex_threads = filter_complex_threads
+        self.scene_workers, self.encoder_threads = scene_workers, encoder_threads
 
     def render_compiled(self, production, scenes, manifest, audio, srt, output, *, hold=4):
         """Render only after the compiled control plane has immutable QA receipts."""
         if not production.render_ready():
             raise ValueError("compiled QA receipts are incomplete; rendering blocked")
+        approved = production.approved_manifest()
+        if manifest.checksum != approved.checksum:
+            raise ValueError("render manifest is not the compiled approved manifest")
         return self.render(scenes, manifest, audio, srt, output, hold=hold)
 
     def render(self, scenes, manifest, audio, srt, output, *, hold=4):
@@ -182,6 +191,7 @@ class LocalRenderer:
             shutil.copyfile(audio.path, audio_copy)
             if sha256(audio_copy) != audio.sha256:
                 raise ValueError("audio snapshot hash mismatch")
+            scene_commands = []
             for index, (scene, seconds) in enumerate(zip(scenes, render_seconds)):
                 if scene.clip is not None:
                     source = root / f"hero{index}{scene.clip.path.suffix}"
@@ -204,11 +214,13 @@ class LocalRenderer:
                         f"scale={self.width}:{self.height},setsar=1,fps={self.fps},"
                         "tpad=stop_mode=clone:stop_duration=0.25,format=yuv420p"
                     )
-                    command(
+                    scene_commands.append(
                         [
                             "ffmpeg",
                             "-v",
                             "error",
+                            "-threads",
+                            str(self.encoder_threads),
                             "-i",
                             str(source),
                             "-vf",
@@ -236,11 +248,13 @@ class LocalRenderer:
                     f"y='ih/2-ih/zoom/2':d={frames}:s={self.width}x{self.height}:fps={self.fps},"
                     "setsar=1,format=yuv420p"
                 )
-                command(
+                scene_commands.append(
                     [
                         "ffmpeg",
                         "-v",
                         "error",
+                        "-threads",
+                        str(self.encoder_threads),
                         "-i",
                         str(source),
                         "-vf",
@@ -255,6 +269,10 @@ class LocalRenderer:
                         str(root / f"scene{index}.mp4"),
                     ]
                 )
+            with ThreadPoolExecutor(max_workers=self.scene_workers) as pool:
+                futures = [pool.submit(command, args) for args in scene_commands]
+                for future in futures:
+                    future.result()
             args = ["ffmpeg", "-v", "error"]
             if self.filter_complex_threads is not None:
                 args += ["-filter_complex_threads", str(self.filter_complex_threads)]
@@ -342,6 +360,8 @@ class LocalRenderer:
             "audio_operation": "stream_copy",
             "hero_sha256": [s.clip.sha256 for s in scenes if s.clip is not None],
             "filter_complex_threads": self.filter_complex_threads,
+            "scene_workers": self.scene_workers,
+            "encoder_threads": self.encoder_threads,
         }
         atomic_json(output.with_name(output.name + ".receipt.json"), receipt)
         return receipt
