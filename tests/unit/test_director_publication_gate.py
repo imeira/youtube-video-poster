@@ -113,6 +113,29 @@ async def test_final_render_qa_requires_persisted_production_evidence(tmp_path, 
         )
 
 
+def test_director_records_independent_production_evidence_qa(tmp_path, monkeypatch):
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
+    (fs.paths.script_dir / "script.json").write_text(
+        json.dumps({"narration_segments": [{"id": "S001"}]}), encoding="utf-8"
+    )
+    (fs.paths.compiled_dir / "manifest.json").write_text(
+        json.dumps({"assets": [{"sha256": "a" * 64}]}), encoding="utf-8"
+    )
+    fs.paths.captions_vtt.write_text("WEBVTT\n\n", encoding="utf-8")
+    (fs.paths.metadata_dir / "metadata.json").write_text(
+        json.dumps({"references": [{"book": "Gênesis"}]}), encoding="utf-8"
+    )
+
+    report = director.record_production_evidence_qa("EP8", published_script_hashes=set())
+
+    assert report["approved"] is True
+    assert (fs.paths.qa_dir / "production_evidence_qa.json").is_file()
+
+
 def test_director_records_only_exact_approval_of_delivered_media(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
     director = DirectorAgent()
