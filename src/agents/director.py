@@ -294,6 +294,38 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
         return {"approved": approved, "state": state.current_state.value}
 
+    def render_compiled_video(self, episode_id: str, pipeline, renderer, *, hold: int = 4) -> dict[str, Any]:
+        """Compose a subtitle-free local delivery master from the approved manifest only."""
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.PLANNING_ANIMATION:
+            raise ValueError("compiled rendering requires PLANNING_ANIMATION state")
+        if hold not in (3, 4, 5):
+            raise ValueError("compiled render closing hold must be 3 to 5 seconds")
+        manifest = pipeline.approved_manifest()
+        scenes = pipeline.render_scenes(manifest)
+        state.transition_to(EpisodeState.LOCAL_ANIMATION, agent="CompiledProduction", note="local render started")
+        state.save(fs.paths.state_json)
+        state.transition_to(EpisodeState.ASSEMBLING, agent="CompiledProduction", note="assembling compiled master")
+        state.save(fs.paths.state_json)
+        receipt = renderer.render_compiled(
+            pipeline,
+            scenes,
+            manifest,
+            pipeline.episode.audio,
+            None,
+            fs.paths.final_video,
+            hold=hold,
+        )
+        if receipt.get("subtitles_sha256") is not None:
+            raise ValueError("compiled delivery must not burn subtitles")
+        if not fs.paths.final_video.is_file():
+            raise ValueError("compiled renderer did not create final video")
+        _write_json_file(fs.paths.qa_dir / "compiled_render_receipt.json", receipt)
+        state.transition_to(EpisodeState.FINAL_QA, agent="CompiledProduction", note="compiled master ready for final QA")
+        state.save(fs.paths.state_json)
+        return receipt
+
     async def start_episode(
         self,
         theme: str,

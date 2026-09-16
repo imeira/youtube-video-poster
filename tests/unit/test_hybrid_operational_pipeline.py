@@ -376,3 +376,20 @@ async def test_director_dispatches_compiled_baselines_to_independent_visual_qa(t
 
     assert promoted["approved"]["R001"]
     assert EpisodeStateStore.load(fs.paths.state_json).current_state == EpisodeState.PLANNING_ANIMATION
+
+    class Renderer:
+        def render_compiled(self, production, scenes, manifest, audio, srt, output, *, hold):
+            assert production is pipeline
+            assert len(scenes) == 1
+            assert manifest.checksum == pipeline.approved_manifest().checksum
+            assert audio == pipeline.episode.audio
+            assert srt is None
+            assert hold == 4
+            output.write_bytes(b"render")
+            return {"subtitles_sha256": None, "hold_seconds": hold, "audio_operation": "derived_master"}
+
+    receipt = director.render_compiled_video("EPX", pipeline, Renderer())
+
+    assert receipt["subtitles_sha256"] is None
+    assert fs.paths.final_video.is_file()
+    assert EpisodeStateStore.load(fs.paths.state_json).current_state == EpisodeState.FINAL_QA
