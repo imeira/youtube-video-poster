@@ -25,6 +25,7 @@ from src.agents.image_gen import ImageGenAgent
 from src.agents.metadata import MetadataAgent
 from src.agents.research import ResearchAgent
 from src.agents.script import ScriptAgent
+from src.agents.script_qa import ScriptQAAgent
 from src.agents.storyboard import StoryboardAgent
 from src.agents.thumbnail import ThumbnailAgent
 from src.budget.guard import BudgetGuard, CostLedger
@@ -458,6 +459,23 @@ class DirectorAgent:
             return {"error": script_result.error}
 
         narration = script_result.data["narration"]
+
+        # Script QA is an independent gate. Persist its source-bound verdict
+        # before creating immutable narration audio.
+        state.transition_to(EpisodeState.SCRIPT_QA, agent="ScriptQA")
+        state.save(fs.paths.state_json)
+        packet_path = Path(script_result.data.get("script_packet_path", ""))
+        if not packet_path.is_file():
+            state.transition_to(EpisodeState.FAILED, agent="ScriptQA", note="script packet missing")
+            state.save(fs.paths.state_json)
+            return {"error": "script packet missing"}
+        qa_result = ScriptQAAgent().review(await asyncio.to_thread(_read_json_file, packet_path))
+        qa_record = {"approved": qa_result.approved, "findings": list(qa_result.findings)}
+        await asyncio.to_thread(_write_json_file, fs.paths.script_dir / "script_qa.json", qa_record)
+        if not qa_result.approved:
+            state.transition_to(EpisodeState.FAILED, agent="ScriptQA", note="; ".join(qa_result.findings))
+            state.save(fs.paths.state_json)
+            return {"error": "script QA failed", "findings": list(qa_result.findings)}
 
         # Step 7: Audio (§27-28)
         state.transition_to(EpisodeState.GENERATING_AUDIO, agent=self.audio.name)

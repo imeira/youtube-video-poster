@@ -73,7 +73,7 @@ _TRANSITIONS: dict[EpisodeState, set[EpisodeState]] = {
         EpisodeState.CANCELLED,
     },
     EpisodeState.SCRIPTING: {EpisodeState.SCRIPT_QA, EpisodeState.GENERATING_AUDIO, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
-    EpisodeState.SCRIPT_QA: {EpisodeState.CHARACTER_DESIGN, EpisodeState.SCRIPTING, EpisodeState.FAILED, EpisodeState.CANCELLED},
+    EpisodeState.SCRIPT_QA: {EpisodeState.CHARACTER_DESIGN, EpisodeState.SCRIPTING, EpisodeState.GENERATING_AUDIO, EpisodeState.FAILED, EpisodeState.CANCELLED},
     EpisodeState.CHARACTER_DESIGN: {EpisodeState.STORYBOARDING, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.STORYBOARDING: {EpisodeState.GENERATING_AUDIO, EpisodeState.GENERATING_IMAGES, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.GENERATING_AUDIO: {EpisodeState.STORYBOARDING, EpisodeState.GENERATING_IMAGES, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
