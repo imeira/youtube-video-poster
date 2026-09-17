@@ -403,6 +403,11 @@ async def test_director_forwards_hash_bound_live_authority_to_compiled_dispatch(
     from src.storage.episode_fs import EpisodeFS
 
     class Pipeline:
+        episode = type("Episode", (), {"audio": type("Audio", (), {"mode": "LIVE"})()})()
+
+        def baseline_jobs(self):
+            return (type("Job", (), {"request_id": "job"})(),)
+
         async def dispatch_baselines(self, provider, *, authorizations, prices):
             assert provider == "live-provider"
             assert authorizations == {"job": "authorization"}
@@ -424,3 +429,30 @@ async def test_director_forwards_hash_bound_live_authority_to_compiled_dispatch(
     )
 
     assert result["state"] == EpisodeState.VISUAL_QA.value
+
+
+@pytest.mark.asyncio
+async def test_director_rejects_live_dispatch_without_authority_for_every_compiled_job(tmp_path, monkeypatch):
+    from src.agents.director import DirectorAgent
+    from src.config.loader import get_config
+    from src.state.machine import EpisodeState, EpisodeStateStore
+    from src.storage.episode_fs import EpisodeFS
+
+    class Pipeline:
+        episode = type("Episode", (), {"audio": type("Audio", (), {"mode": "LIVE"})()})()
+
+        def baseline_jobs(self):
+            return (type("Job", (), {"request_id": "job-1"})(),)
+
+        async def dispatch_baselines(self, *_args, **_kwargs):
+            raise AssertionError("LIVE dispatch reached provider without complete authority")
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    fs = EpisodeFS("EPX", get_config())
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EPX", current_state=EpisodeState.GENERATING_IMAGES).save(fs.paths.state_json)
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = get_config()
+
+    with pytest.raises(ValueError, match="every compiled LIVE job"):
+        await director.dispatch_compiled_baselines("EPX", Pipeline(), "live-provider")

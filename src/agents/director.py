@@ -245,6 +245,16 @@ class DirectorAgent:
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state is not EpisodeState.GENERATING_IMAGES:
             raise ValueError("compiled baseline dispatch requires GENERATING_IMAGES state")
+        if pipeline.episode.audio.mode == "LIVE":
+            jobs = pipeline.baseline_jobs()
+            request_ids = {job.request_id for job in jobs}
+            if (
+                not isinstance(authorizations, dict)
+                or not isinstance(prices, dict)
+                or set(authorizations) != request_ids
+                or set(prices) != request_ids
+            ):
+                raise ValueError("every compiled LIVE job requires exact authority and fresh price")
         receipts = await pipeline.dispatch_baselines(
             provider, authorizations=authorizations, prices=prices
         )

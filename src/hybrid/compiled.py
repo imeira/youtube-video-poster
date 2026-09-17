@@ -175,6 +175,10 @@ class ProductionRun:
             predecessor=predecessor,
         )
 
+    def baseline_jobs(self) -> tuple[Job, ...]:
+        """Return the exact baseline jobs that need current LIVE authority."""
+        return tuple(self._baselines.values())
+
     async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None):
         if not self._baselines:
             return {}
@@ -307,6 +311,9 @@ class OperationalPipeline:
         )
         self._approved_heroes: dict[str, FrozenAsset] = {}
         self.episode.save(self.workspace / "compiled_episode.json")
+
+    def baseline_jobs(self) -> tuple[Job, ...]:
+        return self.run.baseline_jobs()
 
     async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None):
         return await self.run.dispatch_baselines(
