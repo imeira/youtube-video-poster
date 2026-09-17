@@ -44,6 +44,24 @@ def probe(path):
     )
 
 
+def measure_loudness(path):
+    """Analyze decoded final audio; loudnorm input values are measurements, not targets."""
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-nostdin", "-v", "info",
+        "-i", str(path), "-map", "0:a:0", "-vn", "-sn", "-af",
+        "loudnorm=I=-16:TP=-1:print_format=json", "-f", "null", "-"],
+        capture_output=True, text=True, timeout=1800)
+    if result.returncode:
+        raise ValueError("final audio analysis failed")
+    matches = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', result.stderr)
+    if len(matches) != 1:
+        raise ValueError("final audio measurements missing")
+    values = json.loads(matches[0])
+    measured = dict(integrated_lufs=float(values["input_i"]), true_peak_dbtp=float(values["input_tp"]))
+    if not all(math.isfinite(v) for v in measured.values()):
+        raise ValueError("non-finite final audio measurements")
+    return measured
+
+
 def _publish_new(source, output):
     """Atomically publish within one filesystem without replacing another render."""
     source, output = Path(source), Path(output)

@@ -28,6 +28,23 @@ TITLE = "A promessa de um filho para Abraão e Sara"
 THEME = TITLE + " — Gênesis 15–18"
 
 
+HEADLINE = "UMA PROMESSA IMPOSSÍVEL?"
+SUBTITLE = "— Gênesis 15–18"
+
+
+def implementation_paths(mode):
+    """Resolve shipped implementation from the package, independent of cwd."""
+    root = Path(__file__).resolve().parents[1]
+    paths = [root / name for name in (
+        "hybrid/revision.py", "hybrid/production.py", "hybrid/render.py",
+        "qa/final_render.py", "qa/post_production.py", "qa/production_evidence.py",
+        "agents/script_qa.py", "agents/thumbnail.py",
+        "providers/notification/telegram_provider.py", "hybrid/assets/ep8_promise_v1.json")]
+    if mode == "LIVE":
+        paths.append(root / "hybrid/revision_live.py")
+    return paths
+
+
 def read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
@@ -95,6 +112,8 @@ class RevisionHarness:
         plan = self.control["plan"]
         if digest(plan) != self.control["plan_hash"]:
             raise ValueError("plan hash mismatch")
+        if any(str(p.resolve()) not in plan["bindings"] for p in implementation_paths(plan["mode"])):
+            raise ValueError("implementation bindings missing; new plan required")
         for path, expected in plan["bindings"].items():
             if sha256(path) != expected:
                 raise ValueError("input binding changed")
@@ -118,6 +137,7 @@ class RevisionHarness:
         rejected = read(predecessors) if predecessors else []
         self._validate_predecessors(rejected)
         bindings = {str(Path(predecessors).resolve()): sha256(predecessors)} if predecessors else {}
+        bindings.update({str(p.resolve()): sha256(p) for p in implementation_paths(mode)})
         contract = None
         if mode == "LIVE":
             if deployment is None:
@@ -224,7 +244,7 @@ class RevisionHarness:
             raise ValueError("exact artifact hash and reviewer required")
         self.control["approvals"][kind] = dict(reviewer=reviewer, sha256=artifact_hash,
                                                 plan_hash=self.control["plan_hash"])
-        self.control["status"] = "WAITING_VIDEO_APPROVAL" if kind == "thumbnail" else "WAITING_FINAL_APPROVAL"
+        self.control["status"] = "READY_VIDEO_DELIVERY" if kind == "thumbnail" else "WAITING_FINAL_APPROVAL"
         self.save()
         return self.status()
 
@@ -334,6 +354,8 @@ class RevisionHarness:
             return self.status()
         directory = self.root / f"r{plan['revision']:03d}"
         directory.mkdir(exist_ok=True)
+        if self.control["status"] == "READY_VIDEO_DELIVERY":
+            return await self.deliver("video", plan, directory)
         deps = self.get_dependencies(plan, directory)
         mode = plan["mode"]
         cfg = SimpleNamespace(**load_config().__dict__, episodes_dir=directory)
@@ -514,7 +536,7 @@ class RevisionHarness:
             atomic_json(p.metadata_dir / "youtube.json", metadata)
             thumbnail = await ThumbnailAgent().run(episode_id,
                 images=[dict(scene_id=f.scene_id, image_path=str(a.path)) for f, a in zip(pipeline.episode.frames, manifest.assets)],
-                thumbnails_dir=str(p.thumbnails_dir), copy_contract=ThumbnailContract("UMA PROMESSA", TITLE, "— Gênesis 15–18"))
+                thumbnails_dir=str(p.thumbnails_dir), copy_contract=ThumbnailContract(HEADLINE, TITLE, SUBTITLE))
             if not thumbnail.success:
                 raise ValueError(thumbnail.error)
             self.fresh(thumbnail.data["thumbnail_path"])
@@ -536,21 +558,59 @@ class RevisionHarness:
 
         await self.stage("final_qa", final_stage, recoverable=True)
         artifacts = dict(thumbnail=self.fresh(thumbnail["thumbnail_path"]), video=self.fresh(p.final_video))
-        for kind, artifact in artifacts.items():
-            async def send(kind=kind, artifact=artifact):
-                method = deps.messenger.send_photo if kind == "thumbnail" else deps.messenger.send_video
-                message_id = await method(plan["chat_id"], artifact["path"], f"{mode} EP8 revision {plan['revision']} {kind}; approval required")
-                if not message_id:
-                    raise ValueError("Telegram message receipt required")
-                value = dict(kind=kind, message_id=message_id, sha256=artifact["sha256"], mode=mode, chat_id=plan["chat_id"])
-                path = p.qa_dir / f"telegram-{kind}.json"
-                atomic_json(path, value)
-                return value, [path]
-            await self.stage("telegram_" + kind, send)
         self.control["artifacts"] = artifacts
-        self.control["status"] = "WAITING_THUMBNAIL_APPROVAL"
+        self.save()  # freeze both media before any delivery intent
+        return await self.deliver("thumbnail", plan, directory, deps)
+
+    async def deliver(self, kind, plan, directory, deps=None):
+        artifact = self.control["artifacts"][kind]
+        if sha256(artifact["path"]) != artifact["sha256"]:
+            raise ValueError("frozen delivery hash mismatch")
+        if kind == "video":
+            approval = self.control["approvals"].get("thumbnail", {})
+            if (approval.get("sha256") != self.control["artifacts"]["thumbnail"]["sha256"]
+                    or approval.get("plan_hash") != self.control["plan_hash"]):
+                raise ValueError("exact thumbnail approval required before video delivery")
+        name = "telegram_" + kind
+        receipt_path = directory / "EP8/qa" / f"telegram-{kind}.json"
+        intent = dict(kind=kind, sha256=artifact["sha256"], mode=plan["mode"],
+                      chat_id=plan["chat_id"], plan_hash=self.control["plan_hash"])
+        previous = self.control["stages"].get(name)
+        if previous:
+            if previous.get("intent") != intent:
+                raise ValueError("Telegram intent mismatch")
+            if previous["status"] == "COMPLETE":
+                value = previous["result"]
+            elif receipt_path.is_file():
+                value = read(receipt_path)
+            else:
+                raise ValueError(f"ambiguous {name}; reconciliation or rejection required")
+        else:
+            if receipt_path.exists():
+                raise ValueError("unbound Telegram receipt")
+            deps = deps or self.get_dependencies(plan, directory)
+            self.control["stages"][name] = dict(status="STARTED", intent=intent)
+            self.save()
+            method = deps.messenger.send_photo if kind == "thumbnail" else deps.messenger.send_video
+            message_id = await method(plan["chat_id"], artifact["path"],
+                f"{plan['mode']} EP8 revision {plan['revision']} {kind}; SHA256 {artifact['sha256']}; approval required")
+            value = dict(**intent, message_id=message_id)
+            self.validate_delivery(value, intent)
+            atomic_json(receipt_path, value)
+        self.validate_delivery(value, intent)
+        self.load()
+        self.control["stages"][name] = dict(status="COMPLETE", intent=intent, result=value,
+            outputs={str(receipt_path.resolve()): sha256(receipt_path)}, elapsed_seconds=0)
+        self.control["status"] = "WAITING_THUMBNAIL_APPROVAL" if kind == "thumbnail" else "WAITING_VIDEO_APPROVAL"
         self.save()
         return self.status()
+
+    @staticmethod
+    def validate_delivery(value, intent):
+        if (any(value.get(k) != v for k, v in intent.items())
+                or type(value.get("message_id")) is not int or value["message_id"] <= 0):
+            raise ValueError("valid exact Telegram message receipt required")
+
 
 
 def validate_ep8_script(script):

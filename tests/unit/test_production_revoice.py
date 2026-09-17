@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.unit.test_production_harness import approved_source, cli
+from tests.unit.test_production_harness import approved_source, cli, tone_frames
 from tests.unit.test_ep8_offline_adapter import source, snapshot
 from src.hybrid.artifacts import atomic_json, sha256
 from src.hybrid.production import ProductionHarness, THEME
@@ -45,7 +45,7 @@ class FakeTTS:
         duration = end + .2
         with wave.open(str(output_path), 'wb') as wav:
             wav.setparams((1, 2, 8000, 0, 'NONE', 'not compressed'))
-            wav.writeframes(b'\0\0' * round(duration * 8000))
+            wav.writeframes(tone_frames(round(duration * 8000)))
         if self.failure == 'network':
             raise OSError('offline')
         if self.failure == 'missing':

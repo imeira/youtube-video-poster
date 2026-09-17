@@ -55,11 +55,16 @@ def test_public_cli_offline_end_to_end_separate_gates_and_supersession(tmp_path)
     assert ready["status"] == "WAITING_THUMBNAIL_APPROVAL"
     artifacts = ready["artifacts"]
     control = read(root / "revision.json")
-    assert set(control["stages"]) == {"script", "audio_storyboard", "images", "encode", "sidecars", "final_qa", "telegram_thumbnail", "telegram_video"}
+    assert set(control["stages"]) == {"script", "audio_storyboard", "images", "encode", "sidecars", "final_qa", "telegram_thumbnail"}
     assert all(s["status"] == "COMPLETE" and s["elapsed_seconds"] >= 0 for s in control["stages"].values())
     assert control["stages"]["encode"]["result"]["render_invocations"] == 1
+    assert control["stages"]["sidecars"]["result"]["layers"] == [
+        "UMA PROMESSA IMPOSSÍVEL?", "A promessa de um filho para Abraão e Sara", "— Gênesis 15–18"]
+    measured = control["stages"]["encode"]["result"]["loudness"]
+    assert -17 <= measured["integrated_lufs"] <= -15 and measured["true_peak_dbtp"] <= -1
+    assert control["stages"]["final_qa"]["result"]["final"]["report"]["loudness"] == measured
     assert control["stages"]["final_qa"]["result"]["mode"] == "TEST"
-    assert control["stages"]["telegram_thumbnail"]["result"]["message_id"] != control["stages"]["telegram_video"]["result"]["message_id"]
+    assert "telegram_video" not in control["stages"]
     assert read(root / "r001/providers/workers.json")["maximum"] <= 3
     before = (root / "revision.json").read_bytes()
     assert cli(root, "status") == ready
@@ -68,7 +73,14 @@ def test_public_cli_offline_end_to_end_separate_gates_and_supersession(tmp_path)
     cli(root, "approve", "--kind", "video", "--artifact-hash", artifacts["video"]["sha256"], "--reviewer", "human", ok=False)
     cli(root, "approve", "--kind", "thumbnail", "--artifact-hash", "stale", "--reviewer", "human", ok=False)
     thumb = cli(root, "approve", "--kind", "thumbnail", "--artifact-hash", artifacts["thumbnail"]["sha256"], "--reviewer", "human")
-    assert thumb["status"] == "WAITING_VIDEO_APPROVAL"
+    assert thumb["status"] == "READY_VIDEO_DELIVERY"
+    assert "telegram_video" not in read(root / "revision.json")["stages"]
+    cli(root, "approve", "--kind", "video", "--artifact-hash", artifacts["video"]["sha256"], "--reviewer", "human", ok=False)
+    sent = cli(root, "resume")
+    assert sent["status"] == "WAITING_VIDEO_APPROVAL"
+    assert sent["artifacts"] == artifacts
+    assert cli(root, "resume") == sent
+    cli(root, "approve", "--kind", "video", "--artifact-hash", "stale", "--reviewer", "human", ok=False)
     final = cli(root, "approve", "--kind", "video", "--artifact-hash", artifacts["video"]["sha256"], "--reviewer", "human")
     assert final["status"] == "WAITING_FINAL_APPROVAL" and final["publication_authorized"] is False
     assert cli(root, "resume") == final
@@ -99,7 +111,7 @@ def test_lock_plan_tampering_and_input_bindings(tmp_path):
             h.status()
         data["plan"]["image_workers"] = 3
         atomic_json(h.path, data)
-        Path(next(iter(data["plan"]["bindings"]))).write_bytes(b"tampered")
+        Path(data["plan"]["references"]["manifest"]).write_bytes(b"tampered")
         with pytest.raises(ValueError, match="input binding"):
             h.approve_plan(plan["plan_hash"], "human")
 
@@ -409,3 +421,113 @@ def test_live_preflight_price_and_budget_fail_closed(tmp_path, failure):
         if failure in {"preflight", "contract"}:
             assert deps.script_calls == 0
         assert not list((tmp_path / "run").rglob("*.mp4"))
+
+
+def test_implementation_binding_mutation_uses_copy(tmp_path, monkeypatch):
+    import src.hybrid.revision as revision
+    original = revision.implementation_paths
+    bound_copy = tmp_path / 'revision-copy.py'
+    shutil.copyfile(revision.__file__, bound_copy)
+    monkeypatch.setattr(revision, 'implementation_paths', lambda mode: [bound_copy, *original(mode)[1:]])
+    with RevisionHarness(tmp_path / 'run') as h:
+        plan = h.create_plan(mode='TEST', request='Fresh EP8')
+        h.approve_plan(plan['plan_hash'], 'human')
+        bound_copy.write_bytes(bound_copy.read_bytes() + b'\n# changed implementation\n')
+        with pytest.raises(ValueError, match='input binding changed'):
+            asyncio.run(h.run())
+
+
+def test_all_required_implementation_bytes_bound_from_any_cwd(tmp_path, monkeypatch):
+    from src.hybrid.revision import implementation_paths
+    monkeypatch.chdir(tmp_path)
+    for mode in ('TEST', 'LIVE'):
+        paths = implementation_paths(mode)
+        assert all(p.is_absolute() and p.is_file() for p in paths)
+        assert {'revision.py', 'render.py', 'production.py', 'final_render.py',
+                'telegram_provider.py', 'ep8_promise_v1.json'} <= {p.name for p in paths}
+        assert ('revision_live.py' in {p.name for p in paths}) == (mode == 'LIVE')
+
+
+@MEDIA
+@pytest.mark.parametrize('kind', ['thumbnail', 'video'])
+@pytest.mark.parametrize('durable', [False, True])
+def test_delivery_recovery_both_gates(tmp_path, monkeypatch, kind, durable):
+    # Frozen, QA-completed artifacts from a public run are the only delivery inputs.
+    h = planned(tmp_path)
+    try:
+        asyncio.run(h.run())
+        if kind == 'video':
+            h.approve('thumbnail', h.control['artifacts']['thumbnail']['sha256'], 'human')
+        else:
+            # Restore the state immediately before the first delivery.
+            h.control['stages'].pop('telegram_thumbnail')
+            (tmp_path / 'r001/EP8/qa/telegram-thumbnail.json').unlink()
+            h.control['status'] = 'READY'
+            h.save()
+        deps = Fixtures(tmp_path / 'r001/providers')
+        calls = []
+        method = deps.send_photo if kind == 'thumbnail' else deps.send_video
+        async def send(*args):
+            calls.append(args)
+            result = await method(*args)
+            if not durable:
+                raise RuntimeError('lost response')
+            return result
+        setattr(deps, 'send_photo' if kind == 'thumbnail' else 'send_video', send)
+        h.dependencies = deps
+        original_save = h.save
+        def save():
+            stage = h.control['stages'].get('telegram_' + kind, {})
+            if durable and stage.get('status') == 'COMPLETE':
+                raise RuntimeError('crash before control commit')
+            original_save()
+        monkeypatch.setattr(h, 'save', save)
+        with pytest.raises(RuntimeError):
+            asyncio.run(h.run())
+        monkeypatch.setattr(h, 'save', original_save)
+        if durable:
+            assert asyncio.run(h.run())['status'] == 'WAITING_' + kind.upper() + '_APPROVAL'
+        else:
+            with pytest.raises(ValueError, match='ambiguous telegram_'):
+                asyncio.run(h.run())
+        assert len(calls) == 1
+        assert sha256(calls[0][1]) == h.control['artifacts'][kind]['sha256']
+    finally:
+        h.__exit__()
+
+
+def test_exact_safe_curiosity_contract_and_near_duplicate_thumbnail(tmp_path):
+    from src.agents.thumbnail import ThumbnailAgent, ThumbnailContract, ThumbnailContractError
+    from src.hybrid.revision import HEADLINE, TITLE, SUBTITLE
+    contract = ThumbnailContract(HEADLINE, TITLE, SUBTITLE)
+    assert contract.layers == ("UMA PROMESSA IMPOSSÍVEL?", "A promessa de um filho para Abraão e Sara", "— Gênesis 15–18")
+    with pytest.raises(ThumbnailContractError):
+        ThumbnailContract("SEGREDO PROIBIDO!", TITLE, SUBTITLE)
+    image = tmp_path / 'scene.png'
+    Fixtures(tmp_path / 'fixtures')._draw(image, 'thumbnail-source')
+    result = asyncio.run(ThumbnailAgent().run('EP8', images=[dict(scene_id='S1', image_path=str(image))],
+        thumbnails_dir=str(tmp_path / 'thumbnail'), copy_contract=contract))
+    assert result.success
+    old = Path(result.data['thumbnail_path'])
+    predecessors = tmp_path / 'predecessors.json'
+    atomic_json(predecessors, [identity(old)])
+    variant = tmp_path / 'resized-thumbnail.jpg'
+    with Image.open(old) as im:
+        im.resize((640, 360)).save(variant, quality=90)
+    with RevisionHarness(tmp_path / 'new') as h:
+        h.create_plan(mode='TEST', request='New EP8', predecessors=predecessors)
+        with pytest.raises(ValueError, match='perceptual reuse'):
+            h.fresh(variant)
+
+
+def test_legacy_plan_without_implementation_bindings_cannot_be_approved(tmp_path):
+    from src.hybrid.artifacts import digest
+    from src.hybrid.revision import implementation_paths
+    with RevisionHarness(tmp_path) as h:
+        h.create_plan(mode='TEST', request='Fresh EP8')
+        data = read(h.path)
+        data['plan']['bindings'].pop(str(implementation_paths('TEST')[0].resolve()))
+        data['plan_hash'] = digest(data['plan'])
+        atomic_json(h.path, data)
+        with pytest.raises(ValueError, match='implementation bindings missing'):
+            h.approve_plan(data['plan_hash'], 'human')

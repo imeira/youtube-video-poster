@@ -26,7 +26,7 @@ from src.hybrid.compiled import CompiledEpisode
 from src.hybrid.ep8_offline import Ep8OfflineAdapter, verify_source
 from src.hybrid.locks import try_lock
 from src.hybrid.offline import OfflineCoordinator
-from src.hybrid.render import command, probe
+from src.hybrid.render import command, probe, measure_loudness
 
 TITLE = "A promessa de um filho para Abraão e Sara"
 THEME = TITLE + " — Gênesis 15–18"
@@ -401,7 +401,7 @@ def render_once(episode, manifest, output, hold):
     # closing duration cannot be converted using an inferred, incorrect rate.
     filters.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=0,fps=30,tpad=stop_mode=clone:stop_duration={hold}[v]")
     args += ["-i", str(episode.audio.path)]
-    filters.append(f"[{len(labels)}:a]apad=pad_dur={hold}[a]")
+    filters.append(f"[{len(labels)}:a]loudnorm=I=-16:TP=-2:LRA=11,apad=pad_dur={hold}[a]")
     graph = ";".join(filters)
     args += ["-filter_complex", graph, "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-threads", "1",
              "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-t", str(duration + hold), "-movflags", "+faststart", str(output)]
@@ -415,7 +415,7 @@ def render_once(episode, manifest, output, hold):
         raise ValueError("technical output QA failed")
     return dict(render_invocations=1, max_concurrent_encodes=1, elapsed_seconds=time.perf_counter() - started,
                 api_cost=0, filtergraph=graph, hold_seconds=hold, audio_operation="derived AAC; source unchanged",
-                technical_qa=info, output_sha256=sha256(output))
+                technical_qa=info, output_sha256=sha256(output), loudness=measure_loudness(output))
 
 
 def main(argv=None):
