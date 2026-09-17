@@ -73,6 +73,7 @@ async def test_thumbnail_failure_marks_episode_failed_and_stops_finishing(tmp_pa
             {
                 "audience": {"min_age": 6, "max_age": 10},
                 "closing_duration_s": 4,
+                "narration": "Narração de teste.",
                 "segments": [
                     {
                         "id": "S001",

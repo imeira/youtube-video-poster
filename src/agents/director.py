@@ -222,6 +222,10 @@ class DirectorAgent:
 
         # Set up episode filesystem (§15)
         fs = EpisodeFS(episode_id, self.config)
+        if fs.exists():
+            raise FileExistsError(
+                f"episode already exists: {episode_id}; use the explicit resume workflow so request.json is never overwritten"
+            )
         fs.create_dirs()
         fs.save_request(theme, language, channel)
 
@@ -393,6 +397,8 @@ class DirectorAgent:
                     "state": state.current_state.value,
                     "alternatives": budget_check.get("alternatives", []),
                 }
+            from src.approval.receipts import require_plan_approval
+            require_plan_approval(fs.paths.plan_json)
             return await self._run_production(episode_id, fs, state)
         elif approval_type == "budget":
             # Budget override approved — continue cloud generation

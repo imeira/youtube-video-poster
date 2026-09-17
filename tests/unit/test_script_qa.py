@@ -6,7 +6,13 @@ from src.agents.script_qa import ScriptQAAgent
 
 
 def packet(*segments):
-    return {"audience": {"min_age": 6, "max_age": 10}, "segments": list(segments), "closing_duration_s": 4}
+    segment_list = list(segments)
+    return {
+        "audience": {"min_age": 6, "max_age": 10},
+        "segments": segment_list,
+        "narration": "\n\n".join(segment["narration"] for segment in segment_list),
+        "closing_duration_s": 4,
+    }
 
 
 def test_script_qa_accepts_sourced_paraphrase_and_family_reflection():

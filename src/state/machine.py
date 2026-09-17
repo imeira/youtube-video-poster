@@ -230,7 +230,10 @@ class EpisodeStateStore:
             "current_state": self.current_state.value,
             "previous_state": self.previous_state.value if self.previous_state else None,
             "state_history": self.state_history,
-            "checkpoint": asdict(Checkpoint(**self.checkpoint)) if isinstance(self.checkpoint, dict) else asdict(self.checkpoint),
+            # Checkpoints are an extensible, persisted contract.  Preserve
+            # unknown revision namespaces verbatim instead of coercing them
+            # through the legacy three-field dataclass.
+            "checkpoint": dict(self.checkpoint) if isinstance(self.checkpoint, dict) else asdict(self.checkpoint),
             "paused_from": self._paused_from.value if self._paused_from else None,
             "updated_at": self.updated_at,
         }

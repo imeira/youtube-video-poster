@@ -13,6 +13,7 @@ import json
 import pytest
 
 from src.agents.director import DirectorAgent
+from src.approval.receipts import record_plan_approval
 
 CREATION_THEME = "História da criação do mundo — Gênesis 1–2"
 DAVID_THEME = "História de Davi e Golias — 1 Samuel 17"
@@ -94,7 +95,7 @@ class TestDirectorProduction:
             theme=CREATION_THEME,
             episode_id="PILOT004",
         )
-        # Simulate plan approval
+        record_plan_approval(episodes_dir / "PILOT004" / "plan.json", "test-human")
         result = await director.continue_after_approval(
             episode_id="PILOT004",
             approval_type="plan",
@@ -114,6 +115,7 @@ class TestDirectorProduction:
             theme=CREATION_THEME,
             episode_id="PILOT005",
         )
+        record_plan_approval(episodes_dir / "PILOT005" / "plan.json", "test-human")
         await director.continue_after_approval("PILOT005", "plan")
 
         ep_root = episodes_dir / "PILOT005"
@@ -130,6 +132,7 @@ class TestDirectorProduction:
             theme=CREATION_THEME,
             episode_id="PILOT006",
         )
+        record_plan_approval(episodes_dir / "PILOT006" / "plan.json", "test-human")
         await director.continue_after_approval("PILOT006", "plan")
 
         scenes = json.loads(

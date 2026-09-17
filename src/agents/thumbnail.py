@@ -30,7 +30,10 @@ class ThumbnailContract:
     book_subtitle: str
     required_book_subtitle: str | None = None
 
-    _BANNED_TERMS = ("SEGREDO", "PROIBIDO", "CHOCANTE", "CHOQUE", "SÓ HOJE")
+    _BANNED_TERMS = (
+        "SEGREDO", "PROIBIDO", "CHOCANTE", "CHOQUE", "SÓ HOJE", "URGENTE",
+        "ANTES QUE SEJA TARDE", "VOCÊ NÃO VAI ACREDITAR", "VOCE NAO VAI ACREDITAR",
+    )
 
     def __post_init__(self) -> None:
         layers = self.layers

@@ -3,9 +3,40 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+
+def record_plan_approval(plan_path: Path | str, approver: str) -> Path:
+    """Persist an explicit local human decision for these exact plan bytes."""
+    from src.hybrid.artifacts import atomic_json
+
+    path = Path(plan_path).resolve()
+    if not approver.strip():
+        raise ValueError("Human approver required")
+    checksum = _sha256(path)
+    target = path.parent / "approvals" / f"plan-{checksum}.json"
+    if target.exists():
+        require_plan_approval(path)
+        return target
+    atomic_json(target, {"kind": "plan", "path": str(path), "sha256": checksum,
+                         "approver": approver, "approved_at": datetime.now(UTC).isoformat()})
+    return target
+
+
+def require_plan_approval(plan_path: Path | str) -> None:
+    path = Path(plan_path).resolve()
+    checksum = _sha256(path)
+    target = path.parent / "approvals" / f"plan-{checksum}.json"
+    if not target.is_file():
+        raise ValueError("Persisted hash-bound human plan approval required")
+    receipt = json.loads(target.read_text(encoding="utf-8"))
+    if (receipt.get("kind") != "plan" or receipt.get("path") != str(path)
+            or receipt.get("sha256") != checksum or not receipt.get("approver", "").strip()
+            or not receipt.get("approved_at")):
+        raise ValueError("Invalid persisted plan approval receipt")
 
 
 class PublicationAuthorizationError(ValueError):

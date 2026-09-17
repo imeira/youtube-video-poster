@@ -1,5 +1,40 @@
 # Hybrid AI Animation Studio
 
+## Offline EP8 finishing
+
+`studio offline` (or `python -m src.hybrid.offline`) consumes an existing
+`CompiledEpisode` JSON, an approved `Manifest` JSON in compiled frame order,
+and a `ThumbnailContract` JSON. All inputs must already have been reviewed.
+It uses local FFmpeg and Pillow only, copies approved audio without transcoding,
+does not burn captions, and has no publication or provider operation.
+The current offline route requires contiguous still-image windows; hero jobs
+must be resolved outside this route. EP8's exact title and subtitle are enforced.
+
+```text
+studio offline approve-plan --workspace delivery --compiled compiled.json --manifest manifest.json --copy copy.json --reviewer HUMAN
+studio offline prepare --workspace delivery --compiled compiled.json --manifest manifest.json --copy copy.json --approve-plan RECEIPT_ID
+studio offline status --workspace delivery
+studio offline approve --workspace delivery --kind thumbnail --revision REVISION --sha256 THUMBNAIL_HASH --reviewer HUMAN
+studio offline approve --workspace delivery --kind video --revision REVISION --sha256 VIDEO_HASH --reviewer HUMAN
+```
+
+`approve-plan` records an explicit human decision; `prepare --approve-plan`
+only references that persisted receipt and cannot create one. Its binding
+includes the compilation, manifest, exact thumbnail copy and closing hold
+(`--hold`, default 4 seconds). The legacy resume path also requires a persisted
+plan receipt, created through `src.approval.receipts.record_plan_approval` after
+human review; its boolean CLI flag alone grants nothing.
+
+Use `reject` with the same kind/revision/hash arguments and `--feedback TEXT`
+to retire both active outputs atomically. Historical receipts remain immutable
+in `delivery.sqlite3`. Correct the inputs or local rendering options, obtain a
+new plan receipt, and prepare again: both successor outputs must have different
+hashes and paths and pass both gates again. Unchanged regeneration is refused.
+Restarting with the same active inputs reuses the verified output pair. Failed
+renders can leave unreferenced revision files but never advance a gate.
+`READY_FOR_PUBLICATION` records human acceptance only; this coordinator cannot
+publish. Keep the SQLite ledger with its revision directory for resumption.
+
 Fábrica local-first para episódios bíblicos infantis em pt-BR, destinada a crianças de 6–10 anos.
 
 ## Princípios operacionais

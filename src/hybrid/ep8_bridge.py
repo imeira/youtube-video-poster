@@ -71,16 +71,18 @@ class Ep8ApprovedBridge:
     def validate(self) -> tuple[Ep8Import, ...]:
         state = self._read(self.state_path)
         checkpoint = state["checkpoint"]["revision_v2"]
-        if checkpoint["required_frame_count"] != 39 or checkpoint["approved_frame_count"] != 30:
-            raise ValueError("EP8 must declare exactly 30 of 39 approved frames")
+        required_count = int(checkpoint["required_frame_count"])
+        approved_count = int(checkpoint["approved_frame_count"])
+        if required_count != 39 or approved_count < 1 or approved_count > required_count:
+            raise ValueError("EP8 frame counts are invalid")
         storyboard_path = self.root / checkpoint["storyboard_path"]
         if sha256(storyboard_path) != checkpoint["storyboard_sha256"]:
             raise ValueError("storyboard binding mismatch")
         storyboard = self._read(storyboard_path)
         frames = {item["frame_id"]: item for item in storyboard["frames"]}
         bindings = checkpoint["manifest_bindings"]
-        if len(bindings) != 30:
-            raise ValueError("EP8 requires exactly 30 manifest bindings")
+        if len(bindings) != approved_count:
+            raise ValueError("manifest binding count must equal approved frame count")
         result = []
         for binding in bindings:
             frame_id = binding["frame_id"]
@@ -109,8 +111,9 @@ class Ep8ApprovedBridge:
                 )
             )
         ids = [item.frame_id for item in result]
-        if ids != [f"R{index:03d}" for index in range(1, 31)]:
-            raise ValueError("EP8 imports must be contiguous R001-R030")
+        expected_ids = [f"R{index:03d}" for index in range(1, approved_count + 1)]
+        if ids != expected_ids:
+            raise ValueError("EP8 imports must be contiguous from R001 through the approved frame count")
         return tuple(result)
 
     def report(self) -> dict:
@@ -141,7 +144,7 @@ class Ep8ApprovedBridge:
                 "path": checkpoint["storyboard_path"],
                 "sha256": checkpoint["storyboard_sha256"],
             },
-            "expected_approved_frame_count": 30,
+            "expected_approved_frame_count": len(imports),
             "approved_frame_ids": [item.frame_id for item in imports],
             "imports": [
                 {
@@ -154,7 +157,9 @@ class Ep8ApprovedBridge:
                 for item in imports
             ],
             "no_resubmit": no_resubmit,
-            "dispatchable_frame_ids": [f"R{index:03d}" for index in range(32, 40)],
+            "dispatchable_frame_ids": [
+                f"R{index:03d}" for index in range(len(imports) + 1, int(checkpoint["required_frame_count"]) + 1)
+            ],
         }
 
     def materialize(self) -> Path:

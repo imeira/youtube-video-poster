@@ -44,6 +44,9 @@ class TestLocalSD15Provider:
     @pytest.mark.asyncio
     async def test_generate_lcm_image(self):
         """Generate an actual image with the current 8-step LCM quality preset."""
+        import torch
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA is required for the real local SD integration test")
         provider = LocalSD15Provider(mode="lcm")
         result = await provider.generate(
             prompt="a young shepherd boy standing in a field, stylized 3d animation, children's book style",
