@@ -16,7 +16,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
 
-from src.budget.guard import BudgetAction, BudgetGuard, CostEstimate, CostLedger
+from src.budget.guard import (
+    BudgetAction,
+    BudgetGuard,
+    CostEstimate,
+    CostLedger,
+    CostRecord,
+)
 from src.config.loader import BudgetConfig
 from src.hybrid.artifacts import Manifest, digest, sha256
 from src.hybrid.locks import file_slot
@@ -135,6 +141,26 @@ class Executor:
                 "SELECT data FROM jobs WHERE id=?", (request_id,)
             ).fetchone()
         return json.loads(row[0]) if row else None
+
+    def sync_cost_ledger(self, ledger_path: Path, *, episode_id: str, budget: BudgetConfig) -> CostLedger:
+        """Project immutable completed receipts into the episode's canonical ledger."""
+        ledger = CostLedger.load(Path(ledger_path), episode_id, budget)
+        if money(ledger.hard_limit) != self.config.limit:
+            raise ValueError("canonical ledger hard limit differs from executor limit")
+        known = {entry.get("job_id") for entry in ledger.jobs if isinstance(entry, dict)}
+        with self._db() as db:
+            rows = [json.loads(row[0]) for row in db.execute("SELECT data FROM jobs")]
+        for row in rows:
+            if row.get("status") != "COMPLETE" or row["request_id"] in known:
+                continue
+            ledger.record_job(CostRecord(
+                job_id=row["request_id"], provider=row["endpoint"], gpu="", model="",
+                hourly_price=0.0, job_duration_seconds=0.0,
+                estimated_cost=float(money(row["charged"])), actual_cost=float(money(row["actual_cost"])),
+                scene_id=row["scene"],
+            ))
+        ledger.save(Path(ledger_path))
+        return ledger
 
     @staticmethod
     def _put(db, data):

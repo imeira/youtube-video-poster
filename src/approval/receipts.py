@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+from src.hybrid.artifacts import atomic_json
 
 
 def record_plan_approval(plan_path: Path | str, approver: str) -> Path:
@@ -70,6 +72,33 @@ class ApprovalReceipt:
         path = Path(self.artifact_path)
         if not path.is_file() or _sha256(path) != self.artifact_sha256:
             raise PublicationAuthorizationError(f"Approved {self.artifact_kind} bytes no longer match receipt")
+
+
+def save_approval_receipt(path: Path | str, receipt: ApprovalReceipt) -> ApprovalReceipt:
+    """Atomically persist one immutable artifact-approval receipt."""
+    receipt.verify()
+    path = Path(path)
+    payload = asdict(receipt)
+    if path.exists():
+        if load_approval_receipt(path) != receipt:
+            raise PublicationAuthorizationError("approval receipt path is immutable")
+        return receipt
+    atomic_json(path, payload)
+    if load_approval_receipt(path) != receipt:
+        raise PublicationAuthorizationError("persisted approval receipt readback mismatch")
+    return receipt
+
+
+def load_approval_receipt(path: Path | str) -> ApprovalReceipt:
+    """Load only the closed schema used for a durable human artifact approval."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    expected = {"artifact_kind", "artifact_path", "artifact_sha256", "approver", "approved_at"}
+    if set(data) != expected:
+        raise PublicationAuthorizationError("approval receipt schema mismatch")
+    try:
+        return ApprovalReceipt(**data)
+    except TypeError as error:
+        raise PublicationAuthorizationError("approval receipt schema mismatch") from error
 
 
 @dataclass(frozen=True)

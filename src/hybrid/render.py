@@ -313,26 +313,31 @@ class LocalRenderer:
             ]
             command(args, cwd=root)
             master = root / ("master" + output.suffix)
-            command(
-                [
-                    "ffmpeg",
-                    "-v",
-                    "error",
-                    "-i",
-                    str(root / "visual.mp4"),
-                    "-i",
-                    str(audio_copy),
-                    "-map",
-                    "0:v:0",
-                    "-map",
-                    "1:a:0",
-                    "-c:v",
-                    "copy",
-                    "-c:a",
-                    "copy",
-                    str(master),
-                ]
-            )
+            audio_operation = "stream_copy"
+            master_args = [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(root / "visual.mp4"),
+                "-i",
+                str(audio_copy),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+            ]
+            if output.suffix.lower() == ".mp4":
+                # Preserve approved narration bytes separately and derive the
+                # delivery-only AAC master required by the MP4 contract.
+                audio_operation = "derived_master"
+                master_args += ["-af", "loudnorm=I=-16:TP=-1.0:LRA=11", "-c:a", "aac"]
+            else:
+                master_args += ["-c:a", "copy"]
+            master_args.append(str(master))
+            command(master_args)
             final_info = probe(master)
             if (
                 abs(float(final_info["format"]["duration"]) - timeline["final_seconds"])
@@ -357,7 +362,7 @@ class LocalRenderer:
             "transition_seconds": 0.25,
             "scene_render_seconds": render_seconds,
             "hold_seconds": hold,
-            "audio_operation": "stream_copy",
+            "audio_operation": audio_operation,
             "hero_sha256": [s.clip.sha256 for s in scenes if s.clip is not None],
             "filter_complex_threads": self.filter_complex_threads,
             "scene_workers": self.scene_workers,

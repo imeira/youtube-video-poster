@@ -26,10 +26,45 @@ def test_operational_pipeline_keeps_imported_assets_out_of_dispatch_and_manifest
     )
     imported = frozen(tmp_path / "imported.png")
     pipeline = OperationalPipeline(
-        episode, Executor(tmp_path / "ledger.sqlite", Config(limit=Decimal("1"))), manifest,
+        episode, Executor(tmp_path / "ledger.sqlite", Config(limit=Decimal(1))), manifest,
         workspace=tmp_path / "compiled", endpoint="test", image_cost=Decimal(".1"),
         imported_assets={"R001": imported}, blocked_scenes={"R001"},
     )
 
     assert set(pipeline.run._baselines) == {"R032"}
     assert pipeline.imported_assets == {"R001": imported}
+
+
+def test_operational_pipeline_blocks_consumed_scene_without_inventing_imported_asset(tmp_path):
+    audio = frozen(tmp_path / "audio.png")
+    source = frozen(tmp_path / "source.png")
+    sheet = tmp_path / "sheet.png"
+    contact_sheet((source,), sheet)
+    manifest = Manifest.freeze((source,), FrozenAsset.approve(sheet, "qa", "TEST"), "qa", "TEST")
+    episode = CompiledEpisode.compile(
+        "EP8",
+        (
+            audio
+        ),
+        (
+            FrameSpec("R030", 0, 1, "imported", "show"),
+            FrameSpec("R031", 1, 2, "consumed", "do not submit"),
+            FrameSpec("R032", 2, 3, "new", "show"),
+        ),
+    )
+    imported = frozen(tmp_path / "imported.png")
+
+    pipeline = OperationalPipeline(
+        episode,
+        Executor(tmp_path / "ledger.sqlite", Config(limit=Decimal(1))),
+        manifest,
+        workspace=tmp_path / "compiled",
+        endpoint="test",
+        image_cost=Decimal(".1"),
+        imported_assets={"R030": imported},
+        blocked_scenes={"R030", "R031"},
+    )
+
+    assert set(pipeline.run._baselines) == {"R032"}
+    assert pipeline.imported_assets == {"R030": imported}
+    assert pipeline.render_ready() is False

@@ -16,7 +16,6 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +146,7 @@ class LocalGPUProvider(GPUComputeProvider):
                 import subprocess
                 result = subprocess.run(
                     ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, text=True, timeout=10, check=False,
                 )
                 if result.returncode == 0:
                     parts = result.stdout.strip().split(",")
@@ -162,7 +161,7 @@ class LocalGPUProvider(GPUComputeProvider):
                     )
                 else:
                     self._gpu_spec = GPUSpec(name="Unknown", vram_gb=0, hourly_price=0.0)
-            except Exception:
+            except Exception:  # noqa: BLE001 -- local hardware probe must fail closed
                 self._gpu_spec = GPUSpec(name="Unknown", vram_gb=0, hourly_price=0.0)
         return self._gpu_spec
 
@@ -281,8 +280,7 @@ class RunPodGPUProvider(GPUComputeProvider):
                 key=lambda g: (g.hourly_price if g.availability else 999.0, -g.vram_gb),
             )
             return self._available_gpus
-        except Exception as e:
-            logger.error(f"Failed to discover RunPod GPUs: {e}")
+        except Exception:  # noqa: BLE001 -- deprecated adapter cannot influence production
             return []
 
     def select_gpu(self, required_vram_gb: float, max_hourly_price: float = 999.0) -> GPUSpec | None:
@@ -388,8 +386,7 @@ class RunPodGPUProvider(GPUComputeProvider):
                 metadata=result,
             )
 
-        except Exception as e:
-            logger.error(f"RunPod job failed: {e}")
+        except Exception as e:  # noqa: BLE001 -- legacy adapter is permanently ineligible
             return GPUJobResult(
                 status=GPUJobStatus.FAILED,
                 error=str(e),
@@ -473,7 +470,9 @@ def get_gpu_provider(provider_name: str = "local", **kwargs) -> GPUComputeProvid
     """
     if provider_name == "local":
         return LocalGPUProvider()
-    elif provider_name == "runpod":
-        return RunPodGPUProvider(**kwargs)
-    else:
-        raise ValueError(f"Unknown GPU provider: {provider_name}")
+    if provider_name == "runpod":
+        raise ValueError(
+            "RunPod legacy provider is ineligible; use the transactional LIVE adapter "
+            "through DirectorAgent.dispatch_compiled_baselines"
+        )
+    raise ValueError(f"Unknown GPU provider: {provider_name}")

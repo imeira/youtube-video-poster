@@ -184,12 +184,27 @@ class ProductionRun:
             predecessor=predecessor,
         )
 
-    async def dispatch_baselines(self, provider: Provider):
+    def baseline_jobs(self) -> tuple[Job, ...]:
+        """Return the exact baseline jobs that need current LIVE authority."""
+        return tuple(self._baselines.values())
+
+    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None):
         if not self._baselines:
             return {}
+        authorizations = authorizations or {}
+        prices = prices or {}
+        if not isinstance(authorizations, dict) or not isinstance(prices, dict):
+            raise TypeError("compiled dispatch authority maps must be dictionaries")
         completed = {}
         pending = [
-            asyncio.create_task(self.executor.run(job, provider))
+            asyncio.create_task(
+                self.executor.run(
+                    job,
+                    provider,
+                    authorization=authorizations.get(job.request_id),
+                    price=prices.get(job.request_id),
+                )
+            )
             for job in self._baselines.values()
         ]
         for task in asyncio.as_completed(pending):
@@ -286,8 +301,9 @@ class OperationalPipeline:
         self.episode = episode
         self.imported_assets = dict(imported_assets or {})
         imported_scenes = frozenset(self.imported_assets)
-        if imported_scenes != frozenset(blocked_scenes):
-            raise ValueError("each blocked compiled scene needs one imported approved asset")
+        blocked_scenes = frozenset(blocked_scenes)
+        if not imported_scenes <= blocked_scenes:
+            raise ValueError("imported compiled scenes must be permanently non-submittable")
         known_scenes = {frame.scene_id for frame in episode.frames}
         if not imported_scenes <= known_scenes:
             raise ValueError("imported asset is absent from compiled episode")
@@ -302,10 +318,20 @@ class OperationalPipeline:
             imported_scenes=imported_scenes,
             blocked_scenes=blocked_scenes,
         )
+        self._approved_heroes: dict[str, FrozenAsset] = {}
         self.episode.save(self.workspace / "compiled_episode.json")
 
-    async def dispatch_baselines(self, provider: Provider):
-        return await self.run.dispatch_baselines(provider)
+    def baseline_jobs(self) -> tuple[Job, ...]:
+        return self.run.baseline_jobs()
+
+    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None):
+        return await self.run.dispatch_baselines(
+            provider, authorizations=authorizations, prices=prices
+        )
+
+    def render_ready(self):
+        """Expose the compiled run readiness at the persisted pipeline boundary."""
+        return self.run.render_ready()
 
     def prepare_qa_packets(self):
         """Write deterministic, exact-hash technical QA packets in one pass.
@@ -369,7 +395,31 @@ class OperationalPipeline:
         }
         qa.update(request_id=job.request_id, category=job.category, predecessor=job.predecessor)
         atomic_json(self.workspace / "qa" / f"{job.request_id}.json", qa)
-        return self._promote_candidate(scene_id, result_sha256, reviewer) if approved else None
+        if not approved:
+            return None
+        asset = self._promote_candidate(scene_id, result_sha256, reviewer)
+        if job.category == "hero":
+            self._approved_heroes[scene_id] = asset
+        return asset
+
+    def render_scenes(self, manifest: Manifest):
+        """Build renderer inputs only from the active image and approved hero receipts."""
+        from src.hybrid.render import Scene
+
+        if not self.render_ready():
+            raise ValueError("compiled QA receipts are incomplete; render scenes blocked")
+        approved = self.approved_manifest()
+        if manifest.checksum != approved.checksum:
+            raise ValueError("render manifest is not the compiled approved manifest")
+        if len(manifest.assets) != len(self.episode.frames):
+            raise ValueError("manifest does not cover every compiled frame")
+        scenes = []
+        for frame, image in zip(self.episode.frames, manifest.assets, strict=True):
+            hero = self._approved_heroes.get(frame.scene_id)
+            if frame.hero and hero is None:
+                raise ValueError("approved hero asset missing from operational pipeline")
+            scenes.append(Scene(image=image, seconds=frame.end - frame.start, clip=hero))
+        return tuple(scenes)
 
     def approved_manifest(self):
         assets = []

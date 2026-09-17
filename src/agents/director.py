@@ -200,6 +200,215 @@ class DirectorAgent:
             blocked_scenes=blocked_scenes,
         )
 
+    def activate_compiled_production(
+        self,
+        episode_id: str,
+        *,
+        approved_audio,
+        source_manifest,
+        database: Path,
+        endpoint: str,
+        image_cost: Decimal,
+        storyboard_path: Path | None = None,
+        imported_assets=None,
+        blocked_scenes=(),
+        prior_spend: Decimal = Decimal(0),
+    ):
+        """Activate the sole compiled writer only at the image-generation hand-off.
+
+        The caller must still provide independently approved, frozen inputs. This
+        method intentionally dispatches no provider request and performs no
+        approval transition, so activation cannot turn a plan or draft into media.
+        """
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state != EpisodeState.GENERATING_IMAGES:
+            raise ValueError("compiled production activates only from GENERATING_IMAGES")
+        return self.create_operational_pipeline(
+            episode_id,
+            approved_audio=approved_audio,
+            source_manifest=source_manifest,
+            database=database,
+            endpoint=endpoint,
+            image_cost=image_cost,
+            storyboard_path=storyboard_path,
+            imported_assets=imported_assets,
+            blocked_scenes=blocked_scenes,
+            prior_spend=prior_spend,
+        )
+
+    def issue_compiled_live_preflight(self, episode_id: str, pipeline, price_resolver, *, reviewer: str):
+        """Issue one short-lived, budget-bound LIVE authority per compiled baseline."""
+        from src.hybrid.preflight import LivePreflightIssuer
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.GENERATING_IMAGES:
+            raise ValueError("LIVE preflight requires GENERATING_IMAGES state")
+        if pipeline.episode.audio.mode != "LIVE":
+            raise ValueError("LIVE preflight requires a LIVE compiled pipeline")
+        return LivePreflightIssuer(
+            fs.paths.costs_json,
+            hard_limit=Decimal(str(self.config.budget.hard_limit_usd)),
+            price_resolver=price_resolver,
+        ).issue(
+            pipeline.baseline_jobs(),
+            reviewer=reviewer,
+            receipt_path=fs.paths.qa_dir / "live_preflight.json",
+        )
+
+    async def dispatch_compiled_baselines(
+        self, episode_id: str, pipeline, provider, *, authorizations=None, prices=None
+    ) -> dict[str, Any]:
+        """Dispatch compiled work once, then stop at independent visual QA."""
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.GENERATING_IMAGES:
+            raise ValueError("compiled baseline dispatch requires GENERATING_IMAGES state")
+        if pipeline.episode.audio.mode == "LIVE":
+            jobs = pipeline.baseline_jobs()
+            request_ids = {job.request_id for job in jobs}
+            if (
+                not isinstance(authorizations, dict)
+                or not isinstance(prices, dict)
+                or set(authorizations) != request_ids
+                or set(prices) != request_ids
+            ):
+                raise ValueError("every compiled LIVE job requires exact authority and fresh price")
+        receipts = await pipeline.dispatch_baselines(
+            provider, authorizations=authorizations, prices=prices
+        )
+        pipeline.run.executor.sync_cost_ledger(
+            fs.paths.costs_json, episode_id=episode_id, budget=self.config.budget
+        )
+        qa_packets = pipeline.prepare_qa_packets()
+        if set(qa_packets) != set(receipts):
+            raise ValueError("every completed compiled baseline requires a QA packet")
+        state.transition_to(
+            EpisodeState.VISUAL_QA,
+            agent="CompiledProduction",
+            note="compiled candidates await independent visual QA",
+        )
+        state.save(fs.paths.state_json)
+        return {"receipts": receipts, "qa_packets": qa_packets, "state": state.current_state.value}
+
+    def record_compiled_visual_qa(self, episode_id: str, pipeline, decisions) -> dict[str, Any]:
+        """Persist independent hash-bound visual verdicts and open animation only on PASS."""
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.VISUAL_QA:
+            raise ValueError("compiled visual QA requires VISUAL_QA state")
+        packets = pipeline.prepare_qa_packets()
+        by_scene = {}
+        for decision in decisions:
+            if not isinstance(decision, dict) or set(decision) != {
+                "scene_id", "result_sha256", "approved", "reviewer"
+            }:
+                raise ValueError("visual QA decision schema is invalid")
+            scene_id = decision["scene_id"]
+            if scene_id in by_scene:
+                raise ValueError("visual QA decision duplicated a scene")
+            if not isinstance(decision["approved"], bool) or not isinstance(decision["reviewer"], str) or not decision["reviewer"].strip():
+                raise ValueError("visual QA decision requires boolean verdict and reviewer")
+            packet = packets.get(scene_id)
+            if packet is None or packet["result_sha256"] != decision["result_sha256"]:
+                raise ValueError("visual QA decision does not bind a current candidate")
+            by_scene[scene_id] = decision
+        if set(by_scene) != set(packets):
+            raise ValueError("independent visual QA must decide every current candidate")
+        approved = {}
+        for scene_id, decision in by_scene.items():
+            asset = pipeline.record_visual_qa(
+                scene_id, decision["result_sha256"], decision["approved"], decision["reviewer"]
+            )
+            approved[scene_id] = str(asset.path) if asset else ""
+        if all(decision["approved"] for decision in by_scene.values()) and pipeline.render_ready():
+            state.transition_to(
+                EpisodeState.PLANNING_ANIMATION,
+                agent="CompiledProduction",
+                note="all compiled visual QA passed",
+            )
+            state.save(fs.paths.state_json)
+        return {"approved": approved, "state": state.current_state.value}
+
+    def render_compiled_video(self, episode_id: str, pipeline, renderer, *, hold: int = 4) -> dict[str, Any]:
+        """Compose a subtitle-free local delivery master from the approved manifest only."""
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        receipt_path = fs.paths.qa_dir / "compiled_render_receipt.json"
+        if state.current_state is EpisodeState.FINAL_QA and fs.paths.final_video.is_file() and receipt_path.is_file():
+            receipt = _read_json_file(receipt_path)
+            if receipt.get("hold_seconds") not in (3, 4, 5):
+                raise ValueError("compiled render recovery receipt is invalid")
+            return receipt
+        if state.current_state is not EpisodeState.PLANNING_ANIMATION:
+            raise ValueError("compiled rendering requires PLANNING_ANIMATION state")
+        if hold not in (3, 4, 5):
+            raise ValueError("compiled render closing hold must be 3 to 5 seconds")
+        manifest = pipeline.approved_manifest()
+        scenes = pipeline.render_scenes(manifest)
+        state.transition_to(EpisodeState.LOCAL_ANIMATION, agent="CompiledProduction", note="local render started")
+        state.save(fs.paths.state_json)
+        state.transition_to(EpisodeState.ASSEMBLING, agent="CompiledProduction", note="assembling compiled master")
+        state.save(fs.paths.state_json)
+        receipt = renderer.render_compiled(
+            pipeline,
+            scenes,
+            manifest,
+            pipeline.episode.audio,
+            None,
+            fs.paths.final_video,
+            hold=hold,
+        )
+        if receipt.get("subtitles_sha256") is not None:
+            raise ValueError("compiled delivery must not burn subtitles")
+        if not fs.paths.final_video.is_file():
+            raise ValueError("compiled renderer did not create final video")
+        _write_json_file(fs.paths.qa_dir / "compiled_render_receipt.json", receipt)
+        state.transition_to(EpisodeState.FINAL_QA, agent="CompiledProduction", note="compiled master ready for final QA")
+        state.save(fs.paths.state_json)
+        return receipt
+
+    async def finalize_compiled_delivery(self, episode_id: str, pipeline, renderer, *, hold: int = 4) -> dict[str, Any]:
+        """Render a compiled master and materialize all evidence required by final QA."""
+        receipt = self.render_compiled_video(episode_id, pipeline, renderer, hold=hold)
+        sidecars = await self.prepare_delivery_sidecars(episode_id, pipeline)
+        return {"render_receipt": receipt, "sidecars": sidecars}
+
+    async def complete_compiled_final_qa(
+        self,
+        episode_id: str,
+        pipeline,
+        renderer,
+        *,
+        published_script_hashes: set[str] | frozenset[str],
+        checker=None,
+        hold: int = 4,
+    ) -> dict[str, Any]:
+        """Run the compiled render, evidence and independent final-media gates in order."""
+        delivery = await self.finalize_compiled_delivery(episode_id, pipeline, renderer, hold=hold)
+        evidence = self.record_production_evidence_qa(
+            episode_id, published_script_hashes=published_script_hashes
+        )
+        if evidence.get("approved") is not True:
+            return {"delivery": delivery, "production_evidence_qa": evidence, "post_production_narrative_qa": None, "final_render_qa": None}
+        narrative = self.record_post_production_narrative_qa(episode_id)
+        if narrative.get("approved") is not True:
+            return {"delivery": delivery, "production_evidence_qa": evidence, "post_production_narrative_qa": narrative, "final_render_qa": None}
+        fs = EpisodeFS(episode_id, self.config)
+        final_qa = await self.record_final_render_qa(
+            episode_id,
+            video_path=fs.paths.final_video,
+            render_receipt=delivery["render_receipt"],
+            checker=checker,
+        )
+        return {
+            "delivery": delivery,
+            "production_evidence_qa": evidence,
+            "post_production_narrative_qa": narrative,
+            "final_render_qa": final_qa,
+        }
+
     async def start_episode(
         self,
         theme: str,
@@ -415,6 +624,288 @@ class DirectorAgent:
 
         return {"error": f"Unknown approval type: {approval_type}"}
 
+    async def publish_after_explicit_instruction(
+        self,
+        episode_id: str,
+        *,
+        command: str,
+        expected_command: str,
+        publisher,
+        video_receipt_path: Path,
+        thumbnail_receipt_path: Path,
+        metadata_path: Path,
+        captions_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """Publish only through durable separate authorization and remote readback."""
+        from src.approval.receipts import load_approval_receipt
+        from src.publishing.controller import PublicationController
+
+        fs = EpisodeFS(episode_id, self.config)
+        return await PublicationController(publisher).publish(
+            state_path=fs.paths.state_json,
+            expected_command=expected_command,
+            command=command,
+            video=load_approval_receipt(video_receipt_path),
+            thumbnail=load_approval_receipt(thumbnail_receipt_path),
+            metadata_path=metadata_path,
+            publication_receipt_path=fs.paths.qa_dir / "publication_receipt.json",
+            captions_path=captions_path,
+        )
+
+    def record_production_evidence_qa(
+        self, episode_id: str, *, published_script_hashes: set[str] | frozenset[str] = frozenset()
+    ) -> dict[str, Any]:
+        """Persist independent originality, caption, source and manifest evidence before final QA."""
+        from src.qa.production_evidence import ProductionEvidenceQA
+        from src.qa.published_inventory import PublishedInventory
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.FINAL_QA:
+            raise ValueError("production evidence QA requires FINAL_QA state")
+        inventory = PublishedInventory.scan(self.config.episodes_dir, exclude_episode_id=episode_id)
+        result = ProductionEvidenceQA().review(
+            script_path=fs.paths.script_dir / "script.json",
+            manifest_path=fs.paths.compiled_dir / "manifest.json",
+            captions_path=fs.paths.captions_vtt,
+            metadata_path=fs.paths.metadata_dir / "metadata.json",
+            published_script_hashes=set(published_script_hashes) | inventory.script_hashes,
+            published_artifact_hashes=inventory.artifact_hashes,
+        )
+        report = {"approved": result.approved, "findings": list(result.findings), "report": result.report}
+        _write_json_file(fs.paths.qa_dir / "production_evidence_qa.json", report)
+        return report
+
+    def record_post_production_narrative_qa(self, episode_id: str) -> dict[str, Any]:
+        """Persist the independent biblical narrative and child-safety verdict."""
+        from src.qa.post_production import PostProductionNarrativeQA
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.FINAL_QA:
+            raise ValueError("post-production narrative QA requires FINAL_QA state")
+        result = PostProductionNarrativeQA().review(
+            script_path=fs.paths.script_dir / "script.json",
+            captions_path=fs.paths.captions_vtt,
+            metadata_path=fs.paths.metadata_dir / "metadata.json",
+        )
+        report = {"approved": result.approved, "findings": list(result.findings), "report": result.report}
+        _write_json_file(fs.paths.qa_dir / "post_production_narrative_qa.json", report)
+        return report
+
+    async def prepare_delivery_sidecars(self, episode_id: str, pipeline) -> dict[str, Any]:
+        """Create required sidecar captions, thumbnail and metadata from frozen compiled media."""
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.FINAL_QA:
+            raise ValueError("delivery sidecars require FINAL_QA state")
+        request = _read_json_file(fs.paths.request_json)
+        research = _read_json_file(fs.paths.research_dir / "sources.json")
+        script = _read_json_file(fs.paths.script_dir / "script.json")
+        storyboard = _read_json_file(fs.paths.storyboard_dir / "scenes.json")
+        scenes = storyboard.get("scenes")
+        narration = script.get("narration")
+        if not isinstance(scenes, list) or not scenes or not isinstance(narration, str) or not narration.strip():
+            raise ValueError("compiled sidecars require persisted narration and storyboard")
+        manifest = pipeline.approved_manifest()
+        frames = tuple(pipeline.episode.frames)
+        if len(frames) != len(manifest.assets) or [scene.get("scene_id") for scene in scenes] != [
+            frame.scene_id for frame in frames
+        ]:
+            raise ValueError("sidecars require the active compiled scene order")
+        images = []
+        for frame, asset in zip(frames, manifest.assets, strict=True):
+            if not asset.path.is_file():
+                raise ValueError("compiled thumbnail asset is missing")
+            images.append({"scene_id": frame.scene_id, "image_path": str(asset.path)})
+        timestamps = [
+            {"start": scene.get("start"), "end": scene.get("end"), "text": scene.get("narration", "")}
+            for scene in scenes
+        ]
+        if any(
+            not isinstance(item["start"], (int, float))
+            or not isinstance(item["end"], (int, float))
+            or item["end"] <= item["start"]
+            or not isinstance(item["text"], str)
+            or not item["text"].strip()
+            for item in timestamps
+        ):
+            raise ValueError("captions require real semantic storyboard timestamps")
+        captions = await self.captions.run(
+            episode_id=episode_id,
+            sentence_timestamps=timestamps,
+            narration=narration,
+            subtitles_dir=str(fs.paths.subtitles_dir),
+        )
+        if not captions.success or not fs.paths.captions_vtt.is_file():
+            raise RuntimeError("caption sidecar generation failed")
+        headline, subtitle, book_subtitle = self.thumbnail_copy(str(request.get("theme", "")))
+        thumbnail = await self.thumbnail.run(
+            episode_id=episode_id,
+            images=images,
+            scenes=scenes,
+            headline=headline,
+            subtitle=subtitle,
+            book_subtitle=book_subtitle,
+            thumbnails_dir=str(fs.paths.thumbnails_dir),
+        )
+        thumbnail_path = Path(thumbnail.data.get("thumbnail_path", "")) if thumbnail.success else None
+        if thumbnail_path is None or not thumbnail_path.is_file():
+            raise RuntimeError("thumbnail generation failed")
+        metadata = await self.metadata.run(
+            episode_id=episode_id,
+            theme=str(request.get("theme", "")),
+            research_data=research,
+            scenes=scenes,
+            language=str(request.get("language", "pt-BR")),
+            metadata_dir=str(fs.paths.metadata_dir),
+            captions_files=captions.data.get("files", {}),
+            thumbnail_path=str(thumbnail_path),
+        )
+        if not metadata.success or not (fs.paths.metadata_dir / "metadata.json").is_file():
+            raise RuntimeError("metadata generation failed")
+        return {
+            "captions": captions.data["files"],
+            "thumbnail": str(thumbnail_path),
+            "metadata": metadata.data.get("metadata_path", ""),
+        }
+
+    async def deliver_for_approval(
+        self,
+        episode_id: str,
+        *,
+        messenger,
+        chat_id: str,
+        thumbnail_path: Path,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Deliver final thumbnail and video once, as separate hash-bound review media."""
+        from src.approval.receipts import ApprovalReceipt
+        from src.delivery.controller import DeliveryController
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.WAITING_THUMBNAIL_APPROVAL:
+            raise ValueError("approval delivery requires WAITING_THUMBNAIL_APPROVAL state")
+        thumbnail = ApprovalReceipt.approve("thumbnail", thumbnail_path, "delivery-preflight")
+        video = ApprovalReceipt.approve("video", fs.paths.final_video, "delivery-preflight")
+        return await DeliveryController(messenger).deliver_for_approval(
+            chat_id=chat_id,
+            episode_id=episode_id,
+            thumbnail=thumbnail,
+            video=video,
+            receipt_dir=fs.paths.qa_dir / "delivery",
+        )
+
+    async def record_final_render_qa(
+        self,
+        episode_id: str,
+        *,
+        video_path: Path,
+        render_receipt: dict[str, Any],
+        checker=None,
+    ) -> dict[str, Any]:
+        """Persist independent final-media QA before opening the video approval gate."""
+        from src.qa.final_render import FinalRenderQA
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state != EpisodeState.FINAL_QA:
+            raise ValueError("final render QA requires FINAL_QA state")
+        evidence_path = fs.paths.qa_dir / "production_evidence_qa.json"
+        try:
+            evidence = _read_json_file(evidence_path)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("passing production evidence QA is required before final render QA") from error
+        if evidence.get("approved") is not True:
+            raise ValueError("passing production evidence QA is required before final render QA")
+        narrative_path = fs.paths.qa_dir / "post_production_narrative_qa.json"
+        try:
+            narrative = _read_json_file(narrative_path)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("passing post-production narrative QA is required before final render QA") from error
+        if narrative.get("approved") is not True:
+            raise ValueError("passing post-production narrative QA is required before final render QA")
+        result = (checker or FinalRenderQA()).review(video_path, render_receipt)
+        report = {
+            "approved": result.approved,
+            "findings": list(result.findings),
+            "report": result.report,
+        }
+        await asyncio.to_thread(_write_json_file, fs.paths.qa_dir / "final_render_qa.json", report)
+        if result.approved:
+            state.transition_to(
+                EpisodeState.WAITING_THUMBNAIL_APPROVAL,
+                agent="FinalRenderQA",
+                note="independent final media QA passed; thumbnail delivery approval required",
+            )
+            state.save(fs.paths.state_json)
+        return report
+
+    def confirm_delivered_artifact(
+        self,
+        episode_id: str,
+        *,
+        artifact_kind: str,
+        command: str,
+        expected_command: str,
+        approver: str,
+        artifact_path: Path,
+        delivery_receipt_path: Path,
+    ):
+        """Persist an explicit artifact approval bound to its delivered media bytes."""
+        from src.approval.controller import ApprovalController
+
+        fs = EpisodeFS(episode_id, self.config)
+        expected_state = {
+            "thumbnail": EpisodeState.WAITING_THUMBNAIL_APPROVAL,
+            "video": EpisodeState.WAITING_VIDEO_APPROVAL,
+        }.get(artifact_kind)
+        next_state = {
+            "thumbnail": EpisodeState.WAITING_VIDEO_APPROVAL,
+            "video": EpisodeState.WAITING_FINAL_APPROVAL,
+        }.get(artifact_kind)
+        if expected_state is None or next_state is None:
+            raise ValueError("artifact_kind must be thumbnail or video")
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not expected_state:
+            raise ValueError(f"{artifact_kind} approval requires {expected_state.value} state")
+        receipt = ApprovalController().confirm_delivery(
+            episode_id=episode_id,
+            artifact_kind=artifact_kind,
+            command=command,
+            expected_command=expected_command,
+            approver=approver,
+            artifact_path=artifact_path,
+            delivery_receipt_path=delivery_receipt_path,
+            approval_receipt_path=fs.paths.qa_dir / f"approval-{artifact_kind}.json",
+        )
+        state.transition_to(next_state, agent="ApprovalController", note=f"{artifact_kind} delivery approved")
+        state.save(fs.paths.state_json)
+        return receipt
+
+    def reject_delivered_artifact(self, episode_id: str, *, artifact_id: str, reason: str) -> dict[str, Any]:
+        """Supersede rejected approval media and every dependent artifact before rebuilding."""
+        from src.pipeline.revision import RevisionRegistry
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state not in {
+            EpisodeState.WAITING_THUMBNAIL_APPROVAL,
+            EpisodeState.WAITING_VIDEO_APPROVAL,
+            EpisodeState.WAITING_FINAL_APPROVAL,
+        }:
+            raise ValueError("delivery rejection requires an active approval gate")
+        registry = RevisionRegistry(fs.paths.qa_dir)
+        registry.reject(artifact_id, reason=reason)
+        receipt = registry.read(artifact_id)
+        state.transition_to(
+            EpisodeState.ASSEMBLING,
+            agent="RevisionRegistry",
+            note=f"rejected {artifact_id}; dependent delivery lineage superseded",
+        )
+        state.save(fs.paths.state_json)
+        return receipt
+
     def _build_visual_strategy_engine(self, local_provider, cloud_provider):
         """Build the visual router from the central episode limits."""
         from src.providers.gpu.gpu_compute_provider import GenerativeVideoConfig
@@ -422,8 +913,8 @@ class DirectorAgent:
 
         configured = self.config.generative_video
         engine_config = GenerativeVideoConfig(
-            enabled=configured.enabled and cloud_provider.available(),
-            provider=configured.provider,
+            enabled=False,
+            provider="transactional_live_only",
             max_clips_per_episode=configured.max_clips_per_episode,
             max_seconds_per_episode=configured.max_seconds_per_episode,
             preferred_clip_duration_seconds=configured.preferred_clip_duration_seconds,
@@ -506,6 +997,7 @@ class DirectorAgent:
             episode_id=episode_id,
             narration=narration,
             sentence_timestamps=audio_result.data["sentence_timestamps"],
+            audio_duration_s=float(audio_result.data["duration_s"]),
             storyboard_dir=str(fs.paths.storyboard_dir),
         )
 
@@ -551,13 +1043,11 @@ class DirectorAgent:
         # Step 11: Visual Strategy — decide local vs generative video (§63-67)
         from src.providers.gpu.gpu_compute_provider import (
             LocalGPUProvider,
-            RunPodGPUProvider,
             SceneImportance,
         )
 
         local_gpu = LocalGPUProvider()
-        cloud_gpu = RunPodGPUProvider()
-        strategy_engine = self._build_visual_strategy_engine(local_gpu, cloud_gpu)
+        strategy_engine = self._build_visual_strategy_engine(local_gpu, None)
 
         # Classify each scene and mark strategy
         for scene in scenes:
@@ -704,17 +1194,9 @@ class DirectorAgent:
         return await self.start_episode(theme=theme, episode_id=episode_id)
 
     def cleanup_orphans(self) -> list[str]:
-        """§56: Clean up orphaned RunPod pods on startup."""
-        try:
-            from src.providers.gpu.runpod_provider import RunPodGPUProvider
-            provider = RunPodGPUProvider()
-            orphans = provider.cleanup_orphans()
-            if orphans:
-                logger.warning(f"Cleaned up {len(orphans)} orphaned pods: {orphans}")
-            return orphans
-        except Exception as e:  # noqa: BLE001 — cleanup must never crash the director
-            logger.error(f"Orphan cleanup failed: {e}")
-            return []
+        """Legacy pod cleanup is disabled; LIVE recovery owns remote operations."""
+        logger.info("Legacy RunPod cleanup disabled; use transactional request recovery")
+        return []
 
     @property
     def name(self) -> str:

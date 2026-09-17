@@ -12,13 +12,19 @@ Model routing: uses cheap LLM (title/tags are simple tasks) with template fallba
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
 
-from src.agents.base import BaseAgent, AgentResult
+from src.agents.base import AgentResult, BaseAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _write_metadata(path: Path, metadata: dict) -> None:
+    path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+
 
 # §93: Initial playlists
 PLAYLISTS = [
@@ -79,6 +85,10 @@ class MetadataAgent(BaseAgent):
             "thumbnail": thumbnail_path,
             "captions": captions_files or {},
             "references": research_data.get("references", []),
+            "licenses": {
+                "visual_assets": "generated_or_canonical",
+                "music": "none",
+            },
         }
 
         md_dir = Path(metadata_dir) if metadata_dir else None
@@ -86,8 +96,7 @@ class MetadataAgent(BaseAgent):
         if md_dir:
             md_dir.mkdir(parents=True, exist_ok=True)
             out_path = str(md_dir / "metadata.json")
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            await asyncio.to_thread(_write_metadata, Path(out_path), metadata)
 
         return AgentResult(
             success=True,
@@ -114,8 +123,8 @@ class MetadataAgent(BaseAgent):
                 title = title.strip().strip('"').split("\n")[0]
                 if 5 <= len(title) <= 80:
                     return title
-            except Exception as e:
-                logger.warning(f"LLM title generation failed, using template: {e}")
+            except (OSError, RuntimeError, ValueError) as error:
+                logger.warning("LLM title generation failed; using template: %s", error)
 
         # Template fallback
         story = research.get("story", theme).strip()
@@ -142,8 +151,8 @@ class MetadataAgent(BaseAgent):
                     f"Responda apenas com o parágrafo."
                 )
                 llm_intro = (await self._llm.complete(prompt=prompt, max_tokens=200, temperature=0.7)).strip()
-            except Exception as e:
-                logger.warning(f"LLM description failed, using template: {e}")
+            except (OSError, RuntimeError, ValueError) as error:
+                logger.warning("LLM description failed; using template: %s", error)
 
         intro = llm_intro or (
             f"Venha descobrir a emocionante história de {research.get('story', theme)}! "
@@ -157,8 +166,7 @@ class MetadataAgent(BaseAgent):
             "📚 Referências bíblicas:",
             *ref_lines,
             "",
-            "🔔 Inscreva-se no canal para mais histórias da Bíblia animadas!",
-            "👍 Deixe seu like e compartilhe com a família.",
+            "Converse sobre esta história com sua família e escolha juntos uma próxima aventura da Bíblia.",
             "",
             "#HistóriasBíblicas #BíbliaParaCrianças #DesenhoBíblico",
         ]

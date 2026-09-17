@@ -10,7 +10,9 @@ import pytest
 from src.approval.receipts import (
     ApprovalReceipt,
     PublicationAuthorizationError,
+    load_approval_receipt,
     require_publication_authorization,
+    save_approval_receipt,
 )
 
 
@@ -49,3 +51,20 @@ def test_publication_rejects_changed_or_missing_approval(tmp_path: Path):
             thumbnail=thumbnail_receipt,
             metadata_sha256="a" * 64,
         )
+
+
+def test_persisted_approval_receipt_round_trips_and_rechecks_artifact_bytes(tmp_path: Path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    receipt_path = tmp_path / "approval" / "video.json"
+
+    saved = save_approval_receipt(
+        receipt_path, ApprovalReceipt.approve("video", video, "operador")
+    )
+    loaded = load_approval_receipt(receipt_path)
+
+    assert loaded == saved
+    loaded.verify()
+    video.write_bytes(b"changed")
+    with pytest.raises(PublicationAuthorizationError, match="no longer match"):
+        loaded.verify()
