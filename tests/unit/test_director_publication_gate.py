@@ -137,7 +137,10 @@ def test_director_records_independent_production_evidence_qa(tmp_path, monkeypat
     )
     fs.paths.captions_vtt.write_text("WEBVTT\n\n", encoding="utf-8")
     (fs.paths.metadata_dir / "metadata.json").write_text(
-        json.dumps({"references": [{"book": "Gênesis"}]}), encoding="utf-8"
+        json.dumps({
+            "references": [{"book": "Gênesis"}],
+            "licenses": {"visual_assets": "generated_or_canonical", "music": "none"},
+        }), encoding="utf-8"
     )
 
     report = director.record_production_evidence_qa("EP8", published_script_hashes=set())

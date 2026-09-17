@@ -26,7 +26,10 @@ def test_production_evidence_qa_accepts_bound_original_episode_artifacts(tmp_pat
     )
     manifest = _write(tmp_path / "manifest.json", json.dumps({"assets": [{"sha256": "a" * 64}]}))
     captions = _write(tmp_path / "captions.vtt", "WEBVTT\n\n")
-    metadata = _write(tmp_path / "metadata.json", json.dumps({"references": [{"book": "Gênesis"}]}))
+    metadata = _write(
+        tmp_path / "metadata.json",
+        json.dumps({"references": [{"book": "Gênesis"}], "licenses": {"visual_assets": "generated_or_canonical", "music": "none"}}),
+    )
 
     result = ProductionEvidenceQA().review(
         script_path=script,
@@ -38,6 +41,22 @@ def test_production_evidence_qa_accepts_bound_original_episode_artifacts(tmp_pat
 
     assert result.approved is True
     assert result.report["script_sha256"] == hashlib.sha256(script.read_bytes()).hexdigest()
+
+
+def test_production_evidence_qa_blocks_metadata_without_license_declarations(tmp_path):
+    script = _write(
+        tmp_path / "script.json",
+        json.dumps({"audience": {"min_age": 6, "max_age": 10}, "segments": [{"id": "S001", "kind": "biblical_paraphrase", "narration": "Deus falou.", "source_refs": ["Gênesis 1:1"]}]}),
+    )
+    manifest = _write(tmp_path / "manifest.json", json.dumps({"assets": [{"sha256": "a" * 64}]}))
+    captions = _write(tmp_path / "captions.vtt", "WEBVTT\n\n")
+    metadata = _write(tmp_path / "metadata.json", json.dumps({"references": [{"book": "Gênesis"}]}))
+
+    result = ProductionEvidenceQA().review(
+        script_path=script, manifest_path=manifest, captions_path=captions, metadata_path=metadata, published_script_hashes=set()
+    )
+
+    assert "LICENSES_MISSING" in result.findings
 
 
 def test_production_evidence_qa_blocks_missing_sidecars_and_reused_script(tmp_path):
@@ -58,5 +77,6 @@ def test_production_evidence_qa_blocks_missing_sidecars_and_reused_script(tmp_pa
         "REUSED_SCRIPT",
         "CAPTIONS_MISSING",
         "METADATA_MISSING",
+        "LICENSES_MISSING",
         "MANIFEST_ASSETS_MISSING",
     }

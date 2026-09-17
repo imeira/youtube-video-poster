@@ -85,6 +85,10 @@ class MetadataAgent(BaseAgent):
             "thumbnail": thumbnail_path,
             "captions": captions_files or {},
             "references": research_data.get("references", []),
+            "licenses": {
+                "visual_assets": "generated_or_canonical",
+                "music": "none",
+            },
         }
 
         md_dir = Path(metadata_dir) if metadata_dir else None

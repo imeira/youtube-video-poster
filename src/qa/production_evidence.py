@@ -98,10 +98,18 @@ class ProductionEvidenceQA:
             report["captions_sha256"] = _sha256(captions_path)
 
         metadata = _json_object(metadata_path) if metadata_path.is_file() else None
+        licenses = metadata.get("licenses") if metadata else None
+        valid_licenses = (
+            isinstance(licenses, dict)
+            and set(licenses) == {"visual_assets", "music"}
+            and all(isinstance(value, str) and value.strip() for value in licenses.values())
+        )
         if metadata is None or not isinstance(metadata.get("references"), list) or not metadata["references"]:
             findings.append("METADATA_MISSING")
         else:
             report["metadata_sha256"] = _sha256(metadata_path)
+        if not valid_licenses:
+            findings.append("LICENSES_MISSING")
 
         report["published_script_hashes_checked"] = len(published_script_hashes)
         return ProductionEvidenceQAResult(not findings, tuple(findings), report)
