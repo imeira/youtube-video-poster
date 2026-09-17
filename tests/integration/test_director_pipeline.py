@@ -8,15 +8,14 @@ Then: approval → script → audio → storyboard → GENERATING_IMAGES
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
 from src.agents.director import DirectorAgent
-from src.state.machine import EpisodeState
+from src.approval.receipts import record_plan_approval
 
 CREATION_THEME = "História da criação do mundo — Gênesis 1–2"
 DAVID_THEME = "História de Davi e Golias — 1 Samuel 17"
@@ -62,7 +61,7 @@ class TestDirectorPreProduction:
     async def test_episode_files_created(self, episodes_dir):
         """Episode filesystem should be created (§15)."""
         director = DirectorAgent()
-        result = await director.start_episode(
+        await director.start_episode(
             theme=CREATION_THEME,
             episode_id="PILOT002",
         )
@@ -82,14 +81,43 @@ class TestDirectorPreProduction:
             episode_id="PILOT003",
         )
         state_path = episodes_dir / "PILOT003" / "state.json"
-        with open(state_path) as f:
-            state = json.load(f)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         assert state["current_state"] == "WAITING_PLAN_APPROVAL"
         assert len(state["state_history"]) >= 3  # REQUEST_RECEIVED, RESEARCHING, PLANNING, WAITING
 
 
 class TestDirectorProduction:
     """§98: Steps 6-9 — script → audio → storyboard."""
+
+    @pytest.fixture(autouse=True)
+    def offline_tts(self, tmp_path, monkeypatch):
+        """Test orchestration with injected audio, never the public Edge service.
+
+        Real provider/network behavior is covered separately. These non-slow
+        tests must run under the repository's offline validation policy.
+        """
+        if not shutil.which("ffmpeg"):
+            pytest.skip("local FFmpeg required for deterministic audio fixture")
+        from src.hybrid.revision_fixtures import TestDependencies
+        from src.providers.base import TTSResult
+        from src.providers.tts.edge_tts_provider import EdgeTTSProvider
+
+        class OfflineTTS:
+            def __init__(self, **kwargs):
+                pass
+
+            async def synthesize(self, text, **kwargs):
+                waveform = tmp_path / "fixture.wav"
+                result = await TestDependencies(tmp_path / "fixture-provider").synthesize(text, output_path=waveform)
+                target = tmp_path / "fixture.mp3"
+                subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-n", "-i", str(waveform),
+                                "-threads", "1", str(target)], check=True, capture_output=True)
+                return TTSResult(success=True, audio_path=str(target), duration_seconds=result.duration_seconds,
+                    word_timestamps=result.word_timestamps,
+                    sentence_timestamps=EdgeTTSProvider._derive_sentence_timestamps(text, result.word_timestamps),
+                    metadata={"mode": "TEST", "boundary_source": "TEST_WordBoundary"})
+
+        monkeypatch.setattr("src.agents.audio.EdgeTTSProvider", OfflineTTS)
 
     @pytest.mark.asyncio
     async def test_continue_after_plan_approval(self, episodes_dir):
@@ -99,7 +127,7 @@ class TestDirectorProduction:
             theme=CREATION_THEME,
             episode_id="PILOT004",
         )
-        # Simulate plan approval
+        record_plan_approval(episodes_dir / "PILOT004" / "plan.json", "test-human")
         result = await director.continue_after_approval(
             episode_id="PILOT004",
             approval_type="plan",
@@ -119,10 +147,12 @@ class TestDirectorProduction:
             theme=CREATION_THEME,
             episode_id="PILOT005",
         )
+        record_plan_approval(episodes_dir / "PILOT005" / "plan.json", "test-human")
         await director.continue_after_approval("PILOT005", "plan")
 
         ep_root = episodes_dir / "PILOT005"
         assert (ep_root / "script" / "narration.txt").exists()
+        assert (ep_root / "script" / "script_qa.json").exists()
         assert (ep_root / "audio" / "narration.mp3").exists()
         assert (ep_root / "storyboard" / "scenes.json").exists()
 
@@ -134,10 +164,12 @@ class TestDirectorProduction:
             theme=CREATION_THEME,
             episode_id="PILOT006",
         )
-        result = await director.continue_after_approval("PILOT006", "plan")
+        record_plan_approval(episodes_dir / "PILOT006" / "plan.json", "test-human")
+        await director.continue_after_approval("PILOT006", "plan")
 
-        with open(episodes_dir / "PILOT006" / "storyboard" / "scenes.json") as f:
-            scenes = json.load(f)["scenes"]
+        scenes = json.loads(
+            (episodes_dir / "PILOT006" / "storyboard" / "scenes.json").read_text(encoding="utf-8")
+        )["scenes"]
 
         for scene in scenes:
             assert scene["start"] >= 0

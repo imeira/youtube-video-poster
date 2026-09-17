@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -37,6 +39,8 @@ class EpisodeState(str, Enum):
     ANIMATION_QA = "ANIMATION_QA"
     ASSEMBLING = "ASSEMBLING"
     FINAL_QA = "FINAL_QA"
+    WAITING_THUMBNAIL_APPROVAL = "WAITING_THUMBNAIL_APPROVAL"
+    WAITING_VIDEO_APPROVAL = "WAITING_VIDEO_APPROVAL"
     WAITING_FINAL_APPROVAL = "WAITING_FINAL_APPROVAL"
     UPLOADING = "UPLOADING"
     PUBLISHED = "PUBLISHED"
@@ -55,6 +59,8 @@ class EpisodeState(str, Enum):
         return self in (
             EpisodeState.WAITING_PLAN_APPROVAL,
             EpisodeState.WAITING_BUDGET_APPROVAL,
+            EpisodeState.WAITING_THUMBNAIL_APPROVAL,
+            EpisodeState.WAITING_VIDEO_APPROVAL,
             EpisodeState.WAITING_FINAL_APPROVAL,
         )
 
@@ -71,7 +77,7 @@ _TRANSITIONS: dict[EpisodeState, set[EpisodeState]] = {
         EpisodeState.CANCELLED,
     },
     EpisodeState.SCRIPTING: {EpisodeState.SCRIPT_QA, EpisodeState.GENERATING_AUDIO, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
-    EpisodeState.SCRIPT_QA: {EpisodeState.CHARACTER_DESIGN, EpisodeState.SCRIPTING, EpisodeState.FAILED, EpisodeState.CANCELLED},
+    EpisodeState.SCRIPT_QA: {EpisodeState.CHARACTER_DESIGN, EpisodeState.SCRIPTING, EpisodeState.GENERATING_AUDIO, EpisodeState.FAILED, EpisodeState.CANCELLED},
     EpisodeState.CHARACTER_DESIGN: {EpisodeState.STORYBOARDING, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.STORYBOARDING: {EpisodeState.GENERATING_AUDIO, EpisodeState.GENERATING_IMAGES, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.GENERATING_AUDIO: {EpisodeState.STORYBOARDING, EpisodeState.GENERATING_IMAGES, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
@@ -83,7 +89,9 @@ _TRANSITIONS: dict[EpisodeState, set[EpisodeState]] = {
     EpisodeState.WAITING_BUDGET_APPROVAL: {EpisodeState.CLOUD_VIDEO_GENERATION, EpisodeState.LOCAL_ANIMATION, EpisodeState.CANCELLED},
     EpisodeState.ANIMATION_QA: {EpisodeState.ASSEMBLING, EpisodeState.FAILED, EpisodeState.CANCELLED},
     EpisodeState.ASSEMBLING: {EpisodeState.FINAL_QA, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
-    EpisodeState.FINAL_QA: {EpisodeState.WAITING_FINAL_APPROVAL, EpisodeState.ASSEMBLING, EpisodeState.FAILED, EpisodeState.CANCELLED},
+    EpisodeState.FINAL_QA: {EpisodeState.WAITING_THUMBNAIL_APPROVAL, EpisodeState.ASSEMBLING, EpisodeState.FAILED, EpisodeState.CANCELLED},
+    EpisodeState.WAITING_THUMBNAIL_APPROVAL: {EpisodeState.WAITING_VIDEO_APPROVAL, EpisodeState.ASSEMBLING, EpisodeState.CANCELLED},
+    EpisodeState.WAITING_VIDEO_APPROVAL: {EpisodeState.WAITING_FINAL_APPROVAL, EpisodeState.ASSEMBLING, EpisodeState.CANCELLED},
     EpisodeState.WAITING_FINAL_APPROVAL: {EpisodeState.UPLOADING, EpisodeState.ASSEMBLING, EpisodeState.CANCELLED},
     EpisodeState.UPLOADING: {EpisodeState.PUBLISHED, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.PUBLISHED: set(),  # terminal
@@ -228,7 +236,11 @@ class EpisodeStateStore:
             "current_state": self.current_state.value,
             "previous_state": self.previous_state.value if self.previous_state else None,
             "state_history": self.state_history,
-            "checkpoint": asdict(Checkpoint(**self.checkpoint)) if isinstance(self.checkpoint, dict) else asdict(self.checkpoint),
+            # Checkpoints are an extensible, persisted contract.  Preserve
+            # unknown revision namespaces verbatim instead of coercing them
+            # through the legacy three-field dataclass.
+            "checkpoint": dict(self.checkpoint) if isinstance(self.checkpoint, dict) else asdict(self.checkpoint),
+            "paused_from": self._paused_from.value if self._paused_from else None,
             "updated_at": self.updated_at,
         }
 
@@ -243,13 +255,24 @@ class EpisodeStateStore:
             checkpoint=data.get("checkpoint", {}),
             updated_at=data.get("updated_at", datetime.now(UTC).isoformat()),
         )
+        paused_from = data.get("paused_from")
+        if store.current_state == EpisodeState.PAUSED and paused_from:
+            store._paused_from = EpisodeState(paused_from)
         return store
 
     def save(self, path: Path) -> None:
-        """Persist state to JSON file."""
+        """Atomically persist state so a crash cannot truncate the checkpoint."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(self.to_dict(), stream, indent=2, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, path)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
 
     @classmethod
     def load(cls, path: Path) -> EpisodeStateStore:

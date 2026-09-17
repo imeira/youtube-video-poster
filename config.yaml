@@ -452,4 +452,4 @@ hybrid_fast:
   clip_seconds: 5
   resolution: 720p
   concurrency: 3
-  limit: '10'
+  limit: '6'

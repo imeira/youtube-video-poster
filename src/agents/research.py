@@ -172,6 +172,58 @@ class ResearchAgent(BaseAgent):
                 ),
             },
         },
+        "promessa de um filho para abraão e sara": {
+            "references": [
+                {"book": "Gênesis", "chapter": 15, "verses": "1-6"},
+                {"book": "Gênesis", "chapter": 17, "verses": "1-9, 15-21"},
+                {"book": "Gênesis", "chapter": 18, "verses": "1-15"},
+            ],
+            "source_authority": {
+                "language": "pt-BR",
+                "kind": "paráfrase editorial original baseada na passagem",
+                "quotation_policy": "Não reproduzir trechos longos de traduções protegidas.",
+            },
+            "summary": (
+                "Abrão e Sarai esperavam há muito tempo por uma família. Deus renovou sua promessa, "
+                "mudou seus nomes para Abraão e Sara e disse que Sara teria um filho. Eles aprenderam "
+                "a esperar com confiança, mesmo quando algo parecia difícil."
+            ),
+            "key_facts": [
+                "Deus prometeu a Abrão que sua recompensa seria muito grande",
+                "Abrão confiou na promessa de Deus, mesmo sem ver todos os detalhes",
+                "Deus mudou o nome de Abrão para Abraão e o nome de Sarai para Sara",
+                "Deus prometeu que Sara teria um filho e que seu nome seria Isaque",
+                "Abraão riu de alegria e surpresa ao ouvir a promessa",
+                "Deus também prometeu abençoar Ismael; ele não é um obstáculo nem um vilão",
+                "Sara riu ao ouvir a promessa porque ela parecia difícil para ela",
+                "A promessa foi repetida no tempo certo, sem mostrar o nascimento de Isaque neste episódio",
+            ],
+            "chapter_context": {
+                "episode_scope": "Gênesis 15:1-6; 17:1-9, 15-21; 18:1-15",
+                "omitted": [
+                    "Gênesis 15:7-21 — aliança da terra e rito",
+                    "Gênesis 16 — Hagar e Ismael fora deste arco",
+                    "Gênesis 17:10-14, 23-27 — circuncisão",
+                    "Gênesis 18:16-33 — intercessão por Sodoma",
+                ],
+            },
+            "accuracy_report": {
+                "facts": "Fatos são limitados ao escopo declarado.",
+                "dramatizations": "Expressões, enquadramentos e transições são recursos visuais, não novos fatos.",
+                "omissions": [
+                    "Gênesis 16 e os trechos sensíveis ou fora do arco foram omitidos deliberadamente.",
+                    "Não antecipar gestação, nascimento ou Isaque visível.",
+                ],
+                "simplifications": "A espera é explicada com frases curtas para crianças de 6–10 anos.",
+                "human_review": ["A representação divina não será humana nem localizada visualmente."],
+            },
+            "visual_constraints": {
+                "name_continuity": "Usar Abrão e Sarai antes de Gênesis 17; Abraão e Sara somente depois da mudança de nome.",
+                "god_visual_representation": "Deus nunca aparece como pessoa, anjo identificável, visitante, luz personificada ou fonte localizada de fala.",
+                "visitors": "Em Gênesis 18, visitantes permanecem fora de quadro; o narrador conduz a promessa.",
+                "unsupported_details": "Sem Isaque já nascido, gravidez, parto, camelos, ritos, sangue, Sodoma ou texto dentro da imagem.",
+            },
+        },
         "chamado de abraão": {
             "references": [
                 {"book": "Gênesis", "chapter": 12, "verses": "1-9"},
@@ -399,7 +451,12 @@ class ResearchAgent(BaseAgent):
                 "references": matched["references"],
                 "summary": matched["summary"],
                 "source_urls": matched.get("source_urls", []),
+                "source_authority": matched.get("source_authority", {
+                    "language": "pt-BR",
+                    "kind": "paráfrase editorial original baseada na passagem",
+                }),
                 "chapter_context": matched.get("chapter_context", {}),
+                "accuracy_report": matched.get("accuracy_report", {}),
                 "narrative_classification": {
                     "BIBLICAL_FACT": matched["key_facts"],
                     "NARRATIVE_INFERENCE": [

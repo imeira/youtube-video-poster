@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import time
+import tempfile
 from pathlib import Path
 
 from src.providers.base import TTSProvider, TTSResult
@@ -44,6 +45,7 @@ class EdgeTTSProvider(TTSProvider):
         voice: str = "",
         rate: str = "",
         pitch: str = "",
+        *, output_path: str | Path | None = None,
     ) -> TTSResult:
         """Synthesize speech and return audio + sentence timestamps.
 
@@ -64,7 +66,8 @@ class EdgeTTSProvider(TTSProvider):
         output_dir = Path(os.environ.get("LOCALAPPDATA", "/tmp")) / "Temp" / "studio_tts"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        audio_path = output_dir / "narration.mp3"
+        audio_path = Path(output_path) if output_path is not None else output_dir / "narration.mp3"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
         t_start = time.time()
 
         communicate = self._edge_tts.Communicate(
@@ -76,25 +79,30 @@ class EdgeTTSProvider(TTSProvider):
         )
         word_timestamps: list[dict] = []
 
-        with open(audio_path, "wb") as audio_file:
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    audio_file.write(chunk["data"])
-                elif chunk["type"] == "WordBoundary":
-                    # offset and duration are in 100ns units (10^-7 seconds)
-                    offset_s = chunk["offset"] / 10_000_000
-                    duration_s = chunk["duration"] / 10_000_000
-                    word_timestamps.append({
-                        "start": round(offset_s, 3),
-                        "end": round(offset_s + duration_s, 3),
-                        "word": chunk["text"],
-                    })
+        fd, temporary = tempfile.mkstemp(dir=audio_path.parent, suffix=".mp3")
+        try:
+            with os.fdopen(fd, "wb") as audio_file:
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        audio_file.write(chunk["data"])
+                    elif chunk["type"] == "WordBoundary":
+                        # offset and duration are in 100ns units (10^-7 seconds)
+                        offset_s = chunk["offset"] / 10_000_000
+                        duration_s = chunk["duration"] / 10_000_000
+                        word_timestamps.append({
+                            "start": offset_s,
+                            "end": offset_s + duration_s,
+                            "word": chunk["text"],
+                        })
 
+            duration = self._get_duration(temporary)
+            if not word_timestamps or duration <= 0 or Path(temporary).stat().st_size == 0:
+                raise ValueError("audio and real WordBoundary timestamps required")
+            sentence_timestamps = self._derive_sentence_timestamps(text, word_timestamps)
+            os.replace(temporary, audio_path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
         gen_time = time.time() - t_start
-
-        # Get audio duration via ffprobe
-        duration = self._get_duration(str(audio_path))
-        sentence_timestamps = self._derive_sentence_timestamps(text, word_timestamps)
 
         return TTSResult(
             success=True,

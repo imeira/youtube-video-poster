@@ -67,6 +67,25 @@ async def test_thumbnail_failure_marks_episode_failed_and_stops_finishing(tmp_pa
         encoding="utf-8",
     )
     (paths.research_dir / "sources.json").write_text("{}", encoding="utf-8")
+    script_packet = paths.script_dir / "script.json"
+    script_packet.write_text(
+        json.dumps(
+            {
+                "audience": {"min_age": 6, "max_age": 10},
+                "closing_duration_s": 4,
+                "narration": "Narração de teste.",
+                "segments": [
+                    {
+                        "id": "S001",
+                        "kind": "biblical_paraphrase",
+                        "narration": "Narração de teste.",
+                        "source_refs": ["Gênesis 6–9"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     paths.request_json.write_text(
         json.dumps({"theme": "Noé e a grande arca — Gênesis 6–9", "language": "pt-BR"}),
         encoding="utf-8",
@@ -81,7 +100,14 @@ async def test_thumbnail_failure_marks_episode_failed_and_stops_finishing(tmp_pa
     director = DirectorAgent.__new__(DirectorAgent)
     director.script = _agent(
         "Script",
-        AgentResult(True, {"narration": "Narração de teste.", "word_count": 3}),
+        AgentResult(
+            True,
+            {
+                "narration": "Narração de teste.",
+                "word_count": 3,
+                "script_packet_path": str(script_packet),
+            },
+        ),
     )
     director.audio = _agent(
         "Audio",
@@ -128,6 +154,7 @@ async def test_thumbnail_failure_marks_episode_failed_and_stops_finishing(tmp_pa
 
     assert result["state"] == "GENERATING_IMAGES"
     assert result["compiled_activation"]["audio"] == str(tmp_path / "audio" / "narration.mp3")
+    assert director.storyboard.run.await_args.kwargs["audio_duration_s"] == 5.0
     assert state.current_state is EpisodeState.GENERATING_IMAGES
     persisted = json.loads(paths.state_json.read_text(encoding="utf-8"))
     assert persisted["current_state"] == "GENERATING_IMAGES"

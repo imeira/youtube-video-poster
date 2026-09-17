@@ -1,0 +1,314 @@
+{
+  "title": "Estrelas, uma tenda e a promessa",
+  "audience": {
+    "min_age": 6,
+    "max_age": 10
+  },
+  "closing_duration_s": 4,
+  "segments": [
+    {
+      "id": "S001",
+      "narration": "Abrão ainda não tinha o filho que tanto esperava. Numa visão, Deus falou com ele e disse que não tivesse medo. Deus seria sua proteção. Aquela conversa trouxe uma promessa para ouvir com atenção.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 15:1-6"
+      ],
+      "visual_action": "Abram sits outside his tent at night, looking thoughtful; wide sky and warm lamplight",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S002",
+      "narration": "Abrão contou a Deus sua preocupação. Sem um filho, quem receberia o que ele tinha? Ele pensava em alguém de sua casa. Abrão podia falar sobre aquilo que não entendia e apresentar sua pergunta.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 15:1-6"
+      ],
+      "visual_action": "Abram opens his empty hands in a questioning gesture beside the tent; no other people",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S003",
+      "narration": "A resposta de Deus foi clara: o herdeiro seria um filho do próprio Abrão. A promessa não era apenas sobre coisas que ele possuía. Era sobre uma família que ainda cresceria no futuro.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 15:1-6"
+      ],
+      "visual_action": "Close view of Abram listening quietly, hands resting on his knees, hopeful eyes",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S004",
+      "narration": "Então Deus levou Abrão para fora e mandou que olhasse para o céu. Havia estrelas para contar! Será que Abrão conseguiria contar todas? Assim seria o grande número de seus descendentes, anunciou Deus.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 15:1-6"
+      ],
+      "visual_action": "Abram stands beyond his tent, head tilted up, lifting one hand toward a vast star-filled sky",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S005",
+      "narration": "Descendentes são os filhos e as gerações que vêm depois deles. Abrão ainda não via aquela grande família. Mas ele creu em Deus. O texto conta que Deus considerou essa confiança como justiça.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 15:1-6"
+      ],
+      "visual_action": "Abram lowers his hand to his heart under the stars; peaceful face; no imagined children",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S006",
+      "narration": "Mais adiante, quando Abrão tinha noventa e nove anos, Deus voltou a falar com ele. Apresentou-se como o Deus Todo-Poderoso. Chamou Abrão a viver em sua presença e a fazer o que era certo.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 17:1-9"
+      ],
+      "visual_action": "Elderly Abram pauses on a sunlit path near his tents, listening with a serious expression",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S007",
+      "narration": "Deus falou de uma aliança. Uma aliança é um compromisso. Abrão se prostrou, com o rosto voltado para o chão, enquanto ouvia. Deus prometeu que dele viriam muitos povos, e também reis.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 17:1-9"
+      ],
+      "visual_action": "Abram bows with his face toward the ground beside his tent; respectful side view",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S008",
+      "narration": "Nessa conversa, Abrão recebeu um novo nome: Abraão. Deus explicou que ele seria pai de muitas nações. O nome novo apontava para a promessa. A família anunciada seria muito maior do que ele podia ver.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 17:1-9"
+      ],
+      "visual_action": "Abraham rises slowly from his bow, looking across an open landscape; no crowns or future crowds",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S009",
+      "narration": "Deus disse que sua aliança continuaria com os descendentes de Abraão, pelas gerações. Também falou da terra de Canaã. Abraão e sua família deveriam guardar essa aliança. Era um compromisso para levar a sério.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 17:1-9"
+      ],
+      "visual_action": "Abraham stands at the edge of the camp surveying the hills of Canaan, one hand on a walking staff",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S010",
+      "narration": "Sarai também recebeu um novo nome: Sara. Deus disse que a abençoaria e que ela teria um filho. Da família dela viriam povos e reis. Sara fazia parte daquela promessa de um modo muito especial.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 17:15-21"
+      ],
+      "visual_action": "Sarah stands at her tent doorway, arranging a folded cloth; gentle dignified portrait of an elderly woman",
+      "characters": [
+        "sarah"
+      ]
+    },
+    {
+      "id": "S011",
+      "narration": "Abraão se prostrou e riu. Pensou em sua idade e na idade de Sara. Ele teria cem anos, e ela, noventa. Como poderiam ter um filho? Era uma notícia muito maior do que ele esperava.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 17:15-21"
+      ],
+      "visual_action": "Abraham bows and smiles in astonishment, hand near his mouth; no mockery and no child",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S012",
+      "narration": "Abraão falou de Ismael, seu filho, e pediu que ele vivesse diante de Deus. Deus respondeu que abençoaria Ismael também. Ele teria muitos descendentes. Mas a aliança anunciada seria estabelecida com o filho de Sara.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 17:15-21"
+      ],
+      "visual_action": "Abraham lifts his face with a caring, pleading expression, palms open; Ishmael remains offscreen",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S013",
+      "narration": "Deus disse que Sara teria um filho e que o nome dele seria Isaque. A aliança continuaria com ele. Deus também anunciou um tempo: Sara teria o menino naquela época do ano seguinte.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 17:15-21"
+      ],
+      "visual_action": "Abraham listens intently beside his tent, gaze lifted just above the horizon; no visible divine figure",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S014",
+      "narration": "Por enquanto, Isaque era o filho prometido. A notícia falava do futuro. Abraão havia ouvido o nome e o tempo anunciado por Deus. Ainda havia espera pela frente, antes de conhecer aquele menino.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 17:15-21"
+      ],
+      "visual_action": "Wide quiet view of Abraham alone outside the family tents in late afternoon; no baby objects",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S015",
+      "narration": "Depois, junto aos carvalhos de Manre, Abraão estava sentado à entrada da tenda, no calor do dia. Ao levantar os olhos, viu três homens perto dele. Abraão correu para recebê-los e se curvou.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 18:1-15"
+      ],
+      "visual_action": "Abraham approaches three ordinary adult travelers near shady oak trees, bowing in welcome; no halos or divine attributes",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S016",
+      "narration": "Abraão ofereceu água para os visitantes lavarem os pés e descanso debaixo da árvore. Também ofereceu comida para que recuperassem as forças antes de seguir viagem. Os visitantes aceitaram. Era hora de preparar a refeição.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 18:1-15"
+      ],
+      "visual_action": "Abraham gestures toward a water basin and shaded resting place for three ordinary travelers",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S017",
+      "narration": "Abraão foi depressa até Sara, na tenda, e pediu que preparasse pães com farinha. Sara recebeu aquele pedido enquanto Abraão cuidava da refeição. A visita trouxe movimento ao acampamento naquele dia quente.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 18:1-15"
+      ],
+      "visual_action": "Sarah kneads flour dough inside the open tent while Abraham speaks from the entrance; utensils on a low table",
+      "characters": [
+        "abraham",
+        "sarah"
+      ]
+    },
+    {
+      "id": "S018",
+      "narration": "Abraão escolheu um bezerro e pediu a um rapaz que preparasse a carne. Depois, levou coalhada, leite e a comida aos visitantes. Enquanto eles comiam debaixo da árvore, Abraão ficou ali, pronto para atendê-los.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 18:1-15"
+      ],
+      "visual_action": "Abraham places prepared food and milk bowls before three travelers seated under an oak; no slaughter or raw meat",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S019",
+      "narration": "Os visitantes perguntaram onde estava Sara, sua mulher. Abraão respondeu que ela estava na tenda. Então veio o anúncio: no tempo indicado, no ano seguinte, Sara teria um filho. Ela escutava à entrada da tenda.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 18:1-15"
+      ],
+      "visual_action": "Sarah listens from the tent entrance in foreground; Abraham and three ordinary travelers converse under the tree behind her",
+      "characters": [
+        "abraham",
+        "sarah"
+      ]
+    },
+    {
+      "id": "S020",
+      "narration": "Abraão e Sara eram bem idosos. Sara já havia passado da idade de ter filhos. Ao ouvir a promessa, ela riu consigo mesma. Pensou em como aquilo poderia acontecer, depois de tantos anos.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 18:1-15"
+      ],
+      "visual_action": "Close portrait of elderly Sarah partly behind the tent curtain, one hand near her lips, surprised private smile",
+      "characters": [
+        "sarah"
+      ]
+    },
+    {
+      "id": "S021",
+      "narration": "O Senhor perguntou a Abraão por que Sara havia rido. Então fez uma pergunta importante: haveria alguma coisa difícil demais para o Senhor? A promessa foi repetida. No tempo anunciado, Sara teria um filho.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 18:1-15"
+      ],
+      "visual_action": "Abraham listens with renewed attention under the oak; tent visible behind; no person identified visually as God",
+      "characters": [
+        "abraham"
+      ]
+    },
+    {
+      "id": "S022",
+      "narration": "Sara ficou com medo e disse que não havia rido. Mas ouviu a resposta de que tinha rido, sim. A história mostra sua surpresa e seu receio. A promessa continuava, mesmo diante daquela reação.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 18:1-15"
+      ],
+      "visual_action": "Sarah stands at the tent doorway with a hesitant expression, shoulders slightly drawn inward; gentle daylight",
+      "characters": [
+        "sarah"
+      ]
+    },
+    {
+      "id": "S023",
+      "narration": "Nossa história de hoje para aqui, antes do nascimento de Isaque. Abraão e Sara ouviram a promessa de um filho. Ele ainda era esperado. O anúncio do Senhor apontava para o tempo que viria.",
+      "kind": "biblical_paraphrase",
+      "source_refs": [
+        "Gênesis 18:1-15"
+      ],
+      "visual_action": "Abraham and Sarah stand beside their tent at sunset, looking ahead together; both elderly; no infant",
+      "characters": [
+        "abraham",
+        "sarah"
+      ]
+    },
+    {
+      "id": "S024",
+      "narration": "Pensando nessa história, podemos conversar sobre a espera. Esperar pode trazer perguntas, surpresa e até preocupação. Quando isso acontecer, podemos falar com um adulto de confiança sobre o que sentimos. Não precisamos esconder nossas dúvidas.",
+      "kind": "family_reflection",
+      "source_refs": [],
+      "visual_action": "Reflective closing illustration: Abraham and Sarah seated quietly outside their tent, warm dusk colors",
+      "characters": [
+        "abraham",
+        "sarah"
+      ]
+    },
+    {
+      "id": "S025",
+      "narration": "As estrelas lembram a promessa que Abrão ouviu. A tenda lembra a notícia que Sara escutou. Qual desses momentos você gostaria de conversar com sua família? Podemos ouvir uns aos outros com atenção e carinho.",
+      "kind": "family_reflection",
+      "source_refs": [],
+      "visual_action": "Wide closing view of Abraham and Sarah beside their tent as the first stars appear; peaceful hopeful mood",
+      "characters": [
+        "abraham",
+        "sarah"
+      ]
+    }
+  ],
+  "narration": "Abrão ainda não tinha o filho que tanto esperava. Numa visão, Deus falou com ele e disse que não tivesse medo. Deus seria sua proteção. Aquela conversa trouxe uma promessa para ouvir com atenção.\n\nAbrão contou a Deus sua preocupação. Sem um filho, quem receberia o que ele tinha? Ele pensava em alguém de sua casa. Abrão podia falar sobre aquilo que não entendia e apresentar sua pergunta.\n\nA resposta de Deus foi clara: o herdeiro seria um filho do próprio Abrão. A promessa não era apenas sobre coisas que ele possuía. Era sobre uma família que ainda cresceria no futuro.\n\nEntão Deus levou Abrão para fora e mandou que olhasse para o céu. Havia estrelas para contar! Será que Abrão conseguiria contar todas? Assim seria o grande número de seus descendentes, anunciou Deus.\n\nDescendentes são os filhos e as gerações que vêm depois deles. Abrão ainda não via aquela grande família. Mas ele creu em Deus. O texto conta que Deus considerou essa confiança como justiça.\n\nMais adiante, quando Abrão tinha noventa e nove anos, Deus voltou a falar com ele. Apresentou-se como o Deus Todo-Poderoso. Chamou Abrão a viver em sua presença e a fazer o que era certo.\n\nDeus falou de uma aliança. Uma aliança é um compromisso. Abrão se prostrou, com o rosto voltado para o chão, enquanto ouvia. Deus prometeu que dele viriam muitos povos, e também reis.\n\nNessa conversa, Abrão recebeu um novo nome: Abraão. Deus explicou que ele seria pai de muitas nações. O nome novo apontava para a promessa. A família anunciada seria muito maior do que ele podia ver.\n\nDeus disse que sua aliança continuaria com os descendentes de Abraão, pelas gerações. Também falou da terra de Canaã. Abraão e sua família deveriam guardar essa aliança. Era um compromisso para levar a sério.\n\nSarai também recebeu um novo nome: Sara. Deus disse que a abençoaria e que ela teria um filho. Da família dela viriam povos e reis. Sara fazia parte daquela promessa de um modo muito especial.\n\nAbraão se prostrou e riu. Pensou em sua idade e na idade de Sara. Ele teria cem anos, e ela, noventa. Como poderiam ter um filho? Era uma notícia muito maior do que ele esperava.\n\nAbraão falou de Ismael, seu filho, e pediu que ele vivesse diante de Deus. Deus respondeu que abençoaria Ismael também. Ele teria muitos descendentes. Mas a aliança anunciada seria estabelecida com o filho de Sara.\n\nDeus disse que Sara teria um filho e que o nome dele seria Isaque. A aliança continuaria com ele. Deus também anunciou um tempo: Sara teria o menino naquela época do ano seguinte.\n\nPor enquanto, Isaque era o filho prometido. A notícia falava do futuro. Abraão havia ouvido o nome e o tempo anunciado por Deus. Ainda havia espera pela frente, antes de conhecer aquele menino.\n\nDepois, junto aos carvalhos de Manre, Abraão estava sentado à entrada da tenda, no calor do dia. Ao levantar os olhos, viu três homens perto dele. Abraão correu para recebê-los e se curvou.\n\nAbraão ofereceu água para os visitantes lavarem os pés e descanso debaixo da árvore. Também ofereceu comida para que recuperassem as forças antes de seguir viagem. Os visitantes aceitaram. Era hora de preparar a refeição.\n\nAbraão foi depressa até Sara, na tenda, e pediu que preparasse pães com farinha. Sara recebeu aquele pedido enquanto Abraão cuidava da refeição. A visita trouxe movimento ao acampamento naquele dia quente.\n\nAbraão escolheu um bezerro e pediu a um rapaz que preparasse a carne. Depois, levou coalhada, leite e a comida aos visitantes. Enquanto eles comiam debaixo da árvore, Abraão ficou ali, pronto para atendê-los.\n\nOs visitantes perguntaram onde estava Sara, sua mulher. Abraão respondeu que ela estava na tenda. Então veio o anúncio: no tempo indicado, no ano seguinte, Sara teria um filho. Ela escutava à entrada da tenda.\n\nAbraão e Sara eram bem idosos. Sara já havia passado da idade de ter filhos. Ao ouvir a promessa, ela riu consigo mesma. Pensou em como aquilo poderia acontecer, depois de tantos anos.\n\nO Senhor perguntou a Abraão por que Sara havia rido. Então fez uma pergunta importante: haveria alguma coisa difícil demais para o Senhor? A promessa foi repetida. No tempo anunciado, Sara teria um filho.\n\nSara ficou com medo e disse que não havia rido. Mas ouviu a resposta de que tinha rido, sim. A história mostra sua surpresa e seu receio. A promessa continuava, mesmo diante daquela reação.\n\nNossa história de hoje para aqui, antes do nascimento de Isaque. Abraão e Sara ouviram a promessa de um filho. Ele ainda era esperado. O anúncio do Senhor apontava para o tempo que viria.\n\nPensando nessa história, podemos conversar sobre a espera. Esperar pode trazer perguntas, surpresa e até preocupação. Quando isso acontecer, podemos falar com um adulto de confiança sobre o que sentimos. Não precisamos esconder nossas dúvidas.\n\nAs estrelas lembram a promessa que Abrão ouviu. A tenda lembra a notícia que Sara escutou. Qual desses momentos você gostaria de conversar com sua família? Podemos ouvir uns aos outros com atenção e carinho.",
+  "evidence_mode": "LIVE",
+  "editorial_note": "New EP8 copy v1. Human deployment approval must review the exact hash. Visual staging is illustrative; family reflections are not biblical claims."
+}
