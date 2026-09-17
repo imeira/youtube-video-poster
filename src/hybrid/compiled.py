@@ -175,12 +175,23 @@ class ProductionRun:
             predecessor=predecessor,
         )
 
-    async def dispatch_baselines(self, provider: Provider):
+    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None):
         if not self._baselines:
             return {}
+        authorizations = authorizations or {}
+        prices = prices or {}
+        if not isinstance(authorizations, dict) or not isinstance(prices, dict):
+            raise TypeError("compiled dispatch authority maps must be dictionaries")
         completed = {}
         pending = [
-            asyncio.create_task(self.executor.run(job, provider))
+            asyncio.create_task(
+                self.executor.run(
+                    job,
+                    provider,
+                    authorization=authorizations.get(job.request_id),
+                    price=prices.get(job.request_id),
+                )
+            )
             for job in self._baselines.values()
         ]
         for task in asyncio.as_completed(pending):
@@ -297,8 +308,10 @@ class OperationalPipeline:
         self._approved_heroes: dict[str, FrozenAsset] = {}
         self.episode.save(self.workspace / "compiled_episode.json")
 
-    async def dispatch_baselines(self, provider: Provider):
-        return await self.run.dispatch_baselines(provider)
+    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None):
+        return await self.run.dispatch_baselines(
+            provider, authorizations=authorizations, prices=prices
+        )
 
     def render_ready(self):
         """Expose the compiled run readiness at the persisted pipeline boundary."""

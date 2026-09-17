@@ -393,3 +393,34 @@ async def test_director_dispatches_compiled_baselines_to_independent_visual_qa(t
     assert receipt["subtitles_sha256"] is None
     assert fs.paths.final_video.is_file()
     assert EpisodeStateStore.load(fs.paths.state_json).current_state == EpisodeState.FINAL_QA
+
+
+@pytest.mark.asyncio
+async def test_director_forwards_hash_bound_live_authority_to_compiled_dispatch(tmp_path, monkeypatch):
+    from src.agents.director import DirectorAgent
+    from src.config.loader import get_config
+    from src.state.machine import EpisodeState, EpisodeStateStore
+    from src.storage.episode_fs import EpisodeFS
+
+    class Pipeline:
+        async def dispatch_baselines(self, provider, *, authorizations, prices):
+            assert provider == "live-provider"
+            assert authorizations == {"job": "authorization"}
+            assert prices == {"job": "fresh-price"}
+            return {}
+
+        def prepare_qa_packets(self):
+            return {}
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    fs = EpisodeFS("EPX", get_config())
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EPX", current_state=EpisodeState.GENERATING_IMAGES).save(fs.paths.state_json)
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = get_config()
+
+    result = await director.dispatch_compiled_baselines(
+        "EPX", Pipeline(), "live-provider", authorizations={"job": "authorization"}, prices={"job": "fresh-price"}
+    )
+
+    assert result["state"] == EpisodeState.VISUAL_QA.value

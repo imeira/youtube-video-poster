@@ -237,13 +237,17 @@ class DirectorAgent:
             prior_spend=prior_spend,
         )
 
-    async def dispatch_compiled_baselines(self, episode_id: str, pipeline, provider) -> dict[str, Any]:
+    async def dispatch_compiled_baselines(
+        self, episode_id: str, pipeline, provider, *, authorizations=None, prices=None
+    ) -> dict[str, Any]:
         """Dispatch compiled work once, then stop at independent visual QA."""
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state is not EpisodeState.GENERATING_IMAGES:
             raise ValueError("compiled baseline dispatch requires GENERATING_IMAGES state")
-        receipts = await pipeline.dispatch_baselines(provider)
+        receipts = await pipeline.dispatch_baselines(
+            provider, authorizations=authorizations, prices=prices
+        )
         qa_packets = pipeline.prepare_qa_packets()
         if set(qa_packets) != set(receipts):
             raise ValueError("every completed compiled baseline requires a QA packet")
