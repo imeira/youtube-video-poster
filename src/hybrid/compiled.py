@@ -55,6 +55,7 @@ class CompiledEpisode:
     episode_id: str
     audio: FrozenAsset
     frames: tuple[FrameSpec, ...]
+    source_binding: dict | None = None
 
     @classmethod
     def compile(cls, episode_id: str, audio: FrozenAsset, frames):
@@ -75,10 +76,16 @@ class CompiledEpisode:
 
     @property
     def checksum(self):
-        return digest(asdict(self))
+        value = asdict(self)
+        if self.source_binding is None:
+            value.pop("source_binding")
+        return digest(value)
 
     def save(self, path):
-        atomic_json(path, {"episode": asdict(self), "checksum": self.checksum})
+        value = asdict(self)
+        if self.source_binding is None:
+            value.pop("source_binding")
+        atomic_json(path, {"episode": value, "checksum": self.checksum})
 
     @classmethod
     def load(cls, path):
@@ -86,6 +93,8 @@ class CompiledEpisode:
         episode = raw["episode"]
         audio = FrozenAsset(**{**episode["audio"], "path": Path(episode["audio"]["path"])})
         result = cls.compile(episode["episode_id"], audio, (FrameSpec(**frame) for frame in episode["frames"]))
+        if episode.get("source_binding") is not None:
+            result = cls(result.episode_id, result.audio, result.frames, episode["source_binding"])
         if raw.get("checksum") != result.checksum:
             raise ValueError("compiled episode checksum mismatch")
         return result
@@ -157,35 +166,67 @@ class ProductionRun:
         self._active_images = dict(self._baselines)
 
     def _job_for(self, frame: FrameSpec, category: str, cost: Decimal, *, predecessor="", prompt=None):
+        payload = {
+            "episode": self.episode.episode_id,
+            "compilation": self.episode.checksum,
+            "prompt": prompt or frame.prompt,
+            "semantic_action": frame.semantic_action,
+            "start": frame.start,
+            "end": frame.end,
+        }
+        if self.endpoint == "fal-ai/flux-2/klein/9b/edit":
+            # Freeze the actual wire contract BEFORE request hashing/authorization.
+            payload.update(dict(
+                image_urls=[str(a.path) for a in self.source_manifest.assets],
+                image_size={"width": 1280, "height": 720}, num_images=1,
+                output_format="png", enable_safety_checker=True))
         return Job(
             scene=frame.scene_id,
             category=category,
             mode=self.episode.audio.mode,
             endpoint=self.endpoint,
-            payload={
-                "episode": self.episode.episode_id,
-                "compilation": self.episode.checksum,
-                "prompt": prompt or frame.prompt,
-                "semantic_action": frame.semantic_action,
-                "start": frame.start,
-                "end": frame.end,
-            },
+            payload=payload,
             manifest=self.source_manifest,
             cost=cost,
             predecessor=predecessor,
         )
 
-    async def dispatch_baselines(self, provider: Provider):
+    def baseline_jobs(self) -> tuple[Job, ...]:
+        """Return the exact baseline jobs that need current LIVE authority."""
+        return tuple(self._baselines.values())
+
+    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None, on_completed=None):
         if not self._baselines:
             return {}
+        authorizations = authorizations or {}
+        prices = prices or {}
+        if not isinstance(authorizations, dict) or not isinstance(prices, dict):
+            raise TypeError("compiled dispatch authority maps must be dictionaries")
         completed = {}
         pending = [
-            asyncio.create_task(self.executor.run(job, provider))
+            asyncio.create_task(
+                self.executor.run(
+                    job,
+                    provider,
+                    authorization=authorizations.get(job.request_id),
+                    price=prices.get(job.request_id),
+                )
+            )
             for job in self._baselines.values()
         ]
-        for task in asyncio.as_completed(pending):
-            receipt = await task
-            completed[receipt["request"]["scene"]] = receipt
+        try:
+            for task in asyncio.as_completed(pending):
+                receipt = await task
+                completed[receipt["request"]["scene"]] = receipt
+                if on_completed is not None:
+                    await on_completed(receipt)
+        finally:
+            # Do not leave workers writing after the workspace owner releases its lock.
+            # Cancellation leaves durable Executor intents for recover-only resume.
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
         return completed
 
     def _completed_job_for_result(self, scene_id: str, result_sha256: str):
@@ -277,8 +318,9 @@ class OperationalPipeline:
         self.episode = episode
         self.imported_assets = dict(imported_assets or {})
         imported_scenes = frozenset(self.imported_assets)
-        if imported_scenes != frozenset(blocked_scenes):
-            raise ValueError("each blocked compiled scene needs one imported approved asset")
+        blocked_scenes = frozenset(blocked_scenes)
+        if not imported_scenes <= blocked_scenes:
+            raise ValueError("imported compiled scenes must be permanently non-submittable")
         known_scenes = {frame.scene_id for frame in episode.frames}
         if not imported_scenes <= known_scenes:
             raise ValueError("imported asset is absent from compiled episode")
@@ -293,12 +335,22 @@ class OperationalPipeline:
             imported_scenes=imported_scenes,
             blocked_scenes=blocked_scenes,
         )
+        self._approved_heroes: dict[str, FrozenAsset] = {}
         self.episode.save(self.workspace / "compiled_episode.json")
 
-    async def dispatch_baselines(self, provider: Provider):
-        return await self.run.dispatch_baselines(provider)
+    def baseline_jobs(self) -> tuple[Job, ...]:
+        return self.run.baseline_jobs()
 
-    def prepare_qa_packets(self):
+    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None, on_completed=None):
+        return await self.run.dispatch_baselines(
+            provider, authorizations=authorizations, prices=prices, on_completed=on_completed
+        )
+
+    def render_ready(self):
+        """Expose the compiled run readiness at the persisted pipeline boundary."""
+        return self.run.render_ready()
+
+    def prepare_qa_packets(self, scene_ids=None):
         """Write deterministic, exact-hash technical QA packets in one pass.
 
         Visual reviewers still make independent semantic decisions.  This removes
@@ -307,6 +359,8 @@ class OperationalPipeline:
         """
         packets = {}
         for scene_id, job in self.run._active_images.items():
+            if scene_ids is not None and scene_id not in scene_ids:
+                continue
             receipt = self.run.executor.inspect(job.request_id)
             if not receipt or receipt.get("status") != "COMPLETE":
                 continue
@@ -360,7 +414,31 @@ class OperationalPipeline:
         }
         qa.update(request_id=job.request_id, category=job.category, predecessor=job.predecessor)
         atomic_json(self.workspace / "qa" / f"{job.request_id}.json", qa)
-        return self._promote_candidate(scene_id, result_sha256, reviewer) if approved else None
+        if not approved:
+            return None
+        asset = self._promote_candidate(scene_id, result_sha256, reviewer)
+        if job.category == "hero":
+            self._approved_heroes[scene_id] = asset
+        return asset
+
+    def render_scenes(self, manifest: Manifest):
+        """Build renderer inputs only from the active image and approved hero receipts."""
+        from src.hybrid.render import Scene
+
+        if not self.render_ready():
+            raise ValueError("compiled QA receipts are incomplete; render scenes blocked")
+        approved = self.approved_manifest()
+        if manifest.checksum != approved.checksum:
+            raise ValueError("render manifest is not the compiled approved manifest")
+        if len(manifest.assets) != len(self.episode.frames):
+            raise ValueError("manifest does not cover every compiled frame")
+        scenes = []
+        for frame, image in zip(self.episode.frames, manifest.assets, strict=True):
+            hero = self._approved_heroes.get(frame.scene_id)
+            if frame.hero and hero is None:
+                raise ValueError("approved hero asset missing from operational pipeline")
+            scenes.append(Scene(image=image, seconds=frame.end - frame.start, clip=hero))
+        return tuple(scenes)
 
     def approved_manifest(self):
         assets = []

@@ -291,9 +291,9 @@ class TestGPUProviderFactory:
         provider = get_gpu_provider("local")
         assert isinstance(provider, LocalGPUProvider)
 
-    def test_get_runpod_provider(self):
-        provider = get_gpu_provider("runpod", api_key="test")
-        assert isinstance(provider, RunPodGPUProvider)
+    def test_runpod_provider_is_ineligible_for_production_factory(self):
+        with pytest.raises(ValueError, match="transactional LIVE adapter"):
+            get_gpu_provider("runpod", api_key="test")
 
     def test_unknown_provider_raises(self):
         with pytest.raises(ValueError):

@@ -21,6 +21,7 @@ dependencies = [
     "peft>=0.20.0",
     "safetensors>=0.4.0",
     "edge-tts>=7.0.0",
+    "fal-client>=0.7.0",
     "faster-whisper>=1.0.0",
     "runpod>=1.10.0",
     "google-api-python-client>=2.100.0",
@@ -41,6 +42,9 @@ dev = [
 
 [project.scripts]
 studio = "src.cli.main:main"
+
+[tool.setuptools.package-data]
+"src.hybrid" = ["assets/*.json"]
 
 [tool.setuptools.packages.find]
 where = ["."]

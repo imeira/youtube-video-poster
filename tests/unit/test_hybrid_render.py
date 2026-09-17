@@ -1,12 +1,16 @@
 import json
 import shutil
 import subprocess
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
 from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet, sha256
+from src.hybrid.compiled import CompiledEpisode, FrameSpec, OperationalPipeline
+from src.hybrid.execution import Executor
+from src.hybrid.planner import Config
 from src.hybrid.render import LocalRenderer, Scene, _publish_new, probe
 
 pytestmark = pytest.mark.skipif(
@@ -174,6 +178,58 @@ def test_real_local_render_without_unapproved_subtitles(tmp_path):
     assert receipt["subtitles_sha256"] is None
     assert decoded_audio(output) == decoded_audio(audio.path)
     assert output.with_name(output.name + ".receipt.json").is_file()
+
+
+def test_renderer_renders_a_manifest_from_the_operational_compiled_pipeline(tmp_path):
+    source_manifest, audio, _srt = fixtures(tmp_path)
+    episode = CompiledEpisode.compile(
+        "EPX",
+        audio,
+        (
+            FrameSpec("R001", 0, 1, "primeiro quadro", "ação inicial"),
+            FrameSpec("R002", 1, 2, "segundo quadro", "ação final"),
+        ),
+    )
+    pipeline = OperationalPipeline(
+        episode,
+        Executor(tmp_path / "control.db", Config()),
+        source_manifest,
+        workspace=tmp_path / "compiled",
+        endpoint="local-test",
+        image_cost=Decimal(".01"),
+        imported_assets={"R001": source_manifest.assets[0], "R002": source_manifest.assets[1]},
+        blocked_scenes={"R001", "R002"},
+    )
+    approved = pipeline.approved_manifest()
+    output = tmp_path / "compiled-master.mkv"
+
+    receipt = LocalRenderer(width=320, height=180).render_compiled(
+        pipeline,
+        [Scene(asset, 1.0) for asset in approved.assets],
+        approved,
+        audio,
+        None,
+        output,
+        hold=3,
+    )
+
+    assert output.is_file()
+    assert receipt["manifest_sha256"] == approved.checksum
+    assert receipt["subtitles_sha256"] is None
+
+
+def test_mp4_delivery_derives_aac_master_without_burning_subtitles(tmp_path):
+    manifest, audio, _srt = fixtures(tmp_path)
+    output = tmp_path / "delivery.mp4"
+
+    receipt = LocalRenderer(width=320, height=180).render(
+        [Scene(asset, 1.0) for asset in manifest.assets], manifest, audio, None, output, hold=3
+    )
+
+    streams = probe(output)["streams"]
+    assert next(stream for stream in streams if stream["codec_type"] == "audio")["codec_name"] == "aac"
+    assert receipt["audio_operation"] == "derived_master"
+    assert receipt["subtitles_sha256"] is None
 
 
 def test_publish_new_never_clobbers_a_racing_output(tmp_path):

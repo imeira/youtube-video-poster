@@ -6,7 +6,13 @@ from src.agents.script_qa import ScriptQAAgent
 
 
 def packet(*segments):
-    return {"audience": {"min_age": 6, "max_age": 10}, "segments": list(segments), "closing_duration_s": 4}
+    segment_list = list(segments)
+    return {
+        "audience": {"min_age": 6, "max_age": 10},
+        "segments": segment_list,
+        "narration": "\n\n".join(segment["narration"] for segment in segment_list),
+        "closing_duration_s": 4,
+    }
 
 
 def test_script_qa_accepts_sourced_paraphrase_and_family_reflection():
@@ -31,3 +37,22 @@ def test_script_qa_rejects_biblical_paraphrase_without_source():
     ))
     assert result.approved is False
     assert "S001:SOURCE_REQUIRED" in result.findings
+
+
+def test_script_qa_allows_factual_age_but_blocks_personal_age_request():
+    safe = ScriptQAAgent().review(packet(
+        {"id": "S001", "kind": "biblical_paraphrase", "narration": "Abraão pensou na idade dele e de Sara.", "source_refs": ["Gênesis 17:17"]},
+    ))
+    unsafe = ScriptQAAgent().review(packet(
+        {"id": "S001", "kind": "family_reflection", "narration": "Diga sua idade.", "source_refs": []},
+    ))
+    assert safe.approved is True
+    assert unsafe.approved is False
+    assert "S001:PERSONAL_DATA_REQUEST" in unsafe.findings
+
+
+def test_script_qa_measures_each_sentence_not_whole_semantic_segment():
+    result = ScriptQAAgent().review(packet(
+        {"id": "S001", "kind": "biblical_paraphrase", "narration": "Abraão ouviu uma promessa e ficou atento ao que Deus lhe disse. Ele confiou em Deus e guardou esperança mesmo quando a espera parecia longa. Sara também esperou com esperança e ouviu a promessa no tempo certo.", "source_refs": ["Gênesis 15:1-6"]},
+    ))
+    assert result.approved is True

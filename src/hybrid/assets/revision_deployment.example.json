@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "adapter": "src.hybrid.revision_live:factory",
+  "endpoint": "fal-ai/flux-2/klein/9b/edit",
+  "image_cost": "REQUIRED",
+  "non_image_reserve": "REQUIRED",
+  "visual_license": "REQUIRED",
+  "script": {
+    "sha256": "231e52dc4131a4ad7a77803ff00b8765b3cac2c45fbec171c39350e4413cbe38",
+    "authority": "REQUIRED"
+  },
+  "image_price": {
+    "authority": "REQUIRED",
+    "source_url": "REQUIRED",
+    "observed_at": 0,
+    "valid_until": 0,
+    "endpoint": "fal-ai/flux-2/klein/9b/edit",
+    "amount": "REQUIRED",
+    "manifest_checksum": "REQUIRED",
+    "width": 1280,
+    "height": 720,
+    "num_images": 1,
+    "output_format": "png",
+    "includes_reference_inputs": true
+  },
+  "tts": {
+    "provider": "edge-tts",
+    "voice": "pt-BR-ThalitaNeural",
+    "rate": "-8%",
+    "pitch": "+1Hz",
+    "boundary": "WordBoundary",
+    "cost": "0",
+    "authority": "REQUIRED"
+  },
+  "telegram": {
+    "chat_id": "REQUIRED",
+    "authority": "REQUIRED",
+    "cost": "0"
+  },
+  "reviewer": {
+    "url": "https://openrouter.ai/api/v1/chat/completions",
+    "key_env": "EP8_OPENROUTER_REVIEW_KEY",
+    "model": "REQUIRED",
+    "provider": "REQUIRED",
+    "authority": "REQUIRED",
+    "supports_images": true,
+    "supports_json_schema": true,
+    "context_tokens": 0,
+    "max_tokens": 0,
+    "price": {
+      "authority": "REQUIRED",
+      "source_url": "REQUIRED",
+      "observed_at": 0,
+      "valid_until": 0,
+      "prompt_per_million": "REQUIRED",
+      "completion_per_million": "REQUIRED",
+      "image": "0",
+      "request": "0"
+    }
+  }
+}

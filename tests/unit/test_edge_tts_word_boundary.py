@@ -55,6 +55,28 @@ async def test_synthesize_requests_word_boundaries_and_derives_sentence_windows(
 
 
 @pytest.mark.asyncio
+async def test_workspace_output_is_atomic_and_failure_preserves_existing(monkeypatch, tmp_path):
+    tts = EdgeTTSProvider()
+    target = tmp_path / 'narration.mp3'
+    target.write_bytes(b'preserved')
+    class Broken(_FakeCommunicate):
+        async def stream(self):
+            yield {'type': 'audio', 'data': b'partial'}
+            assert target.read_bytes() == b'preserved'
+            raise OSError('network unavailable')
+    tts._edge_tts = SimpleNamespace(Communicate=Broken)
+    with pytest.raises(OSError):
+        await tts.synthesize('Era uma vez.', output_path=target)
+    assert target.read_bytes() == b'preserved'
+    assert list(tmp_path.iterdir()) == [target]
+    tts._edge_tts = SimpleNamespace(Communicate=_FakeCommunicate)
+    monkeypatch.setattr(tts, '_get_duration', lambda _: 1.4)
+    result = await tts.synthesize('Era uma vez. Outra frase.', output_path=target)
+    assert Path(result.audio_path) == target
+    assert target.read_bytes() == b'ID3fake'
+
+
+@pytest.mark.asyncio
 async def test_audio_agent_prefers_direct_word_boundaries_over_whisper(monkeypatch, tmp_path: Path):
     audio_file = tmp_path / "source.mp3"
     audio_file.write_bytes(b"ID3fake")

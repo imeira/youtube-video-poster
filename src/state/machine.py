@@ -39,6 +39,8 @@ class EpisodeState(str, Enum):
     ANIMATION_QA = "ANIMATION_QA"
     ASSEMBLING = "ASSEMBLING"
     FINAL_QA = "FINAL_QA"
+    WAITING_THUMBNAIL_APPROVAL = "WAITING_THUMBNAIL_APPROVAL"
+    WAITING_VIDEO_APPROVAL = "WAITING_VIDEO_APPROVAL"
     WAITING_FINAL_APPROVAL = "WAITING_FINAL_APPROVAL"
     UPLOADING = "UPLOADING"
     PUBLISHED = "PUBLISHED"
@@ -57,6 +59,8 @@ class EpisodeState(str, Enum):
         return self in (
             EpisodeState.WAITING_PLAN_APPROVAL,
             EpisodeState.WAITING_BUDGET_APPROVAL,
+            EpisodeState.WAITING_THUMBNAIL_APPROVAL,
+            EpisodeState.WAITING_VIDEO_APPROVAL,
             EpisodeState.WAITING_FINAL_APPROVAL,
         )
 
@@ -85,7 +89,9 @@ _TRANSITIONS: dict[EpisodeState, set[EpisodeState]] = {
     EpisodeState.WAITING_BUDGET_APPROVAL: {EpisodeState.CLOUD_VIDEO_GENERATION, EpisodeState.LOCAL_ANIMATION, EpisodeState.CANCELLED},
     EpisodeState.ANIMATION_QA: {EpisodeState.ASSEMBLING, EpisodeState.FAILED, EpisodeState.CANCELLED},
     EpisodeState.ASSEMBLING: {EpisodeState.FINAL_QA, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
-    EpisodeState.FINAL_QA: {EpisodeState.WAITING_FINAL_APPROVAL, EpisodeState.ASSEMBLING, EpisodeState.FAILED, EpisodeState.CANCELLED},
+    EpisodeState.FINAL_QA: {EpisodeState.WAITING_THUMBNAIL_APPROVAL, EpisodeState.ASSEMBLING, EpisodeState.FAILED, EpisodeState.CANCELLED},
+    EpisodeState.WAITING_THUMBNAIL_APPROVAL: {EpisodeState.WAITING_VIDEO_APPROVAL, EpisodeState.ASSEMBLING, EpisodeState.CANCELLED},
+    EpisodeState.WAITING_VIDEO_APPROVAL: {EpisodeState.WAITING_FINAL_APPROVAL, EpisodeState.ASSEMBLING, EpisodeState.CANCELLED},
     EpisodeState.WAITING_FINAL_APPROVAL: {EpisodeState.UPLOADING, EpisodeState.ASSEMBLING, EpisodeState.CANCELLED},
     EpisodeState.UPLOADING: {EpisodeState.PUBLISHED, EpisodeState.FAILED, EpisodeState.PAUSED, EpisodeState.CANCELLED},
     EpisodeState.PUBLISHED: set(),  # terminal
@@ -230,7 +236,10 @@ class EpisodeStateStore:
             "current_state": self.current_state.value,
             "previous_state": self.previous_state.value if self.previous_state else None,
             "state_history": self.state_history,
-            "checkpoint": asdict(Checkpoint(**self.checkpoint)) if isinstance(self.checkpoint, dict) else asdict(self.checkpoint),
+            # Checkpoints are an extensible, persisted contract.  Preserve
+            # unknown revision namespaces verbatim instead of coercing them
+            # through the legacy three-field dataclass.
+            "checkpoint": dict(self.checkpoint) if isinstance(self.checkpoint, dict) else asdict(self.checkpoint),
             "paused_from": self._paused_from.value if self._paused_from else None,
             "updated_at": self.updated_at,
         }

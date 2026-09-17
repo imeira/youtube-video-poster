@@ -3,9 +3,42 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+from src.hybrid.artifacts import atomic_json
+
+
+def record_plan_approval(plan_path: Path | str, approver: str) -> Path:
+    """Persist an explicit local human decision for these exact plan bytes."""
+    from src.hybrid.artifacts import atomic_json
+
+    path = Path(plan_path).resolve()
+    if not approver.strip():
+        raise ValueError("Human approver required")
+    checksum = _sha256(path)
+    target = path.parent / "approvals" / f"plan-{checksum}.json"
+    if target.exists():
+        require_plan_approval(path)
+        return target
+    atomic_json(target, {"kind": "plan", "path": str(path), "sha256": checksum,
+                         "approver": approver, "approved_at": datetime.now(UTC).isoformat()})
+    return target
+
+
+def require_plan_approval(plan_path: Path | str) -> None:
+    path = Path(plan_path).resolve()
+    checksum = _sha256(path)
+    target = path.parent / "approvals" / f"plan-{checksum}.json"
+    if not target.is_file():
+        raise ValueError("Persisted hash-bound human plan approval required")
+    receipt = json.loads(target.read_text(encoding="utf-8"))
+    if (receipt.get("kind") != "plan" or receipt.get("path") != str(path)
+            or receipt.get("sha256") != checksum or not receipt.get("approver", "").strip()
+            or not receipt.get("approved_at")):
+        raise ValueError("Invalid persisted plan approval receipt")
 
 
 class PublicationAuthorizationError(ValueError):
@@ -39,6 +72,33 @@ class ApprovalReceipt:
         path = Path(self.artifact_path)
         if not path.is_file() or _sha256(path) != self.artifact_sha256:
             raise PublicationAuthorizationError(f"Approved {self.artifact_kind} bytes no longer match receipt")
+
+
+def save_approval_receipt(path: Path | str, receipt: ApprovalReceipt) -> ApprovalReceipt:
+    """Atomically persist one immutable artifact-approval receipt."""
+    receipt.verify()
+    path = Path(path)
+    payload = asdict(receipt)
+    if path.exists():
+        if load_approval_receipt(path) != receipt:
+            raise PublicationAuthorizationError("approval receipt path is immutable")
+        return receipt
+    atomic_json(path, payload)
+    if load_approval_receipt(path) != receipt:
+        raise PublicationAuthorizationError("persisted approval receipt readback mismatch")
+    return receipt
+
+
+def load_approval_receipt(path: Path | str) -> ApprovalReceipt:
+    """Load only the closed schema used for a durable human artifact approval."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    expected = {"artifact_kind", "artifact_path", "artifact_sha256", "approver", "approved_at"}
+    if set(data) != expected:
+        raise PublicationAuthorizationError("approval receipt schema mismatch")
+    try:
+        return ApprovalReceipt(**data)
+    except TypeError as error:
+        raise PublicationAuthorizationError("approval receipt schema mismatch") from error
 
 
 @dataclass(frozen=True)

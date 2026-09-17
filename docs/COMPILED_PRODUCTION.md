@@ -38,7 +38,14 @@ executa mais o loop serial de imagem/animação depois do storyboard.
 
 `OperationalPipeline` persiste o pacote, recibos de QA, cópias hash-bound dos
 quadros aprovados, contact sheet e manifesto dentro de `episodes/<id>/compiled/`.
-O provider é injetado no despacho e toda chamada passa por `Executor.run()`.
+O provider é injetado no despacho e toda chamada passa por `Executor.run()`. No
+modo LIVE, `dispatch_baselines()` recebe mapas de preço e autoridade por request
+ID e os encaminha sem conversão ao executor; falta, troca ou expiração bloqueia a
+submissão antes do POST.
+
+Após o render, `DirectorAgent.complete_compiled_final_qa()` materializa captions
+VTT, thumbnail e metadata a partir do pacote/manifest congelados, executa a
+auditoria de evidências e só então abre o gate humano de thumbnail.
 
 Não migra nem reabre R029, R030 ou R031 do EP8. Requests já consumidos continuam
 congelados; qualquer ponte futura deve importar somente manifestos aprovados e

@@ -69,6 +69,26 @@ def job(tmp_path, **changes):
     return replace(base, **changes)
 
 
+
+
+@pytest.mark.asyncio
+async def test_executor_projects_completed_actual_cost_to_canonical_ledger(tmp_path):
+    from src.budget.guard import CostLedger
+    from src.config.loader import BudgetConfig
+
+    executor = Executor(tmp_path / "jobs.db", Config(limit=Decimal(6)))
+    provider = Provider(tmp_path)
+    request = job(tmp_path)
+    await executor.run(request, provider)
+
+    ledger_path = tmp_path / "costs.json"
+    executor.sync_cost_ledger(ledger_path, episode_id="EP8", budget=BudgetConfig(hard_limit_usd=6))
+
+    ledger = CostLedger.load(ledger_path, "EP8", BudgetConfig(hard_limit_usd=6))
+    assert ledger.spent == float(request.cost)
+    assert ledger.jobs[0]["job_id"] == request.request_id
+
+
 def test_individual_freeze_and_contact_sheet_gate(tmp_path):
     item = manifest(tmp_path)
     item.verify("TEST")

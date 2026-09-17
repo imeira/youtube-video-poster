@@ -27,22 +27,20 @@ class ScriptAgent(BaseAgent):
         references = research_data.get("references", [])
         if not facts:
             return AgentResult(success=False, error="Structured biblical facts are required")
-        target_words = int((target_duration_s / 60) * self.WORDS_PER_MINUTE)
-        narration = None
-        if self._llm and getattr(self._llm, "available", lambda: False)():
-            try:
-                narration = await self._generate_llm_script(research_data.get("story", ""), research_data.get("summary", ""), facts, references, target_words)
-            except (OSError, TimeoutError, ValueError) as exc:
-                logger.warning("LLM script generation failed, using source-bound template: %s", exc)
-        narration = narration or self._build_template_narration(research_data.get("summary", ""), facts)
+        # Segments are the authority.  The top-level narration is derived from
+        # them so QA, TTS and storyboard cannot silently review different text.
+        segments = self._build_segments(facts, references)
+        narration = "\n\n".join(segment["narration"] for segment in segments)
         word_count = len(narration.split())
-        packet_path = self._write_packet(episode_id, narration, facts, references, script_dir, target_duration_s)
+        packet_path = self._write_packet(
+            episode_id, narration, segments, references, script_dir, target_duration_s
+        )
         return AgentResult(success=True, data={
             "narration": narration,
             "word_count": word_count,
             "target_duration_s": target_duration_s,
             "estimated_duration_s": (word_count / self.WORDS_PER_MINUTE) * 60,
-            "source": "llm" if self._llm and narration else "template",
+            "source": "source_bound_template",
             "script_packet_path": str(packet_path) if packet_path else "",
         }, next_state="SCRIPT_QA")
 
@@ -66,14 +64,33 @@ class ScriptAgent(BaseAgent):
         lines.append("Essa história nos lembra que podemos confiar em Deus e conversar sobre isso com nossa família.")
         return "\n\n".join(lines)
 
-    def _write_packet(self, episode_id: str, narration: str, facts: list[str], references: list[dict], script_dir: str, target_duration_s: int) -> Path | None:
+    def _build_segments(self, facts: list[str], references: list[dict]) -> list[dict]:
+        labels = [self._reference_label(reference) for reference in references]
+        segments = [
+            {
+                "id": f"S{index:03d}",
+                "kind": "biblical_paraphrase",
+                "narration": self._adapt_for_children(fact),
+                "source_refs": labels,
+                "editorial_risk": "LOW",
+            }
+            for index, fact in enumerate(facts, start=1)
+        ]
+        segments.append({
+            "id": f"S{len(segments)+1:03d}",
+            "kind": "family_reflection",
+            "narration": "Essa história nos lembra que podemos confiar em Deus e conversar sobre isso com nossa família.",
+            "source_refs": [],
+            "editorial_risk": "LOW",
+        })
+        return segments
+
+    def _write_packet(self, episode_id: str, narration: str, segments: list[dict], references: list[dict], script_dir: str, target_duration_s: int) -> Path | None:
         if not script_dir:
             return None
         directory = Path(script_dir)
         directory.mkdir(parents=True, exist_ok=True)
         labels = [self._reference_label(reference) for reference in references]
-        segments = [{"id": f"S{index:03d}", "kind": "biblical_paraphrase", "narration": self._adapt_for_children(fact), "source_refs": labels, "editorial_risk": "LOW"} for index, fact in enumerate(facts, start=1)]
-        segments.append({"id": f"S{len(segments)+1:03d}", "kind": "family_reflection", "narration": "Essa história nos lembra que podemos confiar em Deus e conversar sobre isso com nossa família.", "source_refs": [], "editorial_risk": "LOW"})
         packet = {"schema_version": 1, "episode_id": episode_id, "audience": {"min_age": 6, "max_age": 10}, "narration": narration, "references": labels, "segments": segments, "target_duration_s": target_duration_s, "closing_duration_s": 4, "burn_subtitles": False}
         (directory / "narration.txt").write_text(narration, encoding="utf-8")
         packet_path = directory / "script.json"

@@ -307,6 +307,19 @@ class TestMetadataAgent:
         assert "Gênesis" in desc
 
     @pytest.mark.asyncio
+    async def test_description_uses_a_family_safe_cta_without_engagement_pressure(self, research_criacao):
+        result = await MetadataAgent(llm_provider=None).run(
+            episode_id="T", theme="Criação", research_data=research_criacao, scenes=[]
+        )
+
+        description = result.data["metadata"]["description"].lower()
+        assert "converse sobre esta história com sua família" in description
+        assert "inscreva" not in description
+        assert "like" not in description
+        assert "compartilhe" not in description
+        assert "coment" not in description
+
+    @pytest.mark.asyncio
     async def test_chapters_start_at_zero(self, research_criacao):
         agent = MetadataAgent(llm_provider=None)
         scenes = [
