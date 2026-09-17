@@ -23,7 +23,7 @@ O relatório possui `approved`, `findings` e hashes de todos os inputs. Falha se
 5. asset/manifest sem vínculo com a cena e a narração;
 6. ausência de captions VTT ou metadata com referência bíblica.
 
-Um relatório PASS só abre `WAITING_THUMBNAIL_APPROVAL` após o QA técnico de render também passar. O agente que produziu o artefato não escreve esse veredito.
+Um relatório PASS só abre `WAITING_THUMBNAIL_APPROVAL` após o QA técnico de render também passar. O agente que produziu o artefato não escreve esse veredito. Além de `ProductionEvidenceQA`, `PostProductionNarrativeQA` persiste uma revisão separada de segmentos bíblicos, faixa 6–10, CTA infantil e formato VTT. Ambos os recibos PASS são pré-requisitos de `FinalRenderQA`.
 
 ## Recuperação
 

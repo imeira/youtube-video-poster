@@ -382,7 +382,10 @@ class DirectorAgent:
             episode_id, published_script_hashes=published_script_hashes
         )
         if evidence.get("approved") is not True:
-            return {"delivery": delivery, "production_evidence_qa": evidence, "final_render_qa": None}
+            return {"delivery": delivery, "production_evidence_qa": evidence, "post_production_narrative_qa": None, "final_render_qa": None}
+        narrative = self.record_post_production_narrative_qa(episode_id)
+        if narrative.get("approved") is not True:
+            return {"delivery": delivery, "production_evidence_qa": evidence, "post_production_narrative_qa": narrative, "final_render_qa": None}
         fs = EpisodeFS(episode_id, self.config)
         final_qa = await self.record_final_render_qa(
             episode_id,
@@ -390,7 +393,12 @@ class DirectorAgent:
             render_receipt=delivery["render_receipt"],
             checker=checker,
         )
-        return {"delivery": delivery, "production_evidence_qa": evidence, "final_render_qa": final_qa}
+        return {
+            "delivery": delivery,
+            "production_evidence_qa": evidence,
+            "post_production_narrative_qa": narrative,
+            "final_render_qa": final_qa,
+        }
 
     async def start_episode(
         self,
@@ -653,6 +661,23 @@ class DirectorAgent:
         _write_json_file(fs.paths.qa_dir / "production_evidence_qa.json", report)
         return report
 
+    def record_post_production_narrative_qa(self, episode_id: str) -> dict[str, Any]:
+        """Persist the independent biblical narrative and child-safety verdict."""
+        from src.qa.post_production import PostProductionNarrativeQA
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.FINAL_QA:
+            raise ValueError("post-production narrative QA requires FINAL_QA state")
+        result = PostProductionNarrativeQA().review(
+            script_path=fs.paths.script_dir / "script.json",
+            captions_path=fs.paths.captions_vtt,
+            metadata_path=fs.paths.metadata_dir / "metadata.json",
+        )
+        report = {"approved": result.approved, "findings": list(result.findings), "report": result.report}
+        _write_json_file(fs.paths.qa_dir / "post_production_narrative_qa.json", report)
+        return report
+
     async def prepare_delivery_sidecars(self, episode_id: str, pipeline) -> dict[str, Any]:
         """Create required sidecar captions, thumbnail and metadata from frozen compiled media."""
         fs = EpisodeFS(episode_id, self.config)
@@ -778,6 +803,13 @@ class DirectorAgent:
             raise ValueError("passing production evidence QA is required before final render QA") from error
         if evidence.get("approved") is not True:
             raise ValueError("passing production evidence QA is required before final render QA")
+        narrative_path = fs.paths.qa_dir / "post_production_narrative_qa.json"
+        try:
+            narrative = _read_json_file(narrative_path)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("passing post-production narrative QA is required before final render QA") from error
+        if narrative.get("approved") is not True:
+            raise ValueError("passing post-production narrative QA is required before final render QA")
         result = (checker or FinalRenderQA()).review(video_path, render_receipt)
         report = {
             "approved": result.approved,

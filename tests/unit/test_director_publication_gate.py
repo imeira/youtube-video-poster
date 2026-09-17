@@ -86,6 +86,9 @@ async def test_director_enters_thumbnail_approval_only_after_independent_final_r
     (fs.paths.qa_dir / "production_evidence_qa.json").write_text(
         json.dumps({"approved": True, "findings": [], "report": {}}), encoding="utf-8"
     )
+    (fs.paths.qa_dir / "post_production_narrative_qa.json").write_text(
+        json.dumps({"approved": True, "findings": [], "report": {}}), encoding="utf-8"
+    )
     video = fs.paths.final_video
     video.write_bytes(b"final")
 
@@ -115,6 +118,24 @@ async def test_final_render_qa_requires_persisted_production_evidence(tmp_path, 
         await director.record_final_render_qa(
             "EP8", video_path=fs.paths.final_video, render_receipt={"hold_seconds": 4}, checker=PassingQA()
         )
+
+
+@pytest.mark.asyncio
+async def test_final_render_qa_requires_post_production_narrative_verdict(tmp_path, monkeypatch):
+    class PassingQA:
+        def review(self, video_path, render_receipt):
+            return FinalRenderQAResult(True, (), {})
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
+    (fs.paths.qa_dir / "production_evidence_qa.json").write_text(json.dumps({"approved": True}), encoding="utf-8")
+    fs.paths.final_video.write_bytes(b"final")
+
+    with pytest.raises(ValueError, match="post-production narrative QA"):
+        await director.record_final_render_qa("EP8", video_path=fs.paths.final_video, render_receipt={"hold_seconds": 4}, checker=PassingQA())
 
 
 def test_director_records_independent_production_evidence_qa(tmp_path, monkeypatch):
@@ -147,6 +168,22 @@ def test_director_records_independent_production_evidence_qa(tmp_path, monkeypat
 
     assert report["approved"] is True
     assert (fs.paths.qa_dir / "production_evidence_qa.json").is_file()
+
+
+def test_director_records_independent_post_production_narrative_qa(tmp_path, monkeypatch):
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
+    (fs.paths.script_dir / "script.json").write_text(json.dumps({"audience": {"min_age": 6, "max_age": 10}, "segments": [{"kind": "biblical_paraphrase", "narration": "Deus prometeu.", "source_refs": ["Gênesis 15"]}]}), encoding="utf-8")
+    fs.paths.captions_vtt.write_text("WEBVTT\n\n", encoding="utf-8")
+    (fs.paths.metadata_dir / "metadata.json").write_text(json.dumps({"references": [{"book": "Gênesis"}]}), encoding="utf-8")
+
+    report = director.record_post_production_narrative_qa("EP8")
+
+    assert report["approved"] is True
+    assert (fs.paths.qa_dir / "post_production_narrative_qa.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -249,6 +286,7 @@ async def test_compiled_finalizer_runs_evidence_and_final_media_qa_after_sidecar
     director = DirectorAgent()
     director.finalize_compiled_delivery = AsyncMock(return_value={"render_receipt": {"hold_seconds": 4}})
     director.record_production_evidence_qa = Mock(return_value={"approved": True})
+    director.record_post_production_narrative_qa = Mock(return_value={"approved": True})
     director.record_final_render_qa = AsyncMock(return_value={"approved": True})
 
     result = await director.complete_compiled_final_qa(
@@ -258,6 +296,7 @@ async def test_compiled_finalizer_runs_evidence_and_final_media_qa_after_sidecar
     assert result["final_render_qa"]["approved"] is True
     director.finalize_compiled_delivery.assert_awaited_once_with("EP8", "pipeline", "renderer", hold=4)
     director.record_production_evidence_qa.assert_called_once_with("EP8", published_script_hashes={"old-script"})
+    director.record_post_production_narrative_qa.assert_called_once_with("EP8")
     director.record_final_render_qa.assert_awaited_once()
 
 
