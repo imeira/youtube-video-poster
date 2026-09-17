@@ -336,6 +336,32 @@ class DirectorAgent:
         sidecars = await self.prepare_delivery_sidecars(episode_id, pipeline)
         return {"render_receipt": receipt, "sidecars": sidecars}
 
+    async def complete_compiled_final_qa(
+        self,
+        episode_id: str,
+        pipeline,
+        renderer,
+        *,
+        published_script_hashes: set[str] | frozenset[str],
+        checker=None,
+        hold: int = 4,
+    ) -> dict[str, Any]:
+        """Run the compiled render, evidence and independent final-media gates in order."""
+        delivery = await self.finalize_compiled_delivery(episode_id, pipeline, renderer, hold=hold)
+        evidence = self.record_production_evidence_qa(
+            episode_id, published_script_hashes=published_script_hashes
+        )
+        if evidence.get("approved") is not True:
+            return {"delivery": delivery, "production_evidence_qa": evidence, "final_render_qa": None}
+        fs = EpisodeFS(episode_id, self.config)
+        final_qa = await self.record_final_render_qa(
+            episode_id,
+            video_path=fs.paths.final_video,
+            render_receipt=delivery["render_receipt"],
+            checker=checker,
+        )
+        return {"delivery": delivery, "production_evidence_qa": evidence, "final_render_qa": final_qa}
+
     async def start_episode(
         self,
         theme: str,

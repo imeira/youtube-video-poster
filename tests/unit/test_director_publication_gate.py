@@ -241,6 +241,23 @@ async def test_compiled_delivery_finalizer_runs_sidecars_after_render():
     director.prepare_delivery_sidecars.assert_awaited_once_with("EP8", "pipeline")
 
 
+@pytest.mark.asyncio
+async def test_compiled_finalizer_runs_evidence_and_final_media_qa_after_sidecars():
+    director = DirectorAgent()
+    director.finalize_compiled_delivery = AsyncMock(return_value={"render_receipt": {"hold_seconds": 4}})
+    director.record_production_evidence_qa = Mock(return_value={"approved": True})
+    director.record_final_render_qa = AsyncMock(return_value={"approved": True})
+
+    result = await director.complete_compiled_final_qa(
+        "EP8", pipeline="pipeline", renderer="renderer", published_script_hashes={"old-script"}
+    )
+
+    assert result["final_render_qa"]["approved"] is True
+    director.finalize_compiled_delivery.assert_awaited_once_with("EP8", "pipeline", "renderer", hold=4)
+    director.record_production_evidence_qa.assert_called_once_with("EP8", published_script_hashes={"old-script"})
+    director.record_final_render_qa.assert_awaited_once()
+
+
 def test_director_rejection_supersedes_delivery_lineage_and_reopens_assembly(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
     director = DirectorAgent()
