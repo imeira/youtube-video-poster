@@ -54,7 +54,8 @@ def deployment(tmp_path, monkeypatch):
         reviewer=dict(url=live.REVIEW_URL, key_env="EP8_OPENROUTER_REVIEW_KEY", model="mock/vision-v1",
             provider="mock-provider", authority="mock independent reviewer deployment",
             supports_images=True, supports_json_schema=True, context_tokens=8192, max_tokens=1024,
-            price=dict(**evidence, prompt_per_million="1", completion_per_million="2", image="0", request="0")))
+            price=dict(**evidence, prompt_per_million="1", completion_per_million="2",
+                       image_per_item="0.001", request="0")))
     atomic_json(tmp_path / "deployment.json", c)
     with RevisionHarness(tmp_path / "run") as h:
         result = h.create_plan(mode="LIVE", request="New source-bound EP8", deployment=tmp_path / "deployment.json",
@@ -246,6 +247,9 @@ def test_fal_exact_wire_submit_recovery_qa_and_independent_delivery(deployment, 
         assert result["approved"] is True
         assert len(bodies[0]["messages"][1]["content"]) == 4  # text + candidate + BOTH portraits
         assert bodies[0]["provider"]["allow_fallbacks"] is False
+        assert bodies[0]["provider"]["max_price"] == {
+            "prompt": "1", "completion": "2", "image": "0.001", "request": "0"
+        }
         with pytest.raises(ValueError, match="ambiguous"):
             await deps.visual_qa(packet, scenes[0], deps.plan["references"])
         run.executor.qa(job.request_id, receipt["result_sha256"], False, "mock rejection")

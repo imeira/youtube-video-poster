@@ -73,7 +73,7 @@ def build():
             context_tokens=dict(type="integer", minimum=4096, maximum=2000000),
             max_tokens=dict(type="integer", minimum=256, maximum=2048),
             price=obj(**evidence, prompt_per_million=money, completion_per_million=money,
-                      image=const("0"), request=const("0"))))
+                      image_per_item=money, request=money)))
     schema.update({"$schema": "https://json-schema.org/draft/2020-12/schema", "title": "EP8 explicit LIVE deployment v1"})
     (ROOT / "revision_deployment.schema.json").write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
     def blank(spec):

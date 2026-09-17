@@ -257,7 +257,7 @@
             "valid_until",
             "prompt_per_million",
             "completion_per_million",
-            "image",
+            "image_per_item",
             "request"
           ],
           "properties": {
@@ -287,13 +287,13 @@
               "type": "string",
               "pattern": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?"
             },
-            "image": {
+            "image_per_item": {
               "type": "string",
-              "const": "0"
+              "pattern": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?"
             },
             "request": {
               "type": "string",
-              "const": "0"
+              "pattern": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?"
             }
           }
         }
