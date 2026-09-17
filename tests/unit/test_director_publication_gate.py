@@ -8,6 +8,7 @@ import pytest
 
 from src.agents.director import DirectorAgent
 from src.approval.receipts import ApprovalReceipt, save_approval_receipt
+from src.pipeline.revision import RevisionRegistry
 from src.providers.base import PublishResult
 from src.qa.final_render import FinalRenderQAResult
 from src.state.machine import EpisodeState, EpisodeStateStore
@@ -161,6 +162,30 @@ async def test_director_delivers_thumbnail_and_video_with_separate_receipts(tmp_
     assert {receipt["artifact_kind"] for receipt in receipts} == {"thumbnail", "video"}
     assert (fs.paths.qa_dir / "delivery" / "thumbnail.json").is_file()
     assert (fs.paths.qa_dir / "delivery" / "video.json").is_file()
+
+
+def test_director_rejection_supersedes_delivery_lineage_and_reopens_assembly(tmp_path, monkeypatch):
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(
+        episode_id="EP8", current_state=EpisodeState.WAITING_THUMBNAIL_APPROVAL
+    ).save(fs.paths.state_json)
+    thumbnail = fs.paths.thumbnails_dir / "thumbnail.png"
+    thumbnail.write_bytes(b"thumbnail")
+    video = fs.paths.final_video
+    video.write_bytes(b"video")
+    registry = RevisionRegistry(fs.paths.qa_dir)
+    registry.register("thumbnail-v1", thumbnail, revision=1)
+    registry.register("video-v1", video, revision=1, depends_on=["thumbnail-v1"])
+
+    report = director.reject_delivered_artifact("EP8", artifact_id="thumbnail-v1", reason="imagem inadequada")
+
+    assert report["artifact_id"] == "thumbnail-v1"
+    assert registry.read("thumbnail-v1")["status"] == "SUPERSEDED"
+    assert registry.read("video-v1")["status"] == "SUPERSEDED"
+    assert EpisodeStateStore.load(fs.paths.state_json).current_state is EpisodeState.ASSEMBLING
 
 
 def test_director_records_only_exact_approval_of_delivered_media(tmp_path, monkeypatch):

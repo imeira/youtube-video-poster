@@ -690,6 +690,29 @@ class DirectorAgent:
         state.save(fs.paths.state_json)
         return receipt
 
+    def reject_delivered_artifact(self, episode_id: str, *, artifact_id: str, reason: str) -> dict[str, Any]:
+        """Supersede rejected approval media and every dependent artifact before rebuilding."""
+        from src.pipeline.revision import RevisionRegistry
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state not in {
+            EpisodeState.WAITING_THUMBNAIL_APPROVAL,
+            EpisodeState.WAITING_VIDEO_APPROVAL,
+            EpisodeState.WAITING_FINAL_APPROVAL,
+        }:
+            raise ValueError("delivery rejection requires an active approval gate")
+        registry = RevisionRegistry(fs.paths.qa_dir)
+        registry.reject(artifact_id, reason=reason)
+        receipt = registry.read(artifact_id)
+        state.transition_to(
+            EpisodeState.ASSEMBLING,
+            agent="RevisionRegistry",
+            note=f"rejected {artifact_id}; dependent delivery lineage superseded",
+        )
+        state.save(fs.paths.state_json)
+        return receipt
+
     def _build_visual_strategy_engine(self, local_provider, cloud_provider):
         """Build the visual router from the central episode limits."""
         from src.providers.gpu.gpu_compute_provider import GenerativeVideoConfig
