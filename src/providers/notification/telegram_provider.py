@@ -6,7 +6,7 @@
 §95: Final approval with APROVAR/REJEITAR.
 
 Uses Telegram Bot API directly (JSON payload to avoid UTF-8 encoding issues with curl).
-Bot: @HermesLocalIMJBot, chat_id=141718934
+Bot credentials and destination are loaded from explicit configuration.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ class TelegramNotificationProvider(NotificationProvider):
         if bot_token is None:
             bot_token = self._read_env("TELEGRAM_BOT_TOKEN")
         if chat_id is None:
-            chat_id = self._read_env("TELEGRAM_HOME_CHANNEL", default="141718934")
+            chat_id = self._read_env("TELEGRAM_HOME_CHANNEL")
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.api_base = f"https://api.telegram.org/bot{bot_token}"
@@ -57,6 +57,8 @@ class TelegramNotificationProvider(NotificationProvider):
     ) -> int:
         """Send a text message. Returns message_id (§7 format)."""
         chat_id = chat_id or self.chat_id
+        if not str(chat_id).strip():
+            raise ValueError("explicit Telegram destination required")
         payload: dict[str, Any] = {"chat_id": int(chat_id), "text": text}
         if inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
@@ -82,6 +84,9 @@ class TelegramNotificationProvider(NotificationProvider):
         import mimetypes
         import uuid
         path = Path(path)
+        chat_id = chat_id or self.chat_id
+        if not str(chat_id).strip():
+            raise ValueError("explicit Telegram destination required")
         if path.stat().st_size > 50 * 1024 * 1024:
             raise ValueError("Telegram media exceeds 50 MiB; delivery blocked")
         boundary = "ep8-" + uuid.uuid4().hex

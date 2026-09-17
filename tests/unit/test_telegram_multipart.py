@@ -63,3 +63,15 @@ def test_large_media_never_falls_back_to_message(tmp_path, monkeypatch, kind):
     monkeypatch.setattr('urllib.request.urlopen', forbidden)
     with pytest.raises(ValueError, match='50 MiB'):
         asyncio.run(getattr(TelegramNotificationProvider('fake', '123'), 'send_' + kind)('123', str(path), 'caption'))
+
+
+def test_missing_destination_fails_before_http(tmp_path, monkeypatch):
+    path = tmp_path / 'photo.png'
+    path.write_bytes(b'image')
+    monkeypatch.setattr(TelegramNotificationProvider, '_read_env', lambda *a, **k: '')
+    monkeypatch.setattr('urllib.request.urlopen', lambda *a, **k: pytest.fail('HTTP attempted'))
+    provider = TelegramNotificationProvider()
+    with pytest.raises(ValueError, match='explicit Telegram destination'):
+        asyncio.run(provider.send_photo('', str(path), 'caption'))
+    with pytest.raises(ValueError, match='explicit Telegram destination'):
+        asyncio.run(provider.send_message('', 'text'))
