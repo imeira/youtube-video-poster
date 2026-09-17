@@ -53,6 +53,34 @@ async def test_publication_controller_requires_exact_command_then_persists_remot
 
 
 @pytest.mark.asyncio
+async def test_publication_recovers_persisted_readback_without_second_upload(tmp_path: Path):
+    class CountingPublisher(ReadbackPublisher):
+        def __init__(self):
+            self.uploads = 0
+
+        async def upload(self, *args, **kwargs):
+            self.uploads += 1
+            return await super().upload(*args, **kwargs)
+
+    _video, _thumbnail, video_receipt, thumbnail_receipt = approvals(tmp_path)
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text(json.dumps({"title": "Uma história fiel"}), encoding="utf-8")
+    state_path = tmp_path / "state.json"
+    EpisodeStateStore("EP8", current_state=EpisodeState.WAITING_FINAL_APPROVAL).save(state_path)
+    publisher = CountingPublisher()
+    controller = PublicationController(publisher)
+    receipt_path = tmp_path / "qa" / "publication.json"
+    await controller.publish(state_path=state_path, expected_command="PUBLICAR EP8", command="PUBLICAR EP8", video=video_receipt, thumbnail=thumbnail_receipt, metadata_path=metadata, publication_receipt_path=receipt_path)
+    EpisodeStateStore("EP8", current_state=EpisodeState.UPLOADING).save(state_path)
+
+    receipt = await controller.publish(state_path=state_path, expected_command="PUBLICAR EP8", command="PUBLICAR EP8", video=video_receipt, thumbnail=thumbnail_receipt, metadata_path=metadata, publication_receipt_path=receipt_path)
+
+    assert receipt["video_id"] == "video-123"
+    assert publisher.uploads == 1
+    assert EpisodeStateStore.load(state_path).current_state is EpisodeState.PUBLISHED
+
+
+@pytest.mark.asyncio
 async def test_publication_controller_does_not_upload_without_exact_separate_command(tmp_path: Path):
     _video, _thumbnail, video_receipt, thumbnail_receipt = approvals(tmp_path)
     metadata = tmp_path / "metadata.json"

@@ -53,6 +53,33 @@ class PublicationController:
         receipt_path = Path(publication_receipt_path)
         metadata_path = Path(metadata_path)
         state = EpisodeStateStore.load(state_path)
+        if state.current_state is EpisodeState.UPLOADING and receipt_path.is_file():
+            try:
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise PublicationControllerError("publication recovery receipt is unreadable") from error
+            video.verify()
+            thumbnail.verify()
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("video_path") != video.artifact_path
+                or receipt.get("thumbnail_path") != thumbnail.artifact_path
+                or receipt.get("metadata_sha256") != _sha256(metadata_path)
+                or not isinstance(receipt.get("video_id"), str)
+                or not receipt["video_id"]
+            ):
+                raise PublicationControllerError("publication recovery receipt does not bind current approved media")
+            readback_method = getattr(self.publisher, "readback", None)
+            if not callable(readback_method):
+                raise PublicationControllerError("publisher readback is required before publication")
+            readback = readback_method(receipt["video_id"])
+            if inspect.isawaitable(readback):
+                readback = await readback
+            if readback != receipt.get("readback"):
+                raise PublicationControllerError("publication recovery readback mismatch")
+            state.transition_to(EpisodeState.PUBLISHED, agent="PublicationController", note="remote readback recovered")
+            state.save(state_path)
+            return receipt
         if state.current_state != EpisodeState.WAITING_FINAL_APPROVAL:
             raise PublicationControllerError("publication requires WAITING_FINAL_APPROVAL")
         if not metadata_path.is_file():
