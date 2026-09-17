@@ -69,6 +69,9 @@ class OfflineCoordinator:
 
     @staticmethod
     def _binding(episode, manifest, contract, hold):
+        if episode.source_binding is not None:
+            from src.hybrid.ep8_offline import verify_source
+            verify_source(episode, manifest, contract, hold)
         episode.audio.verify(episode.audio.mode)
         manifest.verify(episode.audio.mode)
         if len(episode.frames) != len(manifest.assets):
@@ -85,8 +88,11 @@ class OfflineCoordinator:
             or contract.book_subtitle != "— Gênesis 15–18"
         ):
             raise ValueError("EP8 requires its exact title and biblical subtitle")
-        return {"episode_id": episode.episode_id, "compilation": episode.checksum,
-                "manifest": manifest.checksum, "copy": asdict(contract), "hold": hold}
+        binding = {"episode_id": episode.episode_id, "compilation": episode.checksum,
+                   "manifest": manifest.checksum, "copy": asdict(contract), "hold": hold}
+        if episode.source_binding is not None:
+            binding["source"] = episode.source_binding
+        return binding
 
     def approve_plan(self, episode, manifest, contract, *, reviewer, hold=4):
         if not reviewer.strip():
@@ -97,6 +103,9 @@ class OfflineCoordinator:
 
     @staticmethod
     def _verify_pair(pair):
+        if pair["binding"].get("source") is not None:
+            from src.hybrid.ep8_offline import Ep8OfflineAdapter
+            Ep8OfflineAdapter.verify_files(pair["binding"]["source"]["bindings"])
         for kind in ("video", "thumbnail"):
             asset = pair[kind]
             if sha256(asset["path"]) != asset["sha256"]:
@@ -186,7 +195,10 @@ class OfflineCoordinator:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("approve-plan", "prepare", "approve", "reject", "status"))
+    parser.add_argument("action", choices=("import-ep8", "approve-plan", "prepare", "approve", "reject", "status"))
+    parser.add_argument("--source-root", type=Path)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--source-revision")
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--compiled", type=Path)
     parser.add_argument("--manifest", type=Path)
@@ -199,8 +211,18 @@ def main(argv=None):
     parser.add_argument("--sha256")
     parser.add_argument("--feedback", default="")
     args = parser.parse_args(argv)
-    coordinator = OfflineCoordinator(args.workspace)
     try:
+        if args.action == "import-ep8":
+            from src.hybrid.ep8_offline import Ep8OfflineAdapter
+            if args.source_root is None:
+                parser.error("--source-root required")
+            result = Ep8OfflineAdapter(args.source_root).build(args.workspace,
+                dry_run=args.dry_run, expected_revision=args.source_revision)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.source_root is not None or args.dry_run or args.source_revision is not None:
+            parser.error("source options and --dry-run require import-ep8")
+        coordinator = OfflineCoordinator(args.workspace)
         if args.action in {"approve-plan", "prepare"}:
             if not all((args.compiled, args.manifest, args.copy)):
                 parser.error("compiled, manifest and copy files required")
@@ -215,7 +237,7 @@ def main(argv=None):
         else:
             result = coordinator.decide(args.kind, args.revision, args.sha256,
                 approved=args.action == "approve", reviewer=args.reviewer, feedback=args.feedback)
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, KeyError, TypeError) as error:
         parser.error(str(error))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

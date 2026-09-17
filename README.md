@@ -2,6 +2,26 @@
 
 ## Offline EP8 finishing
 
+Import the current EP8 authority into a separate workspace without changing the
+episode directory or generating media:
+
+```text
+studio offline import-ep8 --source-root C:/HermesStudio/episodes/EP8_PROMISE_SON_20260901 --workspace delivery --dry-run
+studio offline import-ep8 --source-root C:/HermesStudio/episodes/EP8_PROMISE_SON_20260901 --workspace delivery --source-revision REVISION_FROM_DRY_RUN
+```
+
+The dry run writes nothing and reports `VERIFIED` only after checking all 39
+current state-bound frames, the visual freeze, narration manifest, script,
+contact sheet and timeline. The old cached import report is not authoritative.
+The build requires that exact source revision and writes `compiled.json`,
+`manifest.json`, `copy.json` and a copy of the existing contact sheet under the
+returned `packet` path. No provider, publishing, generation or approval occurs.
+Use those three JSON paths with the coordinator commands below and the reported
+closing hold. Source changes invalidate plan preparation and delivery decisions;
+rerun the dry run and import the new revision, then obtain a new plan receipt.
+Existing packets are never overwritten. The source root must remain available
+for verification; output workspaces inside it (including resolved links) are rejected.
+
 `studio offline` (or `python -m src.hybrid.offline`) consumes an existing
 `CompiledEpisode` JSON, an approved `Manifest` JSON in compiled frame order,
 and a `ThumbnailContract` JSON. All inputs must already have been reviewed.

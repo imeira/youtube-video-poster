@@ -55,6 +55,7 @@ class CompiledEpisode:
     episode_id: str
     audio: FrozenAsset
     frames: tuple[FrameSpec, ...]
+    source_binding: dict | None = None
 
     @classmethod
     def compile(cls, episode_id: str, audio: FrozenAsset, frames):
@@ -75,10 +76,16 @@ class CompiledEpisode:
 
     @property
     def checksum(self):
-        return digest(asdict(self))
+        value = asdict(self)
+        if self.source_binding is None:
+            value.pop("source_binding")
+        return digest(value)
 
     def save(self, path):
-        atomic_json(path, {"episode": asdict(self), "checksum": self.checksum})
+        value = asdict(self)
+        if self.source_binding is None:
+            value.pop("source_binding")
+        atomic_json(path, {"episode": value, "checksum": self.checksum})
 
     @classmethod
     def load(cls, path):
@@ -86,6 +93,8 @@ class CompiledEpisode:
         episode = raw["episode"]
         audio = FrozenAsset(**{**episode["audio"], "path": Path(episode["audio"]["path"])})
         result = cls.compile(episode["episode_id"], audio, (FrameSpec(**frame) for frame in episode["frames"]))
+        if episode.get("source_binding") is not None:
+            result = cls(result.episode_id, result.audio, result.frames, episode["source_binding"])
         if raw.get("checksum") != result.checksum:
             raise ValueError("compiled episode checksum mismatch")
         return result
