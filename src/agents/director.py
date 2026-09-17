@@ -335,6 +335,12 @@ class DirectorAgent:
         """Compose a subtitle-free local delivery master from the approved manifest only."""
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
+        receipt_path = fs.paths.qa_dir / "compiled_render_receipt.json"
+        if state.current_state is EpisodeState.FINAL_QA and fs.paths.final_video.is_file() and receipt_path.is_file():
+            receipt = _read_json_file(receipt_path)
+            if receipt.get("hold_seconds") not in (3, 4, 5):
+                raise ValueError("compiled render recovery receipt is invalid")
+            return receipt
         if state.current_state is not EpisodeState.PLANNING_ANIMATION:
             raise ValueError("compiled rendering requires PLANNING_ANIMATION state")
         if hold not in (3, 4, 5):

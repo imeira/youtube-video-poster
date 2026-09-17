@@ -18,6 +18,18 @@ from src.state.machine import EpisodeState, EpisodeStateStore
 from src.storage.episode_fs import EpisodeFS
 
 
+def test_compiled_render_recovery_returns_existing_receipt_without_rerender(tmp_path, monkeypatch):
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
+    fs.paths.final_video.write_bytes(b"existing-final")
+    (fs.paths.qa_dir / "compiled_render_receipt.json").write_text(json.dumps({"hold_seconds": 4}), encoding="utf-8")
+
+    assert director.render_compiled_video("EP8", pipeline=None, renderer=None) == {"hold_seconds": 4}
+
+
 @pytest.mark.asyncio
 async def test_final_approval_waits_for_separate_publication_command(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
