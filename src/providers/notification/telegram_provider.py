@@ -69,66 +69,41 @@ class TelegramNotificationProvider(NotificationProvider):
         )
         resp = urllib.request.urlopen(req, timeout=15)
         result = json.loads(resp.read())
-        return result["result"]["message_id"]
+        return self._message_id(result)
+
+    @staticmethod
+    def _message_id(result):
+        value = result.get("result", {}).get("message_id")
+        if result.get("ok") is not True or type(value) is not int or value <= 0:
+            raise ValueError("Telegram did not confirm a positive message_id")
+        return value
+
+    def _send_media(self, kind, chat_id, path, caption):
+        import mimetypes
+        import uuid
+        path = Path(path)
+        if path.stat().st_size > 50 * 1024 * 1024:
+            raise ValueError("Telegram media exceeds 50 MiB; delivery blocked")
+        boundary = "ep8-" + uuid.uuid4().hex
+        chunks = []
+        for name, value in (("chat_id", chat_id or self.chat_id), ("caption", caption)):
+            chunks.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
+                           f'\r\n\r\n{value}\r\n').encode("utf-8"))
+        filename = path.name.replace('"', '_').replace('\r', '_').replace('\n', '_').replace('\\', '_')
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        chunks.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{kind}"; '
+                       f'filename="{filename}"\r\nContent-Type: {mime}\r\n\r\n').encode("utf-8"))
+        chunks.extend((path.read_bytes(), f"\r\n--{boundary}--\r\n".encode()))
+        req = urllib.request.Request(f"{self.api_base}/send{kind.title()}", data=b"".join(chunks),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        with urllib.request.urlopen(req, timeout=60) as response:
+            return self._message_id(json.loads(response.read()))
 
     async def send_photo(self, chat_id: str, photo_path: str, caption: str = "") -> int:
-        """Send a photo (thumbnail preview)."""
-        chat_id = chat_id or self.chat_id
-        with open(photo_path, "rb") as photo:
-            import urllib.request as ur
-            boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
-            body = f"--{boundary}\r\n".encode()
-            body += f'Content-Disposition: form-data; name="chat_id"\r\n\r\n{chat_id}\r\n'.encode()
-            body += f"--{boundary}\r\n".encode()
-            body += f'Content-Disposition: form-data; name="photo"; filename="{Path(photo_path).name}"\r\n'.encode()
-            body += b"Content-Type: image/png\r\n\r\n"
-            body += photo.read()
-            body += f"\r\n--{boundary}--\r\n".encode()
-            if caption:
-                # Add caption as a separate field
-                pass
-            req = ur.Request(
-                f"{self.api_base}/sendPhoto",
-                data=body,
-                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            )
-            resp = ur.urlopen(req, timeout=30)
-            return json.loads(resp.read())["result"]["message_id"]
+        return self._send_media("photo", chat_id, photo_path, caption)
 
     async def send_video(self, chat_id: str, video_path: str, caption: str = "") -> int:
-        """Send a video (final approval preview).
-
-        Note: Bot API limit is 50MB. For larger files, use a compressed preview.
-        """
-        chat_id = chat_id or self.chat_id
-        file_size = os.path.getsize(video_path)
-        if file_size > 50 * 1024 * 1024:
-            # Too large — send a message with a download link instead
-            return await self.send_message(
-                chat_id=chat_id,
-                text=f"Video too large for Telegram ({file_size // 1024 // 1024}MB). Preview at: {video_path}",
-            )
-
-        import urllib.request as ur
-        boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
-        body = f"--{boundary}\r\n".encode()
-        body += f'Content-Disposition: form-data; name="chat_id"\r\n\r\n{chat_id}\r\n'.encode()
-        if caption:
-            body += f'Content-Disposition: form-data; name="caption"\r\n\r\n{caption}\r\n'.encode()
-            body += f"--{boundary}\r\n".encode()
-        body += f'Content-Disposition: form-data; name="video"; filename="{Path(video_path).name}"\r\n'.encode()
-        body += b"Content-Type: video/mp4\r\n\r\n"
-        with open(video_path, "rb") as vid:
-            body += vid.read()
-        body += f"\r\n--{boundary}--\r\n".encode()
-
-        req = ur.Request(
-            f"{self.api_base}/sendVideo",
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        )
-        resp = ur.urlopen(req, timeout=60)
-        return json.loads(resp.read())["result"]["message_id"]
+        return self._send_media("video", chat_id, video_path, caption)
 
     async def execute(self, **params) -> Any:
         """Execute notification."""

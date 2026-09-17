@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from src.hybrid.render import probe
+import subprocess
+
+from src.hybrid.artifacts import sha256
+from src.hybrid.render import probe, measure_loudness
 
 
 @dataclass(frozen=True)
@@ -27,10 +30,28 @@ class FinalRenderQA:
         video_path = Path(video_path)
         if not video_path.is_file():
             return FinalRenderQAResult(False, ("FINAL_VIDEO_MISSING",), {})
-        media = probe(video_path)
+        try:
+            media = probe(video_path)
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError):
+            return FinalRenderQAResult(False, ("FINAL_MEDIA_INVALID",), {})
         videos = [stream for stream in media["streams"] if stream.get("codec_type") == "video"]
         audios = [stream for stream in media["streams"] if stream.get("codec_type") == "audio"]
         report: dict[str, Any] = {"path": str(video_path.resolve())}
+        if any(stream.get("codec_type") == "subtitle" for stream in media["streams"]):
+            findings.append("SUBTITLE_STREAMS_FORBIDDEN")
+        if render_receipt.get("output_sha256") is not None and render_receipt["output_sha256"] != sha256(video_path):
+            findings.append("RENDER_HASH_MISMATCH")
+        try:
+            measured = measure_loudness(video_path)
+            report["loudness"] = measured
+            if not -17 <= measured["integrated_lufs"] <= -15:
+                findings.append("INTEGRATED_LOUDNESS_OUT_OF_RANGE")
+            if measured["true_peak_dbtp"] > -1:
+                findings.append("TRUE_PEAK_OUT_OF_RANGE")
+            if "loudness" in render_receipt and render_receipt["loudness"] != measured:
+                findings.append("LOUDNESS_RECEIPT_MISMATCH")
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError):
+            findings.append("FINAL_AUDIO_ANALYSIS_FAILED")
         if len(videos) != 1:
             findings.append("EXACTLY_ONE_VIDEO_STREAM_REQUIRED")
         if len(audios) != 1:
@@ -57,7 +78,8 @@ class FinalRenderQA:
                 abs(float(stream.get("duration", 0)) - expected) > .08 for stream in (*videos, *audios)
             ):
                 findings.append("STREAM_DURATION_MISMATCH")
-        if render_receipt.get("subtitles_sha256") is not None:
+        if render_receipt.get("subtitles_sha256", "missing") is not None or any(
+                term in render_receipt.get("filtergraph", "").lower() for term in ("subtitles=", "ass=", "drawtext=")):
             findings.append("BURNED_SUBTITLES_FORBIDDEN")
         if render_receipt.get("hold_seconds") not in (3, 4, 5):
             findings.append("CLOSING_HOLD_MUST_BE_3_TO_5_SECONDS")

@@ -37,3 +37,21 @@ Todo FAIL é preservado e bloqueia promoção. Correção requer sucessor hash-b
 - CTA proibido, referência ausente ou licença ausente: FAIL;
 - manifest/captions/metadata mutados após a coleta: FAIL;
 - Director não avança de `FINAL_QA` sem relatório PASS persistido.
+
+## Encoded final-media contract (fresh EP8 revision)
+
+`FinalRenderQA` probes the delivered container and runs a decode-only FFmpeg
+loudnorm analysis on its encoded AAC track. Parsed integrated loudness must be
+-16 LUFS within 1 LU; measured true peak must be at most -1 dBTP. The render
+receipt persists the measurements, and QA measures again rather than trusting
+target settings. Corrupt media, silence/nonfinite readings, mismatched receipts,
+subtitle streams, and subtitle/drawtext burn filters fail closed. Captions remain
+separate sidecars. This supplements H.264/AAC, geometry, duration and closing-hold
+checks without a second encode.
+
+The fresh revision route delivers only the thumbnail after QA. Exact thumbnail
+approval enters READY_VIDEO_DELIVERY; a later run/resume delivers the frozen
+video and opens WAITING_VIDEO_APPROVAL. Exact video approval stops at
+WAITING_FINAL_APPROVAL. No publication operation is exposed by this route.
+Executable media negatives live in tests/unit/test_final_render_qa.py; public
+CLI and crash recovery coverage lives in tests/unit/test_new_ep8_revision.py.

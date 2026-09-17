@@ -21,11 +21,13 @@ Changes require a new revision, invalidating both media approvals together.
 script, independent ScriptQA, injected TTS WordBoundary, semantic storyboard,
 canonical references, Director compiled activation, transactional Executor image
 dispatch, independent visual QA/promotion, freeze/contact sheet, one local FFmpeg
-encode, sidecars/thumbnail, production evidence QA, narrative QA, final ffprobe QA,
-and separate auditable Telegram sends. It stops at WAITING_THUMBNAIL_APPROVAL.
-`approve --kind thumbnail --artifact-hash HASH --reviewer NAME` opens
-WAITING_VIDEO_APPROVAL. The equivalent video approval stops at
-WAITING_FINAL_APPROVAL; only the existing separate publication path can publish.
+encode, sidecars/thumbnail, production evidence QA, narrative QA, and final media QA.
+It freezes both artifacts but sends ONLY the thumbnail, then stops at
+WAITING_THUMBNAIL_APPROVAL. `approve --kind thumbnail --artifact-hash HASH
+--reviewer NAME` records approval and enters READY_VIDEO_DELIVERY without sending.
+A subsequent public `run` or `resume` sends the exact frozen video and stops at
+WAITING_VIDEO_APPROVAL. Only exact video approval enters WAITING_FINAL_APPROVAL.
+This route has no final-approval or publish action; publication is unreachable.
 `reject --reason TEXT` atomically supersedes both lineages and creates the next
 WAITING_PLAN_APPROVAL revision. Silence never approves. `status` is read-only.
 
@@ -68,6 +70,7 @@ python -m src.hybrid.revision create-plan --workspace C:/Temp/ep8-fresh --mode T
 python -m src.hybrid.revision approve-plan --workspace C:/Temp/ep8-fresh --plan-hash PLAN_HASH --reviewer human
 python -m src.hybrid.revision run --workspace C:/Temp/ep8-fresh
 python -m src.hybrid.revision approve --workspace C:/Temp/ep8-fresh --kind thumbnail --artifact-hash THUMB_HASH --reviewer human
+python -m src.hybrid.revision resume --workspace C:/Temp/ep8-fresh
 python -m src.hybrid.revision approve --workspace C:/Temp/ep8-fresh --kind video --artifact-hash VIDEO_HASH --reviewer human
 ```
 
@@ -168,7 +171,7 @@ adapters; dynamically imported factories now receive both root and plan.
 python -m src.hybrid.revision create-plan --workspace C:/Temp/ep8-live --mode LIVE --deployment C:/Deploy/ep8.json --references C:/Deploy/references.json --predecessors C:/Deploy/rejected.json --chat-id "-123456789" --request "New EP8: Abraham and Sarah"
 # Review revision.json and every bound input before recording actual approval.
 python -m src.hybrid.revision approve-plan --workspace C:/Temp/ep8-live --plan-hash EXACT_PRINTED_HASH --reviewer ACTUAL_HUMAN
-# This command performs LIVE creation and both Telegram deliveries.
+# This command performs LIVE creation and thumbnail delivery only.
 python -m src.hybrid.revision run --workspace C:/Temp/ep8-live
 ```
 
@@ -258,3 +261,54 @@ revision. Negative tests inject stale LIVE prices, missing credentials/authority
 budget exhaustion, image crashes, lost Telegram responses, encoder interruption,
 tampered bindings, mode mismatch and rejected media reuse. FFmpeg-specific tests
 skip explicitly if the local tools are unavailable.
+
+
+## Final audit closure and executable requirements
+
+Every plan hashes the package implementation bytes: revision orchestration,
+production/render, final/narrative/evidence/script QA, thumbnail composition,
+Telegram transport, and the checked script JSON. LIVE also hashes revision_live.py.
+Paths resolve relative to the installed package, never the working directory.
+Changed code or checked script invalidates approval before work or delivery.
+Legacy plans missing implementation bindings are rejected and require a new plan.
+After an implementation upgrade, create a fresh workspace and approve a new plan
+with predecessor evidence; old approvals cannot be carried across versions.
+
+Each Telegram gate has a write-ahead intent binding plan, destination, kind and
+frozen media SHA256. A positive integer message ID and exact intent are persisted
+in a separate receipt before committing the gate. Resume repairs a missing gate
+commit from that receipt without sending again. An intent without a receipt is
+ambiguous and blocks permanently within that revision; it is never resent.
+Rejection retires both approvals. Silence and stale hashes cannot advance.
+Multipart bodies contain distinct CRLF-delimited chat_id, caption and file parts;
+JSON must report ok=true and a positive integer message_id. Files over 50 MiB
+fail closed with no text/path substitution.
+
+The single encode derives AAC using loudnorm with a -16 LUFS target and -2 dBTP
+headroom. A decode-only loudnorm analysis measures the encoded media and persists
+input_i/input_tp as integrated_lufs/true_peak_dbtp in the render receipt.
+FinalRenderQA independently repeats that analysis and requires -17 through -15
+LUFS and true peak <= -1 dBTP. Missing, nonfinite, corrupt, mismatched or out-of-range
+measurements block delivery. Analysis does not encode another video. Embedded
+subtitle streams and subtitle/drawtext burn filters are rejected; captions stay
+sidecars and the zero-burn receipt remains required.
+
+The exact thumbnail layers are `UMA PROMESSA IMPOSSÍVEL?`,
+`A promessa de um filho para Abraão e Sara`, and `— Gênesis 15–18`.
+Anti-clickbait prohibitions remain enforced. Recompressed/resized predecessor
+thumbnails remain subject to perceptual rejection.
+
+| Requirement | Local executable evidence |
+|---|---|
+| Sequential public gates, silence, stale hashes, supersession, frozen media | test_new_ep8_revision.py public CLI end-to-end |
+| Intent/receipt crash recovery for each gate; no ambiguous resend | test_delivery_recovery_both_gates |
+| Exact multipart photo/video bytes, captions, response failures, size ceiling | test_telegram_multipart.py |
+| Real encoded audio acceptance, quiet/loud/peak/silence/corrupt/subtitle negatives | test_final_render_qa.py |
+| Exact copy, anti-clickbait and near-duplicate predecessor thumbnail rejection | test_exact_safe_curiosity_contract_and_near_duplicate_thumbnail |
+| Package-relative code/script hashes; mutate a bound copy only | implementation binding tests in test_new_ep8_revision.py |
+| Canonical references, biblical scope, exact WordBoundary, budget and provider isolation | existing revision/live adapter tests |
+| Bounded image/QA overlap, one encode, no heroes/publication | existing revision and compiled pipeline tests |
+
+Run all of these under `scripts/run_offline_tests.py`, which denies provider
+network access and secret/legacy episode reads. TEST fixtures establish local
+contracts, not actual provider success.

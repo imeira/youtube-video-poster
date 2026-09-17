@@ -259,7 +259,7 @@ def test_fal_exact_wire_submit_recovery_qa_and_independent_delivery(deployment, 
     sends = []
     def urlopen(request, **kwargs):
         sends.append(request.full_url.rsplit("/", 1)[-1])
-        return SimpleNamespace(read=lambda: json.dumps({"result": {"message_id": len(sends)}}).encode())
+        return __import__("io").BytesIO(json.dumps({"ok": True, "result": {"message_id": len(sends)}}).encode())
     monkeypatch.setattr(live.urllib.request, "urlopen", urlopen)
     media = deps.root / "dummy.mp4"
     media.write_bytes(b"offline fixture")

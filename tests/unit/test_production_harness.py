@@ -1,5 +1,7 @@
 """Real local CLI acceptance test: source packet -> encode -> independent gates."""
 import json
+import math
+import struct
 import sqlite3
 import wave
 from pathlib import Path
@@ -12,11 +14,17 @@ from src.hybrid.offline import OfflineCoordinator
 from src.hybrid.render import probe
 
 
+def tone_frames(samples):
+    """Audible local fixture: success media must have finite measured loudness."""
+    cycle = b"".join(struct.pack("<h", round(4000 * math.sin(2 * math.pi * i / 20))) for i in range(20))
+    return (cycle * (samples // 20 + 1))[:samples * 2]
+
+
 @pytest.fixture
 def approved_source(source):
     with wave.open(str(source / "audio.mp3"), "wb") as wav:
         wav.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
-        wav.writeframes(b"\0\0" * 156000)
+        wav.writeframes(tone_frames(156000))
     board = json.loads((source / "story.json").read_text())
     for i, frame in enumerate(board["frames"]):
         frame.update(start_s=i * .5, end_s=(i + 1) * .5,
