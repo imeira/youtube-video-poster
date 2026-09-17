@@ -584,6 +584,32 @@ class DirectorAgent:
         _write_json_file(fs.paths.qa_dir / "production_evidence_qa.json", report)
         return report
 
+    async def deliver_for_approval(
+        self,
+        episode_id: str,
+        *,
+        messenger,
+        chat_id: str,
+        thumbnail_path: Path,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Deliver final thumbnail and video once, as separate hash-bound review media."""
+        from src.approval.receipts import ApprovalReceipt
+        from src.delivery.controller import DeliveryController
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.WAITING_THUMBNAIL_APPROVAL:
+            raise ValueError("approval delivery requires WAITING_THUMBNAIL_APPROVAL state")
+        thumbnail = ApprovalReceipt.approve("thumbnail", thumbnail_path, "delivery-preflight")
+        video = ApprovalReceipt.approve("video", fs.paths.final_video, "delivery-preflight")
+        return await DeliveryController(messenger).deliver_for_approval(
+            chat_id=chat_id,
+            episode_id=episode_id,
+            thumbnail=thumbnail,
+            video=video,
+            receipt_dir=fs.paths.qa_dir / "delivery",
+        )
+
     async def record_final_render_qa(
         self,
         episode_id: str,

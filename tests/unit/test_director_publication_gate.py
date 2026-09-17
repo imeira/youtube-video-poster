@@ -136,6 +136,33 @@ def test_director_records_independent_production_evidence_qa(tmp_path, monkeypat
     assert (fs.paths.qa_dir / "production_evidence_qa.json").is_file()
 
 
+@pytest.mark.asyncio
+async def test_director_delivers_thumbnail_and_video_with_separate_receipts(tmp_path, monkeypatch):
+    class Messenger:
+        async def send_photo(self, chat_id, photo_path, caption=""):
+            return 101
+
+        async def send_video(self, chat_id, video_path, caption=""):
+            return 202
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(
+        episode_id="EP8", current_state=EpisodeState.WAITING_THUMBNAIL_APPROVAL
+    ).save(fs.paths.state_json)
+    fs.paths.final_video.write_bytes(b"video")
+    thumbnail = fs.paths.thumbnails_dir / "thumbnail.png"
+    thumbnail.write_bytes(b"thumbnail")
+
+    receipts = await director.deliver_for_approval("EP8", messenger=Messenger(), chat_id="test-chat", thumbnail_path=thumbnail)
+
+    assert {receipt["artifact_kind"] for receipt in receipts} == {"thumbnail", "video"}
+    assert (fs.paths.qa_dir / "delivery" / "thumbnail.json").is_file()
+    assert (fs.paths.qa_dir / "delivery" / "video.json").is_file()
+
+
 def test_director_records_only_exact_approval_of_delivered_media(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
     director = DirectorAgent()
