@@ -121,7 +121,13 @@ def test_director_records_independent_production_evidence_qa(tmp_path, monkeypat
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
     (fs.paths.script_dir / "script.json").write_text(
-        json.dumps({"narration_segments": [{"id": "S001"}]}), encoding="utf-8"
+        json.dumps({
+            "audience": {"min_age": 6, "max_age": 10},
+            "segments": [
+                {"id": "S001", "kind": "biblical_paraphrase", "narration": "Deus prometeu.", "source_refs": ["Gênesis 15"]}
+            ],
+        }),
+        encoding="utf-8",
     )
     (fs.paths.compiled_dir / "manifest.json").write_text(
         json.dumps({"assets": [{"sha256": "a" * 64}]}), encoding="utf-8"

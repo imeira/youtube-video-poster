@@ -57,7 +57,28 @@ class ProductionEvidenceQA:
             script_hash = _sha256(script_path)
             report["script_sha256"] = script_hash
             script = _json_object(script_path)
-            if script is None or not isinstance(script.get("narration_segments"), list) or not script["narration_segments"]:
+            segments = script.get("segments") if script else None
+            audience = script.get("audience") if script else None
+            valid_segments = (
+                isinstance(segments, list)
+                and bool(segments)
+                and all(
+                    isinstance(segment, dict)
+                    and isinstance(segment.get("id"), str)
+                    and bool(segment["id"].strip())
+                    and isinstance(segment.get("narration"), str)
+                    and bool(segment["narration"].strip())
+                    and segment.get("kind") in {"biblical_paraphrase", "family_reflection"}
+                    and isinstance(segment.get("source_refs"), list)
+                    and (
+                        segment["kind"] != "biblical_paraphrase"
+                        or bool(segment["source_refs"])
+                    )
+                    for segment in segments
+                )
+            )
+            valid_audience = audience == {"min_age": 6, "max_age": 10}
+            if script is None or not valid_segments or not valid_audience:
                 findings.append("SCRIPT_PACKET_INVALID")
             if script_hash in published_script_hashes:
                 findings.append("REUSED_SCRIPT")
