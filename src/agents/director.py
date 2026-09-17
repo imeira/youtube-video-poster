@@ -630,21 +630,24 @@ class DirectorAgent:
         )
 
     def record_production_evidence_qa(
-        self, episode_id: str, *, published_script_hashes: set[str] | frozenset[str]
+        self, episode_id: str, *, published_script_hashes: set[str] | frozenset[str] = frozenset()
     ) -> dict[str, Any]:
         """Persist independent originality, caption, source and manifest evidence before final QA."""
         from src.qa.production_evidence import ProductionEvidenceQA
+        from src.qa.published_inventory import PublishedInventory
 
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state is not EpisodeState.FINAL_QA:
             raise ValueError("production evidence QA requires FINAL_QA state")
+        inventory = PublishedInventory.scan(self.config.episodes_dir, exclude_episode_id=episode_id)
         result = ProductionEvidenceQA().review(
             script_path=fs.paths.script_dir / "script.json",
             manifest_path=fs.paths.compiled_dir / "manifest.json",
             captions_path=fs.paths.captions_vtt,
             metadata_path=fs.paths.metadata_dir / "metadata.json",
-            published_script_hashes=published_script_hashes,
+            published_script_hashes=set(published_script_hashes) | inventory.script_hashes,
+            published_artifact_hashes=inventory.artifact_hashes,
         )
         report = {"approved": result.approved, "findings": list(result.findings), "report": result.report}
         _write_json_file(fs.paths.qa_dir / "production_evidence_qa.json", report)

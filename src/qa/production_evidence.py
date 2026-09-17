@@ -43,6 +43,7 @@ class ProductionEvidenceQA:
         captions_path: Path | str,
         metadata_path: Path | str,
         published_script_hashes: set[str] | frozenset[str],
+        published_artifact_hashes: set[str] | frozenset[str] = frozenset(),
     ) -> ProductionEvidenceQAResult:
         findings: list[str] = []
         script_path = Path(script_path)
@@ -95,7 +96,10 @@ class ProductionEvidenceQA:
         if not captions_path.is_file() or not captions_path.read_text(encoding="utf-8").startswith("WEBVTT"):
             findings.append("CAPTIONS_MISSING")
         else:
-            report["captions_sha256"] = _sha256(captions_path)
+            captions_hash = _sha256(captions_path)
+            report["captions_sha256"] = captions_hash
+            if captions_hash in published_artifact_hashes:
+                findings.append("REUSED_ARTIFACT")
 
         metadata = _json_object(metadata_path) if metadata_path.is_file() else None
         licenses = metadata.get("licenses") if metadata else None
