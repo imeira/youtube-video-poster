@@ -278,6 +278,9 @@ class DirectorAgent:
         receipts = await pipeline.dispatch_baselines(
             provider, authorizations=authorizations, prices=prices
         )
+        pipeline.run.executor.sync_cost_ledger(
+            fs.paths.costs_json, episode_id=episode_id, budget=self.config.budget
+        )
         qa_packets = pipeline.prepare_qa_packets()
         if set(qa_packets) != set(receipts):
             raise ValueError("every completed compiled baseline requires a QA packet")

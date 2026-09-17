@@ -10,8 +10,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+import os
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,7 @@ class CostRecord:
     estimated_cost: float
     actual_cost: float
     scene_id: str = ""
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     status: str = "completed"
 
 
@@ -203,8 +204,12 @@ class CostLedger:
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        with open(temporary, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
 
     @classmethod
     def load(cls, path: Path, episode_id: str, budget: BudgetConfig) -> CostLedger:
@@ -277,7 +282,7 @@ class BudgetGuard:
         """§66: Request and log a budget override."""
         override = BudgetOverride(
             who=who,
-            when=datetime.now(timezone.utc).isoformat(),
+            when=datetime.now(UTC).isoformat(),
             old_limit=self.ledger.hard_limit,
             new_limit=new_limit,
             reason=reason,

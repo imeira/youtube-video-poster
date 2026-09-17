@@ -404,6 +404,9 @@ async def test_director_forwards_hash_bound_live_authority_to_compiled_dispatch(
 
     class Pipeline:
         episode = type("Episode", (), {"audio": type("Audio", (), {"mode": "LIVE"})()})()
+        run = type(
+            "Run", (), {"executor": type("Executor", (), {"sync_cost_ledger": lambda *_args, **_kwargs: None})()}
+        )()
 
         def baseline_jobs(self):
             return (type("Job", (), {"request_id": "job"})(),)
