@@ -79,7 +79,13 @@ from the deliberately incomplete
 [deployment template](src/hybrid/assets/revision_deployment.example.json) and
 [JSON schema](src/hybrid/assets/revision_deployment.schema.json). No credentials,
 default prices, reviewer model, destination, or human approval are supplied.
-Only `run` starts provider work; construction/preflight are local checks.
+`run`/`resume` start provider work; construction/preflight are local checks.
+The first run freezes both media, sends only the thumbnail and waits for its exact
+approval. Thumbnail approval enters `READY_VIDEO_DELIVERY`; a later `resume`
+sends the frozen video, then waits for its independent approval. Video approval
+stops at `WAITING_FINAL_APPROVAL`, with no publication action available.
+Plans bind implementation bytes. Final encoded audio must measure -16 LUFS ±1 LU
+and <= -1 dBTP, with no subtitle streams or burned captions.
 
 ```powershell
 .venv/Scripts/python.exe scripts/run_offline_tests.py tests/unit/test_revision_live_adapter.py tests/unit/test_new_ep8_revision.py -q
