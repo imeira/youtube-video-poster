@@ -456,3 +456,25 @@ async def test_director_rejects_live_dispatch_without_authority_for_every_compil
 
     with pytest.raises(ValueError, match="every compiled LIVE job"):
         await director.dispatch_compiled_baselines("EPX", Pipeline(), "live-provider")
+
+
+def test_director_issues_live_preflight_for_compiled_baselines(tmp_path, monkeypatch):
+    from src.agents.director import DirectorAgent
+    from src.config.loader import get_config
+    from src.state.machine import EpisodeState, EpisodeStateStore
+    from src.storage.episode_fs import EpisodeFS
+
+    class Resolver:
+        def quote(self, job):
+            return {"endpoint": job.endpoint, "amount": job.cost, "evidence": "official"}
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    fs = EpisodeFS("EPX", get_config())
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EPX", current_state=EpisodeState.GENERATING_IMAGES).save(fs.paths.state_json)
+    pipeline = type("Pipeline", (), {"episode": type("Episode", (), {"audio": type("Audio", (), {"mode": "LIVE"})()})(), "baseline_jobs": lambda self: ()})()
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = get_config()
+
+    with pytest.raises(ValueError, match="nonempty"):
+        director.issue_compiled_live_preflight("EPX", pipeline, Resolver(), reviewer="budget-qa")

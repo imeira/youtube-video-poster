@@ -237,6 +237,26 @@ class DirectorAgent:
             prior_spend=prior_spend,
         )
 
+    def issue_compiled_live_preflight(self, episode_id: str, pipeline, price_resolver, *, reviewer: str):
+        """Issue one short-lived, budget-bound LIVE authority per compiled baseline."""
+        from src.hybrid.preflight import LivePreflightIssuer
+
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.GENERATING_IMAGES:
+            raise ValueError("LIVE preflight requires GENERATING_IMAGES state")
+        if pipeline.episode.audio.mode != "LIVE":
+            raise ValueError("LIVE preflight requires a LIVE compiled pipeline")
+        return LivePreflightIssuer(
+            fs.paths.costs_json,
+            hard_limit=Decimal(str(self.config.budget.hard_limit_usd)),
+            price_resolver=price_resolver,
+        ).issue(
+            pipeline.baseline_jobs(),
+            reviewer=reviewer,
+            receipt_path=fs.paths.qa_dir / "live_preflight.json",
+        )
+
     async def dispatch_compiled_baselines(
         self, episode_id: str, pipeline, provider, *, authorizations=None, prices=None
     ) -> dict[str, Any]:
