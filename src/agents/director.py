@@ -866,8 +866,8 @@ class DirectorAgent:
 
         configured = self.config.generative_video
         engine_config = GenerativeVideoConfig(
-            enabled=configured.enabled and cloud_provider.available(),
-            provider=configured.provider,
+            enabled=False,
+            provider="transactional_live_only",
             max_clips_per_episode=configured.max_clips_per_episode,
             max_seconds_per_episode=configured.max_seconds_per_episode,
             preferred_clip_duration_seconds=configured.preferred_clip_duration_seconds,
@@ -996,13 +996,11 @@ class DirectorAgent:
         # Step 11: Visual Strategy — decide local vs generative video (§63-67)
         from src.providers.gpu.gpu_compute_provider import (
             LocalGPUProvider,
-            RunPodGPUProvider,
             SceneImportance,
         )
 
         local_gpu = LocalGPUProvider()
-        cloud_gpu = RunPodGPUProvider()
-        strategy_engine = self._build_visual_strategy_engine(local_gpu, cloud_gpu)
+        strategy_engine = self._build_visual_strategy_engine(local_gpu, None)
 
         # Classify each scene and mark strategy
         for scene in scenes:
@@ -1149,17 +1147,9 @@ class DirectorAgent:
         return await self.start_episode(theme=theme, episode_id=episode_id)
 
     def cleanup_orphans(self) -> list[str]:
-        """§56: Clean up orphaned RunPod pods on startup."""
-        try:
-            from src.providers.gpu.runpod_provider import RunPodGPUProvider
-            provider = RunPodGPUProvider()
-            orphans = provider.cleanup_orphans()
-            if orphans:
-                logger.warning(f"Cleaned up {len(orphans)} orphaned pods: {orphans}")
-            return orphans
-        except Exception as e:  # noqa: BLE001 — cleanup must never crash the director
-            logger.error(f"Orphan cleanup failed: {e}")
-            return []
+        """Legacy pod cleanup is disabled; LIVE recovery owns remote operations."""
+        logger.info("Legacy RunPod cleanup disabled; use transactional request recovery")
+        return []
 
     @property
     def name(self) -> str:
