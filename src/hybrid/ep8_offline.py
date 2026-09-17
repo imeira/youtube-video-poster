@@ -139,7 +139,30 @@ def verify_source(episode, manifest, contract, hold):
     if episode.source_binding is None:
         return
     current, assets, sheet, expected_copy, expected_hold = Ep8OfflineAdapter(episode.source_binding["root"]).inspect()
-    if current != episode:
+    lineage = episode.source_binding.get('revoice')
+    if lineage:
+        from src.hybrid.revoice import allocate, split_script
+        from dataclasses import replace
+        Ep8OfflineAdapter.verify_files(lineage['parent_outputs'])
+        Ep8OfflineAdapter.verify_files(lineage['outputs'])
+        if lineage['approval']['plan_hash'] != lineage['plan_hash'] or not lineage['approval']['reviewer'].strip():
+            raise ValueError('revoice approval lineage mismatch')
+        parent_packet = Path(lineage['parent_packet'])
+        parent = CompiledEpisode.load(parent_packet / 'compiled.json')
+        if parent != current or {k: v for k, v in episode.source_binding.items() if k != 'revoice'} != current.source_binding:
+            raise ValueError('stale revoice source')
+        packet = episode.audio.path.parent
+        original = json.loads((parent_packet / 'editorial.json').read_text(encoding='utf-8'))
+        script = json.loads((packet / 'script.json').read_text(encoding='utf-8'))
+        timeline = json.loads((packet / 'timeline.json').read_text(encoding='utf-8'))
+        editorial = json.loads((packet / 'editorial.json').read_text(encoding='utf-8'))
+        frames, cues = allocate(current.frames, original['cues'], timeline['words'], timeline['duration_s'])
+        if script != split_script(original['script']) or editorial != dict(script=script, cues=cues, revision_findings=[]):
+            raise ValueError('revoice script or cues mismatch')
+        if episode != replace(current, audio=episode.audio, frames=frames, source_binding=episode.source_binding):
+            raise ValueError('revoice visual allocation mismatch')
+        episode.audio.verify('LIVE')
+    elif current != episode:
         raise ValueError("stale EP8 revision or compiled input")
     if (manifest.assets != assets or manifest.sheet.sha256 != sha256(sheet)
             or contract != expected_copy or hold != expected_hold):

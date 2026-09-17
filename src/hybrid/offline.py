@@ -111,7 +111,9 @@ class OfflineCoordinator:
             if sha256(asset["path"]) != asset["sha256"]:
                 raise ValueError(f"{kind} hash mismatch")
 
-    def prepare(self, episode, manifest, contract, *, plan_receipt, hold=4, renderer=None):
+    def prepare(self, episode, manifest, contract, *, plan_receipt, hold=4, renderer=None, video_suffix=".mkv"):
+        if video_suffix not in {".mkv", ".mp4"}:
+            raise ValueError("unsupported delivery video container")
         binding = self._binding(episode, manifest, contract, hold)
         with self._transaction() as db:
             row = db.execute("SELECT body FROM receipts WHERE id=?", (plan_receipt,)).fetchone()
@@ -131,7 +133,7 @@ class OfflineCoordinator:
             directory.mkdir(parents=True)
             scenes = [Scene(asset, frame.end - frame.start)
                       for frame, asset in zip(episode.frames, manifest.assets)]
-            video = directory / "video.mkv"
+            video = directory / ("video" + video_suffix)
             render_receipt = (renderer or LocalRenderer()).render(
                 scenes, manifest, episode.audio, None, video, hold=hold)
             thumb = Path(ThumbnailAgent()._compose(
@@ -144,7 +146,7 @@ class OfflineCoordinator:
                                 for k in ("video", "thumbnail")):
                 raise ValueError("regenerated video and thumbnail must each have distinct hashes and paths")
             self._binding(episode, manifest, contract, hold)
-            pair.update(revision=revision, binding=binding, approvals={})
+            pair.update(revision=revision, binding=binding, approvals={}, plan_receipt=plan_receipt)
             pair["render_receipt"] = self._receipt(db, {
                 "kind": "render", "pair": pair, "local_render": render_receipt,
                 "plan_receipt": plan_receipt, "predecessor": previous,

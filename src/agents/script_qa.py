@@ -18,7 +18,7 @@ class ScriptQAAgent:
 
     _BANNED = (
         "SEGREDO", "PROIBID", "CHOCANTE", "CHOQUE", "ASSUSTADOR", "TERROR", "SANGUE", "MUTILA",
-        "INFERNO", "COMENTE", "COMENTARIO", "ENDERECO", "IDADE", "COMPRE", "COMPRA",
+        "INFERNO", "COMENTE", "COMENTARIO", "ENDERECO", "COMPRE", "COMPRA",
         "ANTES QUE SEJA TARDE", "URGENTE",
     )
 
@@ -54,8 +54,9 @@ class ScriptQAAgent:
                 findings.append(f"{segment_id}:NARRATION_REQUIRED")
             normalized = self._fold(narration)
             findings.extend(term for term in self._BANNED if term in normalized)
-            if re.search(r"\b(?:COMENTE|DIGA|FALE|ESCREVA)\s+(?:SEU|SUA)\s+NOME\b", normalized):
+            if re.search(r"\b(?:COMENTE|DIGA|FALE|ESCREVA)\s+(?:SEU|SUA)\s+(?:NOME|IDADE|ENDERECO)\b", normalized):
                 findings.append(f"{segment_id}:PERSONAL_DATA_REQUEST")
-            if len(re.findall(r"\b\w+\b", narration)) > 30:
+            sentences = [sentence for sentence in re.split(r"[.!?]+", narration) if sentence.strip()]
+            if any(len(re.findall(r"\b\w+\b", sentence)) > 30 for sentence in sentences):
                 findings.append(f"{segment_id}:SENTENCE_TOO_LONG")
         return ScriptQAResult(not findings, tuple(dict.fromkeys(findings)))

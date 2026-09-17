@@ -20,6 +20,9 @@ from src.config.loader import get_config
 
 def main():
     """Main CLI entry point."""
+    if sys.argv[1:2] == ["production"]:
+        from src.hybrid.production import main as production_main
+        return production_main(sys.argv[2:])
     if sys.argv[1:2] == ["offline"]:
         from src.hybrid.offline import main as offline_main
         return offline_main(sys.argv[2:])
