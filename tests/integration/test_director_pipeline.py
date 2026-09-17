@@ -9,6 +9,8 @@ Then: approval → script → audio → storyboard → GENERATING_IMAGES
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 
 import pytest
 
@@ -86,6 +88,36 @@ class TestDirectorPreProduction:
 
 class TestDirectorProduction:
     """§98: Steps 6-9 — script → audio → storyboard."""
+
+    @pytest.fixture(autouse=True)
+    def offline_tts(self, tmp_path, monkeypatch):
+        """Test orchestration with injected audio, never the public Edge service.
+
+        Real provider/network behavior is covered separately. These non-slow
+        tests must run under the repository's offline validation policy.
+        """
+        if not shutil.which("ffmpeg"):
+            pytest.skip("local FFmpeg required for deterministic audio fixture")
+        from src.hybrid.revision_fixtures import TestDependencies
+        from src.providers.base import TTSResult
+        from src.providers.tts.edge_tts_provider import EdgeTTSProvider
+
+        class OfflineTTS:
+            def __init__(self, **kwargs):
+                pass
+
+            async def synthesize(self, text, **kwargs):
+                waveform = tmp_path / "fixture.wav"
+                result = await TestDependencies(tmp_path / "fixture-provider").synthesize(text, output_path=waveform)
+                target = tmp_path / "fixture.mp3"
+                subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-n", "-i", str(waveform),
+                                "-threads", "1", str(target)], check=True, capture_output=True)
+                return TTSResult(success=True, audio_path=str(target), duration_seconds=result.duration_seconds,
+                    word_timestamps=result.word_timestamps,
+                    sentence_timestamps=EdgeTTSProvider._derive_sentence_timestamps(text, result.word_timestamps),
+                    metadata={"mode": "TEST", "boundary_source": "TEST_WordBoundary"})
+
+        monkeypatch.setattr("src.agents.audio.EdgeTTSProvider", OfflineTTS)
 
     @pytest.mark.asyncio
     async def test_continue_after_plan_approval(self, episodes_dir):

@@ -1,0 +1,152 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "route",
+    "revision",
+    "mode",
+    "request",
+    "references",
+    "predecessors",
+    "bindings",
+    "adapter",
+    "deployment",
+    "chat_id",
+    "image_workers",
+    "qa_workers",
+    "ffmpeg_threads",
+    "correction_waves",
+    "heroes",
+    "budget_usd",
+    "provider_contract",
+    "publication_authorized"
+  ],
+  "properties": {
+    "route": {
+      "type": "string",
+      "const": "ep8-new-revision-v1"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "mode": {
+      "type": "string",
+      "const": "LIVE"
+    },
+    "request": {
+      "type": "string",
+      "minLength": 1
+    },
+    "references": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "manifest",
+        "characters",
+        "authority"
+      ],
+      "properties": {
+        "manifest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "characters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "abraham",
+            "sarah"
+          ],
+          "properties": {
+            "abraham": {
+              "type": "string",
+              "pattern": "[0-9a-f]{64}"
+            },
+            "sarah": {
+              "type": "string",
+              "pattern": "[0-9a-f]{64}"
+            }
+          }
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "predecessors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "sha256"
+        ],
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "pattern": "[0-9a-f]{64}"
+          }
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "[0-9a-f]{64}"
+      }
+    },
+    "adapter": {
+      "type": "string",
+      "const": "src.hybrid.revision_live:factory"
+    },
+    "deployment": {
+      "$ref": "revision_deployment.schema.json"
+    },
+    "chat_id": {
+      "type": "string",
+      "pattern": "-?[1-9][0-9]*"
+    },
+    "image_workers": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "qa_workers": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "ffmpeg_threads": {
+      "type": "integer",
+      "const": 1
+    },
+    "correction_waves": {
+      "type": "integer",
+      "const": 1
+    },
+    "heroes": {
+      "type": "boolean",
+      "const": false
+    },
+    "budget_usd": {
+      "type": "string",
+      "const": "6"
+    },
+    "provider_contract": {
+      "type": "string",
+      "const": "transactional-executor-v1; exact-price-and-authority; recover-only"
+    },
+    "publication_authorized": {
+      "type": "boolean",
+      "const": false
+    },
+    "supersedes": {
+      "type": "string",
+      "pattern": "[0-9a-f]{64}"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EP8 LIVE plan (created by CLI, never hand-approved)"
+}

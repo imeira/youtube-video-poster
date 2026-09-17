@@ -57,3 +57,19 @@ def test_final_render_qa_rejects_burned_subtitles_or_unmastered_audio_receipt(tm
     assert "BURNED_SUBTITLES_FORBIDDEN" in result.findings
     assert "CLOSING_HOLD_MUST_BE_3_TO_5_SECONDS" in result.findings
     assert "DERIVED_MASTER_REQUIRED" in result.findings
+
+
+def test_final_render_qa_rejects_short_video_even_when_container_duration_matches(tmp_path, monkeypatch):
+    video = tmp_path / "delivery.mp4"
+    video.write_bytes(b"probe supplied independently")
+    monkeypatch.setattr("src.qa.final_render.probe", lambda path: {
+        "format": {"duration": "10"},
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080,
+             "pix_fmt": "yuv420p", "duration": "8"},
+            {"codec_type": "audio", "codec_name": "aac", "duration": "10"},
+        ],
+    })
+    result = FinalRenderQA().review(video, {"expected_duration": 10, "hold_seconds": 4,
+        "subtitles_sha256": None, "audio_operation": "derived_master"})
+    assert result.findings == ("STREAM_DURATION_MISMATCH",)

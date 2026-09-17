@@ -204,6 +204,10 @@ class FalFluxProvider(_QuarantineProvider):
 
     def _stage(self, job: Job) -> dict:
         payload = dict(job.payload)
+        # Local compilation provenance remains in the authorized request hash,
+        # but is not a field in the FAL API schema.
+        for key in ("episode", "compilation", "semantic_action", "start", "end"):
+            payload.pop(key, None)
         requested = payload.get("image_urls")
         exact_assets = [str(asset.path) for asset in job.manifest.assets]
         if requested != exact_assets:

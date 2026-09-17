@@ -66,6 +66,25 @@ Fábrica local-first para episódios bíblicos infantis em pt-BR, destinada a cr
 
 ## Verificação local
 
+The fresh EP8 revision route now has a concrete LIVE adapter:
+`src.hybrid.revision_live:factory(root, plan)`. It composes FAL image editing,
+pt-BR Edge WordBoundary TTS, independent OpenRouter visual review, and separate
+Telegram thumbnail/video delivery. Publication remains unreachable.
+
+Follow the [LIVE deployment procedure](docs/EP8_NEW_REVISION_SDD.md#preparing-an-actual-live-deployment)
+before creation: review and pin the new script and canonical references, provide
+fresh exact price evidence and a bounded budget, configure the three environment
+credentials, create a LIVE plan, then explicitly approve its exact hash. Start
+from the deliberately incomplete
+[deployment template](src/hybrid/assets/revision_deployment.example.json) and
+[JSON schema](src/hybrid/assets/revision_deployment.schema.json). No credentials,
+default prices, reviewer model, destination, or human approval are supplied.
+Only `run` starts provider work; construction/preflight are local checks.
+
+```powershell
+.venv/Scripts/python.exe scripts/run_offline_tests.py tests/unit/test_revision_live_adapter.py tests/unit/test_new_ep8_revision.py -q
+```
+
 ```bash
 uv run --extra dev pytest tests/unit -m "not slow" -q
 ```

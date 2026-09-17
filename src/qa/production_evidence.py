@@ -88,6 +88,13 @@ class ProductionEvidenceQA:
             findings.append("MANIFEST_MISSING")
         else:
             manifest = _json_object(manifest_path)
+            if manifest and "manifest" in manifest:
+                from src.hybrid.artifacts import Manifest
+                try:
+                    Manifest.load(manifest_path)
+                except (ValueError, OSError, KeyError, TypeError):
+                    findings.append("MANIFEST_INVALID")
+                manifest = manifest["manifest"]
             if manifest is None or not isinstance(manifest.get("assets"), list) or not manifest["assets"]:
                 findings.append("MANIFEST_ASSETS_MISSING")
             else:

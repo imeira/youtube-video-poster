@@ -397,7 +397,9 @@ def render_once(episode, manifest, output, hold):
         frames = round(frame.end * 30) - round(frame.start * 30)
         filters.append(f"[{i}:v]zoompan=z='min(1+on*0.0002,1.04)':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d={frames}:s=1920x1080:fps=30,setsar=1,format=yuv420p[v{i}]")
         labels.append(f"[v{i}]")
-    filters.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=0,tpad=stop_mode=clone:stop_duration={hold}[v]")
+    # concat exposes a variable frame rate. Establish 30fps before tpad so the
+    # closing duration cannot be converted using an inferred, incorrect rate.
+    filters.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=0,fps=30,tpad=stop_mode=clone:stop_duration={hold}[v]")
     args += ["-i", str(episode.audio.path)]
     filters.append(f"[{len(labels)}:a]apad=pad_dur={hold}[a]")
     graph = ";".join(filters)
@@ -408,7 +410,8 @@ def render_once(episode, manifest, output, hold):
     streams = info["streams"]
     if (len(streams) != 2 or streams[0]["codec_name"] != "h264" or streams[1]["codec_name"] != "aac"
             or (streams[0]["width"], streams[0]["height"]) != (1920, 1080)
-            or abs(float(info["format"]["duration"]) - duration - hold) > .08):
+            or abs(float(info["format"]["duration"]) - duration - hold) > .08
+            or any(abs(float(s.get("duration", 0)) - duration - hold) > .08 for s in streams)):
         raise ValueError("technical output QA failed")
     return dict(render_invocations=1, max_concurrent_encodes=1, elapsed_seconds=time.perf_counter() - started,
                 api_cost=0, filtergraph=graph, hold_seconds=hold, audio_operation="derived AAC; source unchanged",

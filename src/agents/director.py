@@ -171,6 +171,7 @@ class DirectorAgent:
         imported_assets=None,
         blocked_scenes=(),
         prior_spend: Decimal = Decimal(0),
+        executor_config=None,
     ):
         """Open the sole compiled writer after audio/reference approval.
 
@@ -191,7 +192,7 @@ class DirectorAgent:
         episode = compile_storyboard(episode_id, approved_audio, scenes)
         return OperationalPipeline(
             episode,
-            Executor(database, Config.load(), prior_spend=Decimal(prior_spend)),
+            Executor(database, executor_config or Config.load(), prior_spend=Decimal(prior_spend)),
             source_manifest,
             workspace=fs.paths.compiled_dir,
             endpoint=endpoint,
@@ -213,6 +214,7 @@ class DirectorAgent:
         imported_assets=None,
         blocked_scenes=(),
         prior_spend: Decimal = Decimal(0),
+        executor_config=None,
     ):
         """Activate the sole compiled writer only at the image-generation hand-off.
 
@@ -235,6 +237,7 @@ class DirectorAgent:
             imported_assets=imported_assets,
             blocked_scenes=blocked_scenes,
             prior_spend=prior_spend,
+            executor_config=executor_config,
         )
 
     def issue_compiled_live_preflight(self, episode_id: str, pipeline, price_resolver, *, reviewer: str):
@@ -258,7 +261,7 @@ class DirectorAgent:
         )
 
     async def dispatch_compiled_baselines(
-        self, episode_id: str, pipeline, provider, *, authorizations=None, prices=None
+        self, episode_id: str, pipeline, provider, *, authorizations=None, prices=None, on_completed=None
     ) -> dict[str, Any]:
         """Dispatch compiled work once, then stop at independent visual QA."""
         fs = EpisodeFS(episode_id, self.config)
@@ -275,9 +278,10 @@ class DirectorAgent:
                 or set(prices) != request_ids
             ):
                 raise ValueError("every compiled LIVE job requires exact authority and fresh price")
-        receipts = await pipeline.dispatch_baselines(
-            provider, authorizations=authorizations, prices=prices
-        )
+        dispatch_options = dict(authorizations=authorizations, prices=prices)
+        if on_completed is not None:
+            dispatch_options["on_completed"] = on_completed
+        receipts = await pipeline.dispatch_baselines(provider, **dispatch_options)
         pipeline.run.executor.sync_cost_ledger(
             fs.paths.costs_json, episode_id=episode_id, budget=self.config.budget
         )
@@ -336,10 +340,19 @@ class DirectorAgent:
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
         receipt_path = fs.paths.qa_dir / "compiled_render_receipt.json"
-        if state.current_state is EpisodeState.FINAL_QA and fs.paths.final_video.is_file() and receipt_path.is_file():
+        if state.current_state in {EpisodeState.ASSEMBLING, EpisodeState.LOCAL_ANIMATION, EpisodeState.FINAL_QA} and fs.paths.final_video.is_file() and receipt_path.is_file():
             receipt = _read_json_file(receipt_path)
             if receipt.get("hold_seconds") not in (3, 4, 5):
                 raise ValueError("compiled render recovery receipt is invalid")
+            if receipt.get("output_sha256"):
+                from src.hybrid.artifacts import sha256
+                if receipt["output_sha256"] != sha256(fs.paths.final_video):
+                    raise ValueError("compiled render recovery hash mismatch")
+            if state.current_state is EpisodeState.LOCAL_ANIMATION:
+                state.transition_to(EpisodeState.ASSEMBLING, agent="CompiledRecovery")
+            if state.current_state is EpisodeState.ASSEMBLING:
+                state.transition_to(EpisodeState.FINAL_QA, agent="CompiledRecovery")
+                state.save(fs.paths.state_json)
             return receipt
         if state.current_state is not EpisodeState.PLANNING_ANIMATION:
             raise ValueError("compiled rendering requires PLANNING_ANIMATION state")
@@ -786,8 +799,17 @@ class DirectorAgent:
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state is not EpisodeState.WAITING_THUMBNAIL_APPROVAL:
             raise ValueError("approval delivery requires WAITING_THUMBNAIL_APPROVAL state")
-        thumbnail = ApprovalReceipt.approve("thumbnail", thumbnail_path, "delivery-preflight")
-        video = ApprovalReceipt.approve("video", fs.paths.final_video, "delivery-preflight")
+        def delivery_identity(kind, path):
+            receipt_path = fs.paths.qa_dir / "delivery" / f"{kind}.json"
+            if receipt_path.is_file():
+                receipt = ApprovalReceipt(**_read_json_file(receipt_path)["approval"])
+                receipt.verify()
+                if Path(receipt.artifact_path).resolve() != Path(path).resolve():
+                    raise ValueError("delivery path changed")
+                return receipt
+            return ApprovalReceipt.approve(kind, path, "delivery-preflight")
+        thumbnail = delivery_identity("thumbnail", thumbnail_path)
+        video = delivery_identity("video", fs.paths.final_video)
         return await DeliveryController(messenger).deliver_for_approval(
             chat_id=chat_id,
             episode_id=episode_id,

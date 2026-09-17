@@ -1,0 +1,305 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "adapter",
+    "endpoint",
+    "image_cost",
+    "non_image_reserve",
+    "visual_license",
+    "script",
+    "image_price",
+    "tts",
+    "telegram",
+    "reviewer"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "adapter": {
+      "type": "string",
+      "const": "src.hybrid.revision_live:factory"
+    },
+    "endpoint": {
+      "type": "string",
+      "const": "fal-ai/flux-2/klein/9b/edit"
+    },
+    "image_cost": {
+      "type": "string",
+      "pattern": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?"
+    },
+    "non_image_reserve": {
+      "type": "string",
+      "pattern": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?"
+    },
+    "visual_license": {
+      "type": "string",
+      "minLength": 1
+    },
+    "script": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "authority"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "[0-9a-f]{64}"
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "image_price": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "source_url",
+        "observed_at",
+        "valid_until",
+        "endpoint",
+        "amount",
+        "manifest_checksum",
+        "width",
+        "height",
+        "num_images",
+        "output_format",
+        "includes_reference_inputs"
+      ],
+      "properties": {
+        "authority": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_url": {
+          "type": "string",
+          "pattern": "https://[^\\s]+"
+        },
+        "observed_at": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 4102444800
+        },
+        "valid_until": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 4102444800
+        },
+        "endpoint": {
+          "type": "string",
+          "const": "fal-ai/flux-2/klein/9b/edit"
+        },
+        "amount": {
+          "type": "string",
+          "pattern": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?"
+        },
+        "manifest_checksum": {
+          "type": "string",
+          "pattern": "[0-9a-f]{64}"
+        },
+        "width": {
+          "type": "integer",
+          "const": 1280
+        },
+        "height": {
+          "type": "integer",
+          "const": 720
+        },
+        "num_images": {
+          "type": "integer",
+          "const": 1
+        },
+        "output_format": {
+          "type": "string",
+          "const": "png"
+        },
+        "includes_reference_inputs": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "tts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "voice",
+        "rate",
+        "pitch",
+        "boundary",
+        "cost",
+        "authority"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "const": "edge-tts"
+        },
+        "voice": {
+          "type": "string",
+          "const": "pt-BR-ThalitaNeural"
+        },
+        "rate": {
+          "type": "string",
+          "const": "-8%"
+        },
+        "pitch": {
+          "type": "string",
+          "const": "+1Hz"
+        },
+        "boundary": {
+          "type": "string",
+          "const": "WordBoundary"
+        },
+        "cost": {
+          "type": "string",
+          "const": "0"
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "telegram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chat_id",
+        "authority",
+        "cost"
+      ],
+      "properties": {
+        "chat_id": {
+          "type": "string",
+          "pattern": "-?[1-9][0-9]*"
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cost": {
+          "type": "string",
+          "const": "0"
+        }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "key_env",
+        "model",
+        "provider",
+        "authority",
+        "supports_images",
+        "supports_json_schema",
+        "context_tokens",
+        "max_tokens",
+        "price"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "const": "https://openrouter.ai/api/v1/chat/completions"
+        },
+        "key_env": {
+          "type": "string",
+          "const": "EP8_OPENROUTER_REVIEW_KEY"
+        },
+        "model": {
+          "type": "string",
+          "pattern": "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1
+        },
+        "supports_images": {
+          "type": "boolean",
+          "const": true
+        },
+        "supports_json_schema": {
+          "type": "boolean",
+          "const": true
+        },
+        "context_tokens": {
+          "type": "integer",
+          "minimum": 4096,
+          "maximum": 2000000
+        },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 2048
+        },
+        "price": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authority",
+            "source_url",
+            "observed_at",
+            "valid_until",
+            "prompt_per_million",
+            "completion_per_million",
+            "image",
+            "request"
+          ],
+          "properties": {
+            "authority": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_url": {
+              "type": "string",
+              "pattern": "https://[^\\s]+"
+            },
+            "observed_at": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 4102444800
+            },
+            "valid_until": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 4102444800
+            },
+            "prompt_per_million": {
+              "type": "string",
+              "pattern": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?"
+            },
+            "completion_per_million": {
+              "type": "string",
+              "pattern": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?"
+            },
+            "image": {
+              "type": "string",
+              "const": "0"
+            },
+            "request": {
+              "type": "string",
+              "const": "0"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EP8 explicit LIVE deployment v1"
+}

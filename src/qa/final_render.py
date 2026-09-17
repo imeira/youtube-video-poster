@@ -51,6 +51,12 @@ class FinalRenderQA:
             if audio.get("codec_name") != "aac":
                 findings.append("AAC_AUDIO_REQUIRED")
         report["duration_s"] = float(media["format"].get("duration", 0))
+        expected = render_receipt.get("expected_duration")
+        if expected is not None:
+            if abs(report["duration_s"] - expected) > .08 or any(
+                abs(float(stream.get("duration", 0)) - expected) > .08 for stream in (*videos, *audios)
+            ):
+                findings.append("STREAM_DURATION_MISMATCH")
         if render_receipt.get("subtitles_sha256") is not None:
             findings.append("BURNED_SUBTITLES_FORBIDDEN")
         if render_receipt.get("hold_seconds") not in (3, 4, 5):

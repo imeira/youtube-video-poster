@@ -166,19 +166,26 @@ class ProductionRun:
         self._active_images = dict(self._baselines)
 
     def _job_for(self, frame: FrameSpec, category: str, cost: Decimal, *, predecessor="", prompt=None):
+        payload = {
+            "episode": self.episode.episode_id,
+            "compilation": self.episode.checksum,
+            "prompt": prompt or frame.prompt,
+            "semantic_action": frame.semantic_action,
+            "start": frame.start,
+            "end": frame.end,
+        }
+        if self.endpoint == "fal-ai/flux-2/klein/9b/edit":
+            # Freeze the actual wire contract BEFORE request hashing/authorization.
+            payload.update(dict(
+                image_urls=[str(a.path) for a in self.source_manifest.assets],
+                image_size={"width": 1280, "height": 720}, num_images=1,
+                output_format="png", enable_safety_checker=True))
         return Job(
             scene=frame.scene_id,
             category=category,
             mode=self.episode.audio.mode,
             endpoint=self.endpoint,
-            payload={
-                "episode": self.episode.episode_id,
-                "compilation": self.episode.checksum,
-                "prompt": prompt or frame.prompt,
-                "semantic_action": frame.semantic_action,
-                "start": frame.start,
-                "end": frame.end,
-            },
+            payload=payload,
             manifest=self.source_manifest,
             cost=cost,
             predecessor=predecessor,
@@ -188,7 +195,7 @@ class ProductionRun:
         """Return the exact baseline jobs that need current LIVE authority."""
         return tuple(self._baselines.values())
 
-    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None):
+    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None, on_completed=None):
         if not self._baselines:
             return {}
         authorizations = authorizations or {}
@@ -207,9 +214,19 @@ class ProductionRun:
             )
             for job in self._baselines.values()
         ]
-        for task in asyncio.as_completed(pending):
-            receipt = await task
-            completed[receipt["request"]["scene"]] = receipt
+        try:
+            for task in asyncio.as_completed(pending):
+                receipt = await task
+                completed[receipt["request"]["scene"]] = receipt
+                if on_completed is not None:
+                    await on_completed(receipt)
+        finally:
+            # Do not leave workers writing after the workspace owner releases its lock.
+            # Cancellation leaves durable Executor intents for recover-only resume.
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
         return completed
 
     def _completed_job_for_result(self, scene_id: str, result_sha256: str):
@@ -324,16 +341,16 @@ class OperationalPipeline:
     def baseline_jobs(self) -> tuple[Job, ...]:
         return self.run.baseline_jobs()
 
-    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None):
+    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None, on_completed=None):
         return await self.run.dispatch_baselines(
-            provider, authorizations=authorizations, prices=prices
+            provider, authorizations=authorizations, prices=prices, on_completed=on_completed
         )
 
     def render_ready(self):
         """Expose the compiled run readiness at the persisted pipeline boundary."""
         return self.run.render_ready()
 
-    def prepare_qa_packets(self):
+    def prepare_qa_packets(self, scene_ids=None):
         """Write deterministic, exact-hash technical QA packets in one pass.
 
         Visual reviewers still make independent semantic decisions.  This removes
@@ -342,6 +359,8 @@ class OperationalPipeline:
         """
         packets = {}
         for scene_id, job in self.run._active_images.items():
+            if scene_ids is not None and scene_id not in scene_ids:
+                continue
             receipt = self.run.executor.inspect(job.request_id)
             if not receipt or receipt.get("status") != "COMPLETE":
                 continue
