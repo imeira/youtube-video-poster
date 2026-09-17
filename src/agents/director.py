@@ -330,6 +330,12 @@ class DirectorAgent:
         state.save(fs.paths.state_json)
         return receipt
 
+    async def finalize_compiled_delivery(self, episode_id: str, pipeline, renderer, *, hold: int = 4) -> dict[str, Any]:
+        """Render a compiled master and materialize all evidence required by final QA."""
+        receipt = self.render_compiled_video(episode_id, pipeline, renderer, hold=hold)
+        sidecars = await self.prepare_delivery_sidecars(episode_id, pipeline)
+        return {"render_receipt": receipt, "sidecars": sidecars}
+
     async def start_episode(
         self,
         theme: str,
@@ -587,6 +593,83 @@ class DirectorAgent:
         report = {"approved": result.approved, "findings": list(result.findings), "report": result.report}
         _write_json_file(fs.paths.qa_dir / "production_evidence_qa.json", report)
         return report
+
+    async def prepare_delivery_sidecars(self, episode_id: str, pipeline) -> dict[str, Any]:
+        """Create required sidecar captions, thumbnail and metadata from frozen compiled media."""
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.FINAL_QA:
+            raise ValueError("delivery sidecars require FINAL_QA state")
+        request = _read_json_file(fs.paths.request_json)
+        research = _read_json_file(fs.paths.research_dir / "sources.json")
+        script = _read_json_file(fs.paths.script_dir / "script.json")
+        storyboard = _read_json_file(fs.paths.storyboard_dir / "scenes.json")
+        scenes = storyboard.get("scenes")
+        narration = script.get("narration")
+        if not isinstance(scenes, list) or not scenes or not isinstance(narration, str) or not narration.strip():
+            raise ValueError("compiled sidecars require persisted narration and storyboard")
+        manifest = pipeline.approved_manifest()
+        frames = tuple(pipeline.episode.frames)
+        if len(frames) != len(manifest.assets) or [scene.get("scene_id") for scene in scenes] != [
+            frame.scene_id for frame in frames
+        ]:
+            raise ValueError("sidecars require the active compiled scene order")
+        images = []
+        for frame, asset in zip(frames, manifest.assets, strict=True):
+            if not asset.path.is_file():
+                raise ValueError("compiled thumbnail asset is missing")
+            images.append({"scene_id": frame.scene_id, "image_path": str(asset.path)})
+        timestamps = [
+            {"start": scene.get("start"), "end": scene.get("end"), "text": scene.get("narration", "")}
+            for scene in scenes
+        ]
+        if any(
+            not isinstance(item["start"], (int, float))
+            or not isinstance(item["end"], (int, float))
+            or item["end"] <= item["start"]
+            or not isinstance(item["text"], str)
+            or not item["text"].strip()
+            for item in timestamps
+        ):
+            raise ValueError("captions require real semantic storyboard timestamps")
+        captions = await self.captions.run(
+            episode_id=episode_id,
+            sentence_timestamps=timestamps,
+            narration=narration,
+            subtitles_dir=str(fs.paths.subtitles_dir),
+        )
+        if not captions.success or not fs.paths.captions_vtt.is_file():
+            raise RuntimeError("caption sidecar generation failed")
+        headline, subtitle, book_subtitle = self.thumbnail_copy(str(request.get("theme", "")))
+        thumbnail = await self.thumbnail.run(
+            episode_id=episode_id,
+            images=images,
+            scenes=scenes,
+            headline=headline,
+            subtitle=subtitle,
+            book_subtitle=book_subtitle,
+            thumbnails_dir=str(fs.paths.thumbnails_dir),
+        )
+        thumbnail_path = Path(thumbnail.data.get("thumbnail_path", "")) if thumbnail.success else None
+        if thumbnail_path is None or not thumbnail_path.is_file():
+            raise RuntimeError("thumbnail generation failed")
+        metadata = await self.metadata.run(
+            episode_id=episode_id,
+            theme=str(request.get("theme", "")),
+            research_data=research,
+            scenes=scenes,
+            language=str(request.get("language", "pt-BR")),
+            metadata_dir=str(fs.paths.metadata_dir),
+            captions_files=captions.data.get("files", {}),
+            thumbnail_path=str(thumbnail_path),
+        )
+        if not metadata.success or not (fs.paths.metadata_dir / "metadata.json").is_file():
+            raise RuntimeError("metadata generation failed")
+        return {
+            "captions": captions.data["files"],
+            "thumbnail": str(thumbnail_path),
+            "metadata": metadata.data.get("metadata_path", ""),
+        }
 
     async def deliver_for_approval(
         self,

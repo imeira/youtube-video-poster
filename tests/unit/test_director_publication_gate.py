@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from src.agents.base import AgentResult
 from src.agents.director import DirectorAgent
 from src.approval.receipts import ApprovalReceipt, save_approval_receipt
 from src.pipeline.revision import RevisionRegistry
@@ -168,6 +171,74 @@ async def test_director_delivers_thumbnail_and_video_with_separate_receipts(tmp_
     assert {receipt["artifact_kind"] for receipt in receipts} == {"thumbnail", "video"}
     assert (fs.paths.qa_dir / "delivery" / "thumbnail.json").is_file()
     assert (fs.paths.qa_dir / "delivery" / "video.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_director_builds_caption_thumbnail_and_metadata_sidecars_from_compiled_packet(tmp_path, monkeypatch):
+    class Captions:
+        async def run(self, **kwargs):
+            output = Path(kwargs["subtitles_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "captions.vtt").write_text("WEBVTT\n\n", encoding="utf-8")
+            return AgentResult(success=True, data={"files": {"vtt": str(output / "captions.vtt")}})
+
+    class Thumbnail:
+        async def run(self, **kwargs):
+            output = Path(kwargs["thumbnails_dir"]) / "thumbnail.png"
+            output.write_bytes(b"thumbnail")
+            return AgentResult(success=True, data={"thumbnail_path": str(output)})
+
+    class Metadata:
+        async def run(self, **kwargs):
+            output = Path(kwargs["metadata_dir"]) / "metadata.json"
+            output.write_text(json.dumps({"references": kwargs["research_data"]["references"]}), encoding="utf-8")
+            return AgentResult(success=True, data={"metadata_path": str(output)})
+
+    class Frame:
+        scene_id = "SC001"
+
+    class Asset:
+        path = tmp_path / "scene.png"
+
+    class Manifest:
+        assets = (Asset(),)
+
+    class Pipeline:
+        episode = type("Episode", (), {"frames": (Frame(),)})()
+
+        def approved_manifest(self):
+            return Manifest()
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = DirectorAgent()
+    director._agents.update(captions=Captions(), thumbnail=Thumbnail(), metadata=Metadata())
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
+    Asset.path.write_bytes(b"image")
+    fs.paths.request_json.write_text(json.dumps({"theme": "Abraão — Gênesis 15–18", "language": "pt-BR"}), encoding="utf-8")
+    (fs.paths.research_dir / "sources.json").write_text(json.dumps({"references": [{"book": "Gênesis"}]}), encoding="utf-8")
+    (fs.paths.script_dir / "script.json").write_text(json.dumps({"narration": "Uma promessa.", "segments": [{"id": "S001"}]}), encoding="utf-8")
+    (fs.paths.storyboard_dir / "scenes.json").write_text(json.dumps({"scenes": [{"scene_id": "SC001", "start": 0, "end": 2, "narration": "Uma promessa."}]}), encoding="utf-8")
+
+    result = await director.prepare_delivery_sidecars("EP8", Pipeline())
+
+    assert result["thumbnail"] == str(fs.paths.thumbnails_dir / "thumbnail.png")
+    assert fs.paths.captions_vtt.is_file()
+    assert (fs.paths.metadata_dir / "metadata.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_compiled_delivery_finalizer_runs_sidecars_after_render():
+    director = DirectorAgent()
+    director.render_compiled_video = Mock(return_value={"render": "receipt"})
+    director.prepare_delivery_sidecars = AsyncMock(return_value={"thumbnail": "thumbnail.png"})
+
+    result = await director.finalize_compiled_delivery("EP8", pipeline="pipeline", renderer="renderer")
+
+    assert result == {"render_receipt": {"render": "receipt"}, "sidecars": {"thumbnail": "thumbnail.png"}}
+    director.render_compiled_video.assert_called_once_with("EP8", "pipeline", "renderer", hold=4)
+    director.prepare_delivery_sidecars.assert_awaited_once_with("EP8", "pipeline")
 
 
 def test_director_rejection_supersedes_delivery_lineage_and_reopens_assembly(tmp_path, monkeypatch):
