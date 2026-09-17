@@ -143,9 +143,11 @@ adapters; dynamically imported factories now receive both root and plan.
    prices. Renewing evidence requires another approved plan.
 6. Pin a specific OpenRouter vision model and provider endpoint with image and
    strict JSON-schema support. Record the verified provider context ceiling,
-   prompt/completion USD per million token prices, and reviewer authority. The
-   supported contract permits no additional per-image or per-request fee. Use
-   a dedicated deployment key with an account-side spending limit as an
+   prompt/completion USD per million token prices, the maximum per-image and
+   per-request fees, and reviewer authority. Use the provider's actual nonzero
+   image/request ceilings instead of zero placeholders; all three submitted
+   images (candidate plus two canonical portraits) enter the reserve. Use a
+   dedicated deployment key with an account-side spending limit as an
    additional control. The requests pin `provider.only`, disable fallbacks,
    require supported parameters and send explicit `max_price` limits, following
    [OpenRouter provider routing](https://openrouter.ai/docs/guides/routing/provider-selection).
@@ -157,7 +159,8 @@ adapters; dynamically imported factories now receive both root and plan.
 8. Budget for 25 first-pass images plus up to 10 corrections. Reserve at least
    35 independent reviews at the conservative per-review bound
    `(context_tokens * prompt_per_million + max_tokens * completion_per_million)
-   / 1,000,000`. `35 * image_cost + non_image_reserve` must fit the $6 plan.
+   / 1,000,000 + 3 * image_per_item + request`. `35 * image_cost +
+   non_image_reserve` must fit the $6 plan.
    A model whose full-context bound does not fit must not be silently substituted.
    Uncertain responses consume their reserve and block for reconciliation.
 

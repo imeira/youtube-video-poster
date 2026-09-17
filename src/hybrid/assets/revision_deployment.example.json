@@ -54,8 +54,8 @@
       "valid_until": 0,
       "prompt_per_million": "REQUIRED",
       "completion_per_million": "REQUIRED",
-      "image": "0",
-      "request": "0"
+      "image_per_item": "REQUIRED",
+      "request": "REQUIRED"
     }
   }
 }

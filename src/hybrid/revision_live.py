@@ -186,9 +186,11 @@ class LiveDependencies:
             raise ValueError("exact image endpoint price mismatch")
         r = c["reviewer"]
         # Full provider context charged as input is deliberately conservative.
-        # Image/request charges are explicitly zero in this supported contract.
-        per_review = (amount(r["price"]["prompt_per_million"]) * r["context_tokens"]
-                      + amount(r["price"]["completion_per_million"]) * r["max_tokens"]) / 1000000
+        # Per-image and per-request charges are reserved explicitly as well.
+        per_review = ((amount(r["price"]["prompt_per_million"]) * r["context_tokens"]
+                       + amount(r["price"]["completion_per_million"]) * r["max_tokens"]) / 1000000
+                      + amount(r["price"]["image_per_item"]) * 3
+                      + amount(r["price"]["request"]))
         count = len(script["segments"]) + 10
         if (per_review * count > amount(c["non_image_reserve"])
                 or amount(c["image_cost"]) * count + amount(c["non_image_reserve"]) > amount(plan["budget_usd"])):
@@ -299,7 +301,8 @@ class LiveDependencies:
         body = dict(model=r["model"], max_tokens=r["max_tokens"], temperature=0, stream=False,
             provider=dict(only=[r["provider"]], allow_fallbacks=False, require_parameters=True,
                 max_price=dict(prompt=r["price"]["prompt_per_million"],
-                               completion=r["price"]["completion_per_million"], image=0, request=0)),
+                               completion=r["price"]["completion_per_million"],
+                               image=r["price"]["image_per_item"], request=r["price"]["request"])),
             response_format=dict(type="json_schema", json_schema=dict(name="visual_review", strict=True, schema=schema)),
             messages=[dict(role="system", content=(
                 "Independently inspect the actual candidate pixels against both canonical portraits and scene narration/action. "
