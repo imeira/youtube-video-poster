@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,24 @@ class DeliveryController:
         )
         return thumbnail_receipt, video_receipt
 
+    @staticmethod
+    def _recover_receipt(receipt_path: Path, *, episode_id: str, approval: ApprovalReceipt) -> dict[str, Any]:
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise DeliveryError("delivery recovery receipt is unreadable") from error
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != {"episode_id", "artifact_kind", "approval", "message_id"}
+            or receipt.get("episode_id") != episode_id
+            or receipt.get("artifact_kind") != approval.artifact_kind
+            or receipt.get("approval") != asdict(approval)
+            or type(receipt.get("message_id")) is not int
+            or receipt["message_id"] <= 0
+        ):
+            raise DeliveryError("delivery recovery receipt does not bind current approved media")
+        return receipt
+
     async def _send(
         self,
         chat_id: str,
@@ -54,7 +73,7 @@ class DeliveryController:
         method_name: str,
     ) -> dict[str, Any]:
         if receipt_path.exists():
-            raise DeliveryError("delivery receipt already exists; use readback recovery")
+            return self._recover_receipt(receipt_path, episode_id=episode_id, approval=approval)
         sender = getattr(self.messenger, method_name, None)
         if not callable(sender):
             raise DeliveryError("notification provider does not support required media")

@@ -9,6 +9,7 @@ import pytest
 
 from src.approval.receipts import ApprovalReceipt
 from src.delivery.controller import DeliveryController, DeliveryError
+from src.hybrid.artifacts import atomic_json
 
 
 class Messenger:
@@ -70,3 +71,22 @@ async def test_delivery_controller_does_not_retry_or_record_success_when_media_s
 
     assert messenger.videos == 1
     assert not (tmp_path / "delivery" / "video.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_delivery_resumes_from_verified_thumbnail_receipt_without_resending(tmp_path: Path):
+    messenger = Messenger()
+    thumbnail = approved(tmp_path, "thumbnail", ".png")
+    video = approved(tmp_path, "video", ".mp4")
+    root = tmp_path / "delivery"
+    atomic_json(root / "thumbnail.json", {
+        "episode_id": "EP8", "artifact_kind": "thumbnail", "approval": thumbnail.__dict__, "message_id": 101,
+    })
+
+    thumbnail_receipt, video_receipt = await DeliveryController(messenger).deliver_for_approval(
+        chat_id="test-chat", episode_id="EP8", thumbnail=thumbnail, video=video, receipt_dir=root,
+    )
+
+    assert thumbnail_receipt["message_id"] == 101
+    assert video_receipt["message_id"] == 202
+    assert (messenger.photos, messenger.videos) == (0, 1)
