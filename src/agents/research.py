@@ -234,6 +234,133 @@ class ResearchAgent(BaseAgent):
                 ),
             },
         },
+        "promessa de um filho para abraão e sara": {
+            "references": [
+                {"book": "Gênesis", "chapter": 15, "verses": "1-6"},
+                {"book": "Gênesis", "chapter": 17, "verses": "1-8"},
+                {"book": "Gênesis", "chapter": 17, "verses": "15-22"},
+                {"book": "Gênesis", "chapter": 18, "verses": "1-15"},
+            ],
+            "source_urls": [
+                "https://www.bibliaonline.com.br/nvi/gn/15",
+                "https://www.bibliaonline.com.br/acf/gn/15",
+                "https://www.bibliaonline.com.br/nvi/gn/17",
+                "https://www.bibliaonline.com.br/acf/gn/17",
+                "https://www.bibliaonline.com.br/nvi/gn/18",
+                "https://www.bibliaonline.com.br/acf/gn/18",
+            ],
+            "chapter_context": {
+                "read_scope": "Gênesis 15–18",
+                "episode_scope": (
+                    "Gênesis 15:1-6 (promessa das estrelas), "
+                    "Gênesis 17:1-8 e 17:15-22 (mudança de nomes, promessa de Isaque), "
+                    "Gênesis 18:1-15 (três visitantes, Sara ri)"
+                ),
+                "excluded_from_episode": (
+                    "Gênesis 15:7-21 (aliança dos animais cortados — complexa para o público "
+                    "infantil), Gênesis 16 (Agar e Ismael — conflito conjugal, adequado a "
+                    "episódio posterior), Gênesis 17:9-14 (aliança da circuncisão — detalhe "
+                    "cultural não narrável para crianças), Gênesis 18:16-33 (intercessão por "
+                    "Sodoma — juízo e destruição, tema sensível para episódio próprio)"
+                ),
+                "previous_context_not_retold": (
+                    "Gênesis 12–13 narrados nos EP6 e EP7 não serão recontados; o episódio "
+                    "assume que Abrão já está em Canaã, separado de Ló."
+                ),
+            },
+            "summary": (
+                "O Senhor apareceu a Abrão e prometeu que sua descendência seria tão "
+                "numerosa quanto as estrelas do céu; Abrão creu e isso lhe foi atribuído "
+                "como justiça. Anos depois, quando Abrão tinha noventa e nove anos, Deus "
+                "lhe apareceu novamente, mudou seu nome para Abraão e o de Sarai para Sara, "
+                "e prometeu que Sara teria um filho chamado Isaque. Depois, três visitantes "
+                "chegaram à tenda de Abraão, e um deles reiterou que Sara teria um filho "
+                "dentro de um ano; Sara riu por incredulidade, mas o Senhor perguntou se "
+                "existia algo impossível para Ele."
+            ),
+            "key_facts": [
+                "Depois dessas coisas, a palavra do Senhor veio a Abrão em uma visão dizendo: Não tenha medo, Abrão, eu sou o seu escudo; a sua recompensa será muito grande",
+                "Abrão perguntou ao Senhor que lhe daria, pois continuava sem filhos e o herdeiro de sua casa era Eliézer de Damasco",
+                "O Senhor respondeu que o herdeiro de Abrão não seria Eliézer, mas aquele que fosse gerado por ele",
+                "O Senhor levou Abrão para fora da tenda e disse: Olhe para o céu e conte as estrelas, se é que pode contá-las; assim será a sua descendência",
+                "Abrão creu no Senhor, e o Senhor lhe atribuiu isso como justiça",
+                "Quando Abrão tinha noventa e nove anos de idade, o Senhor lhe apareceu e disse: Eu sou o Deus Todo-poderoso; ande diante de mim e seja íntegro",
+                "Deus disse a Abrão: Você será o pai de uma multidão de nações; já não será chamado Abrão; agora o seu nome será Abraão",
+                "Deus disse que de Abraão faria nações e dele procederiam reis, e estabeleceria a sua aliança como aliança eterna",
+                "Deus disse a Abraão: Quanto a Sarai, a sua mulher, você já não a chamará Sarai; o nome dela será Sara",
+                "Deus disse: Eu a abençoarei e também por meio dela darei a você um filho; dela procederão nações e reis de povos",
+                "Abraão prostrou-se com o rosto em terra e riu ao pensar: Poderá um homem de cem anos gerar um filho? Poderá Sara dar à luz aos noventa anos?",
+                "Abraão disse a Deus: Permite que Ismael viva sob o teu favor; mas Deus respondeu: Sara, a sua mulher, lhe dará um filho, e você o chamará Isaque",
+                "Deus disse: Estabelecerei com Isaque a minha aliança, que será aliança eterna para a descendência dele; Sara dará a você um filho no ano que vem, por esta época",
+                "O Senhor apareceu a Abraão próximo aos carvalhos de Manre, quando ele estava sentado à entrada da sua tenda, na hora mais quente do dia",
+                "Abraão ergueu os olhos e viu três homens em pé próximos dele; correu ao encontro deles e curvou-se até o chão",
+                "Abraão ofereceu água para lavarem os pés e descansarem debaixo da árvore, e trouxe comida para recuperarem as forças",
+                "Um dos visitantes perguntou: Onde está Sara, a sua mulher? Abraão respondeu: Ali na tenda",
+                "O visitante disse: Voltarei a você dentro de um ano, e Sara, a sua mulher, terá um filho",
+                "Sara escutava à entrada da tenda, atrás dele; Abraão e Sara já eram velhos, de idade bem avançada, e Sara já tinha deixado de menstruar",
+                "Sara riu consigo mesma ao pensar: Depois de velha e enrugada, e o meu senhor já idoso, ainda terei esse prazer?",
+                "O Senhor disse a Abraão: Por que Sara riu e disse: Poderei realmente dar à luz, agora que sou idosa? Existe alguma coisa impossível para o Senhor?",
+                "Sara teve medo e mentiu: Eu não ri; mas o Senhor disse: Não negue; você riu",
+            ],
+            "visual_constraints": {
+                "god_visual_representation": (
+                    "Toda aparição, fala ou promessa do Senhor será representada apenas por "
+                    "luz, vento, som e mudança ambiental abstrata; nunca por corpo, rosto, "
+                    "mãosos, silhueta humana ou figura nas nuvens. Os três visitantes de "
+                    "Gênesis 18 podem ser mostrados como três homens luminosos e respeitosos, "
+                    "mas sem revelar que são divinos; o foco fica na hospitalidade de Abraão"
+                ),
+                "name_continuity": (
+                    "Começar o episódio com Abrão e Sarai (nomes de Gênesis 15); a mudança "
+                    "para Abraão e Sara acontece em Gênesis 17 e deve ser narrada e mostrada "
+                    "como evento narrativo. O título canônico do episódio usa Abraão e Sara "
+                    "para reconhecimento do público"
+                ),
+                "ep6_ep7_character_continuity": (
+                    "Reutilizar as identidades canônicas aprovadas de Abrão/Abraão e Sarai/Sara "
+                    "do EP6 e EP7 sem gerar substituições de personagem. Abrão envelhece visivelmente "
+                    "entre os episódios, mas mantém a mesma identidade visual. Sara não recebe "
+                    "idade inventada além do que o texto informa: noventa anos em Gênesis 17"
+                ),
+                "stars_and_covenant_rule": (
+                    "A cena das estrelas pode mostrar Abrão olhando para um céu estrelado "
+                    "impressionante; a comparação 'assim será a sua descendência' é narrada, "
+                    "sem transformar estrelas em pessoas ou mostrar a descendência futura"
+                ),
+                "name_change_rule": (
+                    "A mudança de nomes de Abrão para Abraão e de Sarai para Sara pode ser "
+                    "mostrada com leveza e esperança, sem efeitos mágicos visuais; é uma "
+                    "promessa de Deus, não um feitiço"
+                ),
+                "three_visitors_rule": (
+                    "Os três visitantes são homens comuns em aparência; Abraão os recebe com "
+                    "hospitalidade (água, comida, descanso). Não revelar sua natureza divina "
+                    "visualmente; o texto apenas diz que um deles falou como o Senhor. "
+                    "Manter o tom de hospitalidade e reverência"
+                ),
+                "sarah_laugh_rule": (
+                    "O riso de Sara é de incredulidade e alegria surpresa, não de zombaria; "
+                    "mostrar com ternura e leveza, sem constrangimento cruel. O medo "
+                    "posterior de Sara ao ser confrontada é tratado com carinho, sem medo "
+                    "intenso ou punitivo"
+                ),
+                "age_and_child_rule": (
+                    "Mostrar Abraão e Sara como idosos respeitáveis com cabelos brancos; a "
+                    "idade avançada é parte da promessa e do milagre. Não mostrar Isaque "
+                    "nascendo ou como criança neste episódio (o nascimento pertence ao EP9). "
+                    "Não mostrar Ismael ou sua reação"
+                ),
+                "anachronism_and_scope_guard": (
+                    "Sem mapas impressos, bússola, placas modernas, veículos, arquitetura "
+                    "clássica tardia, armas medievais, camelos. Não antecipar Gênesis 19 "
+                    "(destruição de Sodoma), o nascimento de Isaque (Gênesis 21), o sacrifício "
+                    "de Isaque (Gênesis 22) ou outros eventos posteriores. Não mostrar a "
+                    "aliança dos animais cortados (Gênesis 15:7-21), a circuncisão (Gênesis "
+                    "17:9-14), Agar e Ismael (Gênesis 16) ou a intercessão por Sodoma "
+                    "(Gênesis 18:16-33)"
+                ),
+            },
+        },
         "noé e a arca": {
             "references": [{"book": "Gênesis", "chapter": 6, "verses": "9-22"}, {"book": "Gênesis", "chapter": 7, "verses": "1-24"}, {"book": "Gênesis", "chapter": 8, "verses": "1-19"}],
             "summary": "Noé construiu uma arca por ordem de Deus e salvou sua família e os animais do dilúvio.",
