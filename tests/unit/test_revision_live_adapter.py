@@ -281,7 +281,8 @@ def test_expiry_rechecked_and_canonical_tampering_blocks(deployment, monkeypatch
     with pytest.raises(ValueError, match="non-expired"):
         deps.authorize(run.baseline_jobs(), deps.plan)
     monkeypatch.setattr(live.time, "time", lambda: 1000)
-    Path(next(iter(deps.plan["bindings"]))).write_bytes(b"tampered")
+    bound = next(Path(path) for path in deps.plan["bindings"] if deps.root.parent.parent in Path(path).parents)
+    bound.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="binding"):
         deps.preflight(deps.plan)
 
