@@ -209,6 +209,20 @@ class RevisionHarness:
             {"id": "waiting", "label": "Esperar com esperança", "importance": "NORMAL"},
         ]
         editorial_plan = build_adaptive_plan(parsed_request, indispensable_events, budget_usd="6")
+        if mode == "LIVE":
+            # The executable price contract, not a generic fixture estimate,
+            # governs the pre-spend reconciliation for the approved plan.
+            stills = Decimal(contract["image_cost"]) * editorial_plan["estimated_scene_count"]
+            reserve = Decimal(contract["non_image_reserve"])
+            editorial_plan["estimated_costs_usd"] = {
+                "stills": str(stills.quantize(Decimal("0.01"))),
+                "tts": "0.00", "hero_clips": "0.00", "assembly": "0.00",
+                "total": str((stills + reserve).quantize(Decimal("0.01"))),
+            }
+            editorial_plan["approved_tolerances"] = {
+                "words": 0, "duration_seconds": 0, "scenes": 0, "cost_usd": "0.01"}
+            editorial_plan["plan_identity"] = digest({key: value for key, value in editorial_plan.items()
+                                                        if key != "plan_identity"})
         plan = dict(route="ep8-new-revision-v2", revision=revision, mode=mode, request=request,
                             episode_request=parsed_request.to_dict(), editorial_plan=editorial_plan,
                             successor_brief=successor_brief,
@@ -535,7 +549,16 @@ class RevisionHarness:
             self.fresh(script_path)
             atomic_json(p.qa_dir / "script.json", asdict(qa))
             atomic_json(p.qa_dir / "editorial_reports.json", reports)
-            return script, [script_path, p.qa_dir / "script.json", p.qa_dir / "editorial_reports.json", *p.research_dir.glob("*.json")]
+            biblical_report = script.get("biblical_accuracy_report")
+            if mode == "LIVE" and plan.get("adapter") == "src.hybrid.revision_live:factory":
+                if not isinstance(biblical_report, dict) or biblical_report.get("status") != "PASS":
+                    raise ValueError("independent biblical accuracy report required for LIVE")
+                atomic_json(p.qa_dir / "biblical-accuracy.json", biblical_report)
+            outputs = [script_path, p.qa_dir / "script.json", p.qa_dir / "editorial_reports.json",
+                       *p.research_dir.glob("*.json")]
+            if mode == "LIVE" and plan.get("adapter") == "src.hybrid.revision_live:factory":
+                outputs.append(p.qa_dir / "biblical-accuracy.json")
+            return script, outputs
 
         script = await self.stage("script", script_stage, recoverable=mode == "TEST")
 

@@ -25,6 +25,7 @@ from src.agents.script_qa import ScriptQAAgent
 from src.hybrid.artifacts import Manifest, atomic_json, digest, sha256
 from src.hybrid.execution import Authorization, Price
 from src.hybrid.live import FalFluxProvider, MAX_API_BYTES, _opener
+from src.hybrid.live_editorial import BiblicalFactVerifier, DeterministicLiveScriptAuthor, PreSpendReconciler
 from src.hybrid.revision import read, validate_ep8_script
 from src.providers.notification.telegram_provider import TelegramNotificationProvider
 from src.providers.tts.edge_tts_provider import EdgeTTSProvider
@@ -191,7 +192,7 @@ class LiveDependencies:
                        + amount(r["price"]["completion_per_million"]) * r["max_tokens"]) / 1000000
                       + amount(r["price"]["image_per_item"]) * 3
                       + amount(r["price"]["request"]))
-        count = len(script["segments"]) + 10
+        count = plan["editorial_plan"]["estimated_scene_count"] + 10
         if (per_review * count > amount(c["non_image_reserve"])
                 or amount(c["image_cost"]) * count + amount(c["non_image_reserve"]) > amount(plan["budget_usd"])):
             raise ValueError("worst-case images, correction and review budget exceeded")
@@ -202,7 +203,19 @@ class LiveDependencies:
 
     async def author_script(self, plan, research):
         self.preflight(plan)
-        return _script(self.contract)
+        script = DeterministicLiveScriptAuthor().author(plan, research)
+        report = BiblicalFactVerifier().verify(script)
+        if report["status"] != "PASS":
+            raise ValueError("independent biblical verification blocked script")
+        editorial = plan["editorial_plan"]
+        PreSpendReconciler().reserve(editorial, {
+            "word_count": len(script["narration"].split()),
+            "duration_seconds": len(script["narration"].split()) / editorial["narration_words_per_minute"] * 60,
+            "scene_count": len(script["segments"]),
+            "estimated_cost_usd": editorial["estimated_costs_usd"]["total"],
+        }, plan["budget_usd"], lambda: None)
+        script["biblical_accuracy_report"] = report
+        return script
 
     def authorize(self, jobs, plan):
         self.preflight(plan)
@@ -221,9 +234,22 @@ class LiveDependencies:
                 or audio_stage["outputs"].get(str(compiled.audio.path)) != compiled.audio.sha256):
             raise ValueError("completed bound narration and timeline required")
         timeline = read(timeline_path)
-        scenes, _ = semantic_timeline(_script(self.contract), timeline["words"], timeline["duration"])
+        script_path = self.root / "EP8" / "script" / "script.json"
+        if not script_path.is_file():
+            raise ValueError("bound authored script required before LIVE authorization")
+        script = read(script_path)
+        validate_ep8_script(script)
+        biblical = BiblicalFactVerifier().verify(script)
+        if biblical["status"] != "PASS":
+            raise ValueError("independent biblical verification blocked authorization")
+        scenes, _ = semantic_timeline(script, timeline["words"], timeline["duration"])
         if compile_storyboard("EP8", compiled.audio, scenes).checksum != compiled.checksum:
             raise ValueError("compilation differs from approved script and timing")
+        PreSpendReconciler().reserve(plan["editorial_plan"], {
+            "word_count": len(script["narration"].split()), "duration_seconds": timeline["duration"],
+            "scene_count": len(scenes),
+            "estimated_cost_usd": str(self.image_cost * len(scenes) + self.prior_spend),
+        }, plan["budget_usd"], lambda: None)
         executor = Executor(self.root / "executor.sqlite3", Config(
             concurrency=plan["image_workers"], limit=amount(plan["budget_usd"])), prior_spend=self.prior_spend)
         production = ProductionRun(compiled, executor, Manifest.load(plan["references"]["manifest"]),

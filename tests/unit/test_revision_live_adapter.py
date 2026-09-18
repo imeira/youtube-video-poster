@@ -44,7 +44,7 @@ def deployment(tmp_path, monkeypatch):
     evidence = dict(authority="mock price reviewer", source_url="https://example.test/price-evidence",
                     observed_at=990, valid_until=2000)
     c = dict(schema_version=1, adapter=live.ADAPTER, endpoint=live.ENDPOINT, image_cost="0.022",
-        non_image_reserve="0.50", visual_license="mock licensed original artwork",
+        non_image_reserve="0.75", visual_license="mock licensed original artwork",
         script=dict(sha256=sha256(live.SCRIPT), authority="mock human editor"),
         image_price=dict(**evidence, endpoint=live.ENDPOINT, amount="0.022", manifest_checksum=manifest.checksum,
             width=1280, height=720, num_images=1, output_format="png", includes_reference_inputs=True),
@@ -82,8 +82,11 @@ def change_plan(deployment, change):
 
 def compiled(deps):
     script = asyncio.run(deps.author_script(deps.plan, {}))
-    words = [dict(word=w, start=i / 5, end=(i + 1) / 5) for i, w in enumerate(script["narration"].split())]
-    duration = len(words) / 5
+    script_path = deps.root / "EP8/script/script.json"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(script_path, script)
+    words = [dict(word=w, start=i / 2, end=(i + 1) / 2) for i, w in enumerate(script["narration"].split())]
+    duration = len(words) / 2
     scenes, _ = semantic_timeline(script, words, duration)
     audio = deps.root / "EP8/audio/narration.wav"
     audio.parent.mkdir(parents=True)
@@ -116,7 +119,9 @@ def test_dynamic_factory_constructs_real_components_and_script(deployment):
     script = asyncio.run(deps.author_script(plan, {}))
     validate_ep8_script(script)
     assert live.ScriptQAAgent().review(script).approved
-    assert len(script["segments"]) == 25 and len(script["narration"].split()) >= 800
+    assert len(script["segments"]) == plan["editorial_plan"]["estimated_scene_count"]
+    assert len(script["narration"].split()) == plan["editorial_plan"]["estimated_word_count"]
+    assert script["thumbnail_concept"]["identity"]
     assert all(s["visual_action"] and s["characters"] for s in script["segments"])
     assert script == asyncio.run(deps.author_script(plan, {}))
 
@@ -172,7 +177,7 @@ def test_authorize_exact_fresh_budget_and_resume(deployment):
         assert 1000 < prices[job.request_id].valid_until <= 1300
     assert sum(a.maximum_cost for a in auth.values()) + deps.prior_spend <= Decimal(deps.plan["budget_usd"])
     assert deps.authorize(jobs, deps.plan) == (auth, prices)
-    assert len(read(deps.root / "live_authorizations.json")["jobs"]) == 25
+    assert len(read(deps.root / "live_authorizations.json")["jobs"]) == deps.plan["editorial_plan"]["estimated_scene_count"]
     for modified in (replace(jobs[0], cost=Decimal("0.001")), replace(jobs[0], endpoint="wrong"),
                      replace(jobs[0], payload={**jobs[0].payload, "prompt": "unapproved"}),
                      replace(jobs[0], mode="TEST")):
