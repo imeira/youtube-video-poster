@@ -66,7 +66,7 @@ def test_public_cli_offline_end_to_end_separate_gates_and_supersession(tmp_path)
     assert ready["status"] == "WAITING_THUMBNAIL_APPROVAL"
     artifacts = ready["artifacts"]
     control = read(root / "revision.json")
-    assert set(control["stages"]) == {"script", "audio_storyboard", "post_audio_contracts", "images", "telegram_visual_freeze", "motion_plan", "encode", "sidecars", "final_qa", "telegram_thumbnail"}
+    assert set(control["stages"]) == {"script", "audio_storyboard", "post_audio_contracts", "images", "telegram_visual_freeze", "heroes", "motion_plan", "encode", "sidecars", "final_qa", "telegram_thumbnail"}
     assert all(s["status"] == "COMPLETE" and s["elapsed_seconds"] >= 0 for s in control["stages"].values())
     assert control["stages"]["encode"]["result"]["render_invocations"] == 1
     assert control["stages"]["sidecars"]["result"]["layers"] == [
