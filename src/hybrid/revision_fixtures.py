@@ -22,6 +22,9 @@ from src.hybrid.execution import ProviderResult
 
 class TestDependencies:
     mode = "TEST"
+    # Factory admission capability: this fixture is deliberately local-only.
+    local_fake = True
+    test_fake_contract = "local-only-v1"
     endpoint = "local-fixture/image-edit-v1"
     image_cost = Decimal(".001")
 

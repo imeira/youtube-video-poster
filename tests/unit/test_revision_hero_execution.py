@@ -6,7 +6,8 @@ import pytest
 from PIL import Image
 
 from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet, sha256
-from src.hybrid.execution import Job, ProviderResult
+from src.hybrid.execution import Authorization, Executor, Job, Price, ProviderResult
+from src.hybrid.planner import Config
 from src.hybrid.revision import RevisionHarness, read
 
 
@@ -59,6 +60,11 @@ def _manifest(tmp_path):
 
 def _plan():
     return {"mode": "TEST", "hero_plan": {"enabled": True, "endpoint": "runpod-test", "unit_cost_usd": "0.25"},
+            "image_workers": 2}
+
+
+def _live_plan():
+    return {"mode": "LIVE", "hero_plan": {"enabled": True, "endpoint": "runpod-live", "unit_cost_usd": "0.25"},
             "image_workers": 2}
 
 
@@ -145,3 +151,58 @@ async def test_hero_manifest_replaces_provider_error_before_persistence(tmp_path
     assert read(target)["receipts"][0]["terminal_reason"] == "PROVIDER_ERROR"
     for forbidden in ("https://", "SIGNED", "SECRET", "Authorization"):
         assert forbidden not in persisted
+
+
+@pytest.mark.asyncio
+async def test_live_hero_requires_exact_authorization_and_reserves_once_before_post(tmp_path):
+    _, stills = _manifest(tmp_path)
+    live_still = FrozenAsset.approve(stills[0].path, "human", "LIVE")
+    sheet = tmp_path / "live-sheet.png"
+    contact_sheet([live_still], sheet)
+    live_manifest = Manifest.freeze([live_still], FrozenAsset.approve(sheet, "human", "LIVE"), "human", "LIVE")
+    provider = FakeHeroProvider(tmp_path / "provider")
+    provider.mode = "LIVE"
+    executor = Executor(tmp_path / "heroes.db", Config(limit=Decimal("1")))
+    calls = []
+
+    def authorize(jobs, plan):
+        calls.append(tuple(jobs))
+        job = jobs[0]
+        return ({job.request_id: Authorization(job.request_id, "human", 4_000_000_000, Decimal("0.25"))},
+                {job.request_id: Price(job.endpoint, job.request_id, Decimal("0.25"), 4_000_000_000, "current-price")})
+
+    baseline = Job("S001", "first", "LIVE", "runpod-live", {"input": "approved still"}, live_manifest, Decimal("0.25"))
+    baseline_auth = Authorization(baseline.request_id, "human", 4_000_000_000, Decimal("0.25"))
+    baseline_price = Price(baseline.endpoint, baseline.request_id, Decimal("0.25"), 4_000_000_000, "current-price")
+    baseline_receipt = await executor.run(baseline, provider, baseline_auth, baseline_price)
+    executor.qa(baseline.request_id, baseline_receipt["result_sha256"], True, "independent-qa")
+
+    h = RevisionHarness(tmp_path / "revision")
+    target = tmp_path / "hero-manifest.json"
+    scene = {"scene_id": "S001", "importance": "HIGH", "duration": 5, "motion_intent": "slow pan"}
+    await h.execute_heroes(_live_plan(), "approved-plan", live_manifest, {"S001": live_still}, [scene], provider,
+                            target, executor=executor, authorize=authorize,
+                            predecessors={"S001": baseline.request_id})
+    await h.execute_heroes(_live_plan(), "approved-plan", live_manifest, {"S001": live_still}, [scene], provider,
+                            target, executor=executor, authorize=authorize,
+                            predecessors={"S001": baseline.request_id})
+    assert provider.posts == 2  # one baseline and one authorized hero POST
+    assert len(calls) == 1
+    assert executor.inspect(calls[0][0].request_id)["charged"] == "0.25"
+
+
+@pytest.mark.asyncio
+async def test_live_hero_never_posts_without_authorization_or_budget_reservation(tmp_path):
+    _, stills = _manifest(tmp_path)
+    live_still = FrozenAsset.approve(stills[0].path, "human", "LIVE")
+    sheet = tmp_path / "live-sheet.png"
+    contact_sheet([live_still], sheet)
+    live_manifest = Manifest.freeze([live_still], FrozenAsset.approve(sheet, "human", "LIVE"), "human", "LIVE")
+    provider = FakeHeroProvider(tmp_path / "provider")
+    provider.mode = "LIVE"
+    h = RevisionHarness(tmp_path / "revision")
+    scene = {"scene_id": "S001", "importance": "HIGH", "duration": 5, "motion_intent": "slow pan"}
+    with pytest.raises(PermissionError, match="authorizer"):
+        await h.execute_heroes(_live_plan(), "approved-plan", live_manifest, {"S001": live_still}, [scene], provider,
+                                tmp_path / "heroes.json")
+    assert provider.posts == 0

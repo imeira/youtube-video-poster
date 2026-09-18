@@ -559,6 +559,28 @@ def test_structured_events_are_allowlisted_and_redact_secrets_and_signed_urls(tm
     assert json.loads(raw) == event
 
 
+@pytest.mark.asyncio
+async def test_revision_stage_failure_never_persists_cookie_session_bearer_or_signed_url(tmp_path):
+    from src.hybrid.revision import RevisionHarness
+
+    with RevisionHarness(tmp_path / "revision") as harness:
+        harness.create_plan(mode="TEST", request="test")
+
+        async def failing_stage():
+            raise RuntimeError(
+                "Cookie: sessionid=SUPER_SECRET_VALUE; "
+                "Authorization: Bearer BEARER_SECRET; "
+                "https://provider.invalid/result?X-Amz-Signature=SIGNED_SECRET"
+            )
+
+        with pytest.raises(RuntimeError):
+            await harness.stage("leaking", failing_stage)
+
+    raw = (tmp_path / "revision" / "revision-events.jsonl").read_text(encoding="utf-8")
+    for secret in ("SUPER_SECRET_VALUE", "BEARER_SECRET", "SIGNED_SECRET", "sessionid"):
+        assert secret not in raw
+
+
 def test_structured_events_retry_short_os_writes_until_complete(tmp_path, monkeypatch):
     import src.hybrid.observability as observability
 

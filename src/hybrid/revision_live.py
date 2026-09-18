@@ -362,6 +362,23 @@ class LiveDependencies:
                 raise ValueError("unknown approved scene")
             if job.category == "correction":
                 expected = production.remediation_job(job.scene, expected.payload["prompt"] + CORRECTION)
+            if job.category == "hero":
+                hero = self.contract.get("hero", {})
+                baseline_receipt = executor.inspect(expected.request_id)
+                if (not plan["heroes"] or job.endpoint != hero.get("endpoint_id")
+                        or job.cost != amount(hero.get("unit_cost_usd", "-1"))
+                        or job.predecessor != expected.request_id
+                        or not baseline_receipt or baseline_receipt.get("qa") is not True
+                        or job.manifest != production.source_manifest
+                        or set(job.payload) != {"input"}
+                        or set(job.payload["input"]) != {"image", "prompt", "duration", "resolution", "aspect_ratio", "camera_fixed", "generate_audio"}
+                        or job.payload["input"]["duration"] != 5
+                        or job.payload["input"]["resolution"] != "720p"
+                        or job.payload["input"]["aspect_ratio"] != "16:9"
+                        or job.payload["input"]["camera_fixed"] is not True
+                        or job.payload["input"]["generate_audio"] is not False):
+                    raise ValueError("hero differs from exact approved baseline-bound request")
+                continue
             if job != expected:
                 raise ValueError("job differs from exact approved compiled request")
         # Durable authority includes pending/ambiguous requests across resumes.
@@ -375,10 +392,16 @@ class LiveDependencies:
                 sum((amount(v) for v in ledger["jobs"].values()), self.prior_spend) > amount(plan["budget_usd"])):
             raise ValueError("exact authorization total exceeds budget")
         atomic_json(path, ledger)
-        expiry = min(time.time() + 300, self.contract["image_price"]["valid_until"])
-        evidence = digest(self.contract["image_price"])
-        return ({j.request_id: Authorization(j.request_id, reviewer, expiry, j.cost) for j in jobs},
-                {j.request_id: Price(j.endpoint, j.request_id, j.cost, expiry, evidence) for j in jobs})
+        def current_price(job):
+            if job.category == "hero":
+                evidence = self.contract["hero"]
+                if not evidence["observed_at"] <= time.time() < evidence["valid_until"] <= evidence["observed_at"] + 86400:
+                    raise ValueError("current non-expired hero price evidence required")
+                return min(time.time() + 300, evidence["valid_until"]), digest(evidence)
+            evidence = self.contract["image_price"]
+            return min(time.time() + 300, evidence["valid_until"]), digest(evidence)
+        return ({j.request_id: Authorization(j.request_id, reviewer, current_price(j)[0], j.cost) for j in jobs},
+                {j.request_id: Price(j.endpoint, j.request_id, j.cost, current_price(j)[0], current_price(j)[1]) for j in jobs})
 
     def _request_review(self, body):
         request = urllib.request.Request(REVIEW_URL, data=json.dumps(body).encode(), method="POST",

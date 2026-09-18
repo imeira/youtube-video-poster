@@ -657,7 +657,9 @@ class RevisionHarness:
         try:
             result, paths = await operation()
         except Exception as error:
-            self.event("FAILED", stage=name, error=str(error), recovery=bool(receipt))
+            # Exception messages originate in providers and can contain headers,
+            # cookies or signed URLs.  Persist a stable allowlisted code only.
+            self.event("FAILED", stage=name, error="STAGE_FAILURE", recovery=bool(receipt))
             raise
         self.load()  # revalidate upstream inputs after any external work
         self.control["stages"][name] = dict(status="COMPLETE", result=result,
@@ -680,6 +682,16 @@ class RevisionHarness:
                 deps = getattr(importlib.import_module(module), factory)(directory, plan)
             if deps is None:
                 raise ValueError("LIVE deployment adapter required; no provider fallback")
+        if plan["mode"] == "TEST":
+            # TEST admits only an explicitly-declared local fixture.  Check this
+            # before invoking any provider method so an adapter cannot use TEST
+            # as a route to construct or call a remote client.
+            endpoints = [getattr(owner, "endpoint", "") for owner in
+                         (deps, getattr(deps, "images", None), getattr(deps, "hero", None))]
+            if (getattr(deps, "local_fake", False) is not True
+                    or getattr(deps, "test_fake_contract", "") != "local-only-v1"
+                    or any("//" in str(endpoint) for endpoint in endpoints)):
+                raise ValueError("TEST deployment requires an explicit local fake without network endpoints")
         if deps.mode != plan["mode"] or deps.images.mode != plan["mode"]:
             raise ValueError("provider mode mismatch")
         required_methods = ((deps, "author_script"), (deps, "visual_qa"), (deps.tts, "synthesize"),
@@ -721,7 +733,8 @@ class RevisionHarness:
                 raise ValueError("LIVE provider differs from approved deployment contract")
         return deps
 
-    async def execute_heroes(self, plan, plan_hash, manifest, images, scenes, provider, target):
+    async def execute_heroes(self, plan, plan_hash, manifest, images, scenes, provider, target, *, executor=None,
+                              authorize=None, predecessors=None):
         """Run approved hero work once, or recover it without another POST.
 
         The manifest is the write-ahead checkpoint at this provider boundary.
@@ -763,7 +776,8 @@ class RevisionHarness:
                        "duration": 5, "resolution": "720p", "aspect_ratio": "16:9",
                        "camera_fixed": True, "generate_audio": False}}
             job = Job(scene=scene_id, category="hero", mode=plan["mode"], endpoint=config["endpoint"],
-                      payload=payload, manifest=manifest, cost=Decimal(config["unit_cost_usd"]))
+                      payload=payload, manifest=manifest, cost=Decimal(config["unit_cost_usd"]),
+                      predecessor=(predecessors or {}).get(scene_id, ""))
             if entry and entry.get("request_id") != job.request_id:
                 raise ValueError("hero request binding mismatch")
             if entry and entry["status"] == "COMPLETE":
@@ -788,8 +802,24 @@ class RevisionHarness:
                 atomic_json(target, state)
             try:
                 async with lock:
-                    result = (await provider.recover(job, job.request_id, entry["provider_id"], "", checkpoint)
-                              if entry.get("provider_id") else await provider.submit(job, job.request_id, checkpoint))
+                    if plan["mode"] == "LIVE":
+                        if executor is None or not callable(authorize):
+                            raise PermissionError("LIVE hero executor and exact authorizer required")
+                        existing = executor.inspect(job.request_id)
+                        if existing is None:
+                            authorizations, prices = authorize((job,), plan)
+                            if (set(authorizations) != {job.request_id}
+                                    or set(prices) != {job.request_id}):
+                                raise PermissionError("LIVE hero requires exact current authorization")
+                            receipt = await executor.run(job, provider,
+                                authorization=authorizations[job.request_id], price=prices[job.request_id])
+                        else:
+                            receipt = await executor.run(job, provider)
+                        result = SimpleNamespace(path=receipt["result"],
+                                                 actual_cost=Decimal(receipt["actual_cost"]))
+                    else:
+                        result = (await provider.recover(job, job.request_id, entry["provider_id"], "", checkpoint)
+                                  if entry.get("provider_id") else await provider.submit(job, job.request_id, checkpoint))
             except (TimeoutError, asyncio.CancelledError):
                 entry["status"] = "AMBIGUOUS"
                 atomic_json(target, state)
@@ -1151,7 +1181,10 @@ class RevisionHarness:
         async def heroes_stage():
             images = {frame.scene_id: asset for frame, asset in zip(pipeline.episode.frames, manifest.assets, strict=True)}
             result = await self.execute_heroes(plan, self.control["plan_hash"], manifest, images,
-                connected_scenes, deps.hero if plan["heroes"] else None, hero_manifest_path)
+                connected_scenes, deps.hero if plan["heroes"] else None, hero_manifest_path,
+                executor=pipeline.run.executor if mode == "LIVE" else None,
+                authorize=deps.authorize if mode == "LIVE" else None,
+                predecessors={scene_id: job.request_id for scene_id, job in pipeline.run._active_images.items()})
             return {"hero_manifest": str(hero_manifest_path),
                     "clip_hashes": {scene: asset.sha256 for scene, asset in result["clips"].items()}}, [hero_manifest_path]
 

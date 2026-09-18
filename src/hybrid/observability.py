@@ -53,7 +53,11 @@ _CREDENTIAL = re.compile(
     re.IGNORECASE,
 )
 _CREDENTIAL_KEY = re.compile(
-    r"^(?:token|secret|api[_ -]?key|authorization|password|passwd)$",
+    r"^(?:token|secret|api[_ -]?key|authorization|password|passwd|cookie|session(?:id|[_ -]?id)?)$",
+    re.IGNORECASE,
+)
+_COOKIE = re.compile(
+    r'''\b(?:cookie|set-cookie|session(?:id|[_ -]?id)?)\b\s*[:=]\s*[^;\s,}\]]+''',
     re.IGNORECASE,
 )
 
@@ -62,7 +66,8 @@ def _safe_text(value: str) -> str:
     value = _URL.sub("[REDACTED_URL]", value)
     value = _AUTHORIZATION.sub("[REDACTED_CREDENTIAL]", value)
     value = _NAMED_CREDENTIAL.sub("[REDACTED_CREDENTIAL]", value)
-    return _CREDENTIAL.sub("[REDACTED_CREDENTIAL]", value)
+    value = _CREDENTIAL.sub("[REDACTED_CREDENTIAL]", value)
+    return _COOKIE.sub("[REDACTED_CREDENTIAL]", value)
 
 
 def _json_value(value):

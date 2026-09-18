@@ -547,6 +547,24 @@ def test_exact_safe_curiosity_contract_and_near_duplicate_thumbnail(tmp_path):
             h.fresh(variant)
 
 
+def test_test_dependencies_require_explicit_local_fake_marker_before_any_use(tmp_path):
+    class RemoteLookingFixture(Fixtures):
+        endpoint = "https://remote.invalid/provider"
+        local_fake = True
+
+    deps = RemoteLookingFixture(tmp_path / "providers")
+    with RevisionHarness(tmp_path / "run", dependencies=deps) as harness:
+        with pytest.raises(ValueError, match="local fake"):
+            harness.get_dependencies({"mode": "TEST", "heroes": False}, tmp_path / "run/r001")
+
+    class UnmarkedFixture(Fixtures):
+        local_fake = False
+
+    with RevisionHarness(tmp_path / "run2", dependencies=UnmarkedFixture(tmp_path / "providers2")) as harness:
+        with pytest.raises(ValueError, match="local fake"):
+            harness.get_dependencies({"mode": "TEST", "heroes": False}, tmp_path / "run2/r001")
+
+
 def test_legacy_plan_without_implementation_bindings_cannot_be_approved(tmp_path):
     from src.hybrid.artifacts import digest
     from src.hybrid.revision import implementation_paths

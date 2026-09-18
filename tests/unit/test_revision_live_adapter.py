@@ -374,15 +374,12 @@ def test_live_factory_runs_audited_hero_once_and_resumes_without_resubmit(deploy
     manifest = Manifest.freeze([asset], FrozenAsset.approve(sheet, "human", "LIVE"), "human", "LIVE")
     target = live_root / "r001/EP8/animation/hero-manifest.json"
     scene = {"scene_id": "S001", "importance": "HIGH", "duration": 5, "motion_intent": "slow pan"}
-    first = asyncio.run(RevisionHarness(live_root).execute_heroes(
-        plan, created["plan_hash"], manifest, {"S001": asset}, [scene], deps.hero, target))
-    checkpoint = read(target)
-    assert transport.posts == transport.statuses == transport.downloads == 1
-    assert checkpoint["receipts"][0]["clip_sha256"] == first["clips"]["S001"].sha256
-    resumed = asyncio.run(RevisionHarness(live_root).execute_heroes(
-        plan, created["plan_hash"], manifest, {"S001": asset}, [scene], deps.hero, target))
-    assert resumed["clips"]["S001"].sha256 == first["clips"]["S001"].sha256
-    assert transport.posts == 1
+    # A deployment factory alone is not authority to POST: the revision route
+    # must supply its durable executor and per-request authorizer.
+    with pytest.raises(PermissionError, match="executor and exact authorizer"):
+        asyncio.run(RevisionHarness(live_root).execute_heroes(
+            plan, created["plan_hash"], manifest, {"S001": asset}, [scene], deps.hero, target))
+    assert transport.posts == transport.statuses == transport.downloads == 0
 
 
 @pytest.mark.parametrize("field", ["hero", "status_url"])
