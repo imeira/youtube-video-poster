@@ -98,10 +98,10 @@ class TestDependencies:
 
     def _draw(self, path, request_id):
         rng = random.Random(request_id)
-        image = Image.new("RGB", (640, 360), tuple(rng.randrange(20, 220) for _ in range(3)))
+        image = Image.new("RGB", (1280, 720), tuple(rng.randrange(20, 220) for _ in range(3)))
         draw = ImageDraw.Draw(image)
         for _ in range(25):
-            x, y = rng.randrange(550), rng.randrange(270)
+            x, y = rng.randrange(1190), rng.randrange(630)
             draw.ellipse((x, y, x + 80, y + 80), fill=tuple(rng.randrange(256) for _ in range(3)))
         draw.text((10, 10), "TEST ONLY - synthetic image", fill="white")
         image.save(path)

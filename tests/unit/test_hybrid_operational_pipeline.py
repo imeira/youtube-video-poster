@@ -32,7 +32,7 @@ class ImageProvider:
         checkpoint(provider_id=f"provider-{request_id}")
         await asyncio.sleep(0)
         output = self.root / f"{request_id}.png"
-        Image.new("RGB", (64, 64), "red" if job.category == "hero" else "blue").save(output)
+        Image.new("RGB", (1280, 720), "red" if job.category == "hero" else "blue").save(output)
         return ProviderResult(output, job.cost)
 
     async def recover(self, job, request_id, provider_id, partial, checkpoint):
@@ -125,11 +125,12 @@ async def test_operational_pipeline_prepares_hash_bound_technical_qa_packets(tmp
         workspace=tmp_path / "compiled", endpoint="flux", image_cost=Decimal(".02"),
     )
     receipts = await pipeline.dispatch_baselines(ImageProvider(tmp_path))
+    assert len(list((tmp_path / "compiled" / "qa_packets").glob("*.json"))) == 1
 
     packets = pipeline.prepare_qa_packets()
 
     assert packets["R001"]["result_sha256"] == receipts["R001"]["result_sha256"]
-    assert packets["R001"]["dimensions"] == [64, 64]
+    assert packets["R001"]["dimensions"] == [1280, 720]
     assert packets["R001"]["promotion_authorized"] is False
 
 
@@ -174,13 +175,14 @@ async def test_remediation_becomes_the_only_active_promotable_image(tmp_path):
     initial = (await pipeline.dispatch_baselines(provider))["R001"]
     pipeline.record_visual_qa("R001", initial["result_sha256"], False, "independent-qa")
 
-    correction = pipeline.run.remediation_job("R001", "sem defeito")
-    corrected = await pipeline.run.executor.run(correction, provider)
+    corrected = (await pipeline.dispatch_remediation_wave(
+        {"R001": "sem defeito"}, provider, prefetch=1
+    ))["R001"]
     pipeline.record_visual_qa("R001", corrected["result_sha256"], True, "independent-qa")
     manifest = pipeline.approved_manifest()
 
     assert manifest.assets[0].sha256 == corrected["result_sha256"]
-    assert pipeline.run._active_images["R001"].request_id == correction.request_id
+    assert pipeline.run._active_images["R001"].request_id == corrected["request_id"]
 
 
 @pytest.mark.asyncio
