@@ -415,7 +415,10 @@ class Executor:
                         job, job.request_id, row["provider_id"], row["partial"], checkpoint
                     )
                 else:
-                    raise RuntimeError("unknown submission requires reconciliation; no resubmit")
+                    recover_local = getattr(provider, "recover_local", None)
+                    if not callable(recover_local):
+                        raise RuntimeError("unknown submission requires reconciliation; no resubmit")
+                    result = await recover_local(job, job.request_id, checkpoint)
                 actual = money(result.actual_cost)
                 result_path = Path(result.path).resolve()
                 if actual > job.cost:

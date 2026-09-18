@@ -147,6 +147,38 @@ async def test_intent_exists_before_submit_and_unknown_intent_blocks(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_executor_reconciles_provider_local_checkpoint_without_resubmit(tmp_path):
+    class LocalCheckpointProvider(Provider):
+        def __init__(self, root):
+            super().__init__(root)
+            self.local_id = ""
+
+        async def submit(self, job, request_id, checkpoint):
+            self.calls += 1
+            self.local_id = "provider-" + request_id
+            raise TimeoutError("executor checkpoint interrupted")
+
+        async def recover_local(self, job, request_id, checkpoint):
+            self.recoveries += 1
+            checkpoint(provider_id=self.local_id)
+            output = self.root / (request_id + ".txt")
+            output.write_text("recovered", encoding="utf-8")
+            return ProviderResult(output, job.cost)
+
+    request = job(tmp_path)
+    executor = Executor(tmp_path / "jobs.db", Config())
+    provider = LocalCheckpointProvider(tmp_path)
+
+    with pytest.raises(TimeoutError, match="checkpoint interrupted"):
+        await executor.run(request, provider)
+    receipt = await executor.run(request, provider)
+
+    assert receipt["status"] == "COMPLETE"
+    assert provider.calls == 1
+    assert provider.recoveries == 1
+
+
+@pytest.mark.asyncio
 async def test_live_requires_bound_authorization_and_fresh_price(tmp_path):
     request = job(tmp_path, mode="LIVE", manifest=manifest(tmp_path, "LIVE"))
     executor = Executor(tmp_path / "jobs.db", Config())

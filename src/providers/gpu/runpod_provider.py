@@ -15,6 +15,11 @@ from typing import Any
 import runpod
 
 from src.providers.base import GPU, GPUComputeProvider, PodHandle
+from src.providers.gpu.runpod_lifecycle import (
+    OWNERSHIP_TAG_KEY,
+    pod_ownership_tag,
+    valid_ownership_tag,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +31,13 @@ class RunPodGPUProvider(GPUComputeProvider):
     SECURE cloud preferred (B6: community is unreliable).
     """
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        ownership_tag: str | None = None,
+    ):
+        if ownership_tag is not None and not valid_ownership_tag(ownership_tag):
+            raise ValueError("ownership_tag must be a SHA-256 identifier")
         if api_key is None:
             # Read from .env
             env_path = os.path.expanduser("~/AppData/Local/hermes/.env")
@@ -40,6 +51,8 @@ class RunPodGPUProvider(GPUComputeProvider):
             raise ValueError("RUNPOD_API_KEY not found in .env")
         runpod.api_key = api_key
         self._api_key = api_key
+        self._ownership_tag = ownership_tag
+        self._termination_claimed: set[str] = set()
 
     def list_gpus(self) -> list[GPU]:
         """List all available GPU types."""
@@ -73,6 +86,16 @@ class RunPodGPUProvider(GPUComputeProvider):
         **opts,
     ) -> PodHandle:
         """§55: ALLOCATE — provision a GPU pod."""
+        if self._ownership_tag is None:
+            raise PermissionError("strong ownership tag required before provisioning")
+        env = opts.get("env", {})
+        if not isinstance(env, dict):
+            raise ValueError("pod environment must be a mapping")
+        env = dict(env)
+        existing_owner = env.get(OWNERSHIP_TAG_KEY)
+        if existing_owner is not None and existing_owner != self._ownership_tag:
+            raise ValueError("pod environment has a conflicting ownership tag")
+        env[OWNERSHIP_TAG_KEY] = self._ownership_tag
         logger.info(f"Provisioning {gpu_id} on {cloud} cloud (image={image})")
         pod = runpod.create_pod(
             name=opts.get("name", "hermes-studio"),
@@ -85,6 +108,7 @@ class RunPodGPUProvider(GPUComputeProvider):
             volume_in_gb=opts.get("volume_in_gb", 0),
             docker_args=opts.get("docker_args", ""),
             ports=opts.get("ports"),
+            env=env,
         )
         pod_id = pod.get("id")
         if not pod_id:
@@ -122,29 +146,39 @@ class RunPodGPUProvider(GPUComputeProvider):
         logger.warning(f"Pod {pod_id} did not reach RUNNING in {timeout_seconds}s")
         return False
 
-    def terminate_pod(self, pod_id: str) -> None:
+    def terminate_pod(self, pod_id: str) -> bool:
         """§55: SHUTDOWN — terminate a pod. Always called in finally block."""
+        if pod_id in self._termination_claimed:
+            return False
+        self._termination_claimed.add(pod_id)
         try:
             runpod.terminate_pod(pod_id)
             logger.info(f"Pod {pod_id} terminated")
+            return True
         except Exception as e:
+            self._termination_claimed.discard(pod_id)
             logger.error(f"Failed to terminate pod {pod_id}: {e}")
+            return False
 
     def cleanup_orphans(self) -> list[str]:
         """§56: Find and terminate orphaned pods.
 
         Called on Director Agent startup to prevent idle GPU billing.
         """
+        if self._ownership_tag is None:
+            return []
         orphans = []
         pods = runpod.get_pods()
         for pod in pods:
             pod_id = pod.get("id")
-            name = pod.get("name", "")
             status = pod.get("desiredStatus", "")
-            # Consider any pod with "hermes" in the name as ours
-            if pod_id and "hermes" in name.lower() and status not in ("EXITED",):
-                logger.warning(f"Orphan pod found: {pod_id} ({name}, status={status}) — terminating")
-                self.terminate_pod(pod_id)
+            if (
+                pod_id
+                and pod_ownership_tag(pod) == self._ownership_tag
+                and status not in ("EXITED", "TERMINATED")
+                and self.terminate_pod(pod_id)
+            ):
+                logger.warning(f"Owned orphan pod found: {pod_id} (status={status}) — terminated")
                 orphans.append(pod_id)
         return orphans
 

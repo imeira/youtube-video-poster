@@ -2,6 +2,11 @@ from decimal import Decimal
 
 import pytest
 
+from src.config.loader import (
+    GenerativeVideoConfig as StudioGenerativeVideoConfig,
+    RunPodConfig,
+    load_config,
+)
 from src.hybrid.planner import Config, Geometry
 from src.hybrid.providers import image_job, video_job
 from tests.unit.test_hybrid_execution import manifest
@@ -56,3 +61,11 @@ def test_hero_payload_is_explicit_five_seconds_720p_without_audio(tmp_path):
         ).category
         == "hero_retry"
     )
+
+
+def test_hero_providers_are_opt_in_in_typed_and_repository_config():
+    assert StudioGenerativeVideoConfig().enabled is False
+    assert RunPodConfig().enabled is False
+    configured = load_config()
+    assert configured.generative_video.enabled is False
+    assert configured.runpod.enabled is False
