@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -433,3 +434,31 @@ def test_historical_ep8_bootstrap_is_read_only_and_emits_brief_and_identities(tm
         assert Path(identity["path"]).is_file()
     assert result["source_manifest_identity"]
     assert result["historical_request"]["language"] == "pt-BR"
+
+
+@pytest.mark.parametrize("linked_path", ["state.json", "request.json", "approval/rejection.json", "renders/final.mp4"])
+def test_historical_bootstrap_rejects_critical_links_but_keeps_irrelevant_links_as_identity(tmp_path: Path, linked_path: str):
+    history = tmp_path / "EP8_LINKED"
+    (history / "approval").mkdir(parents=True)
+    (history / "renders").mkdir()
+    (history / "thumbnails").mkdir()
+    (history / "state.json").write_text(json.dumps({"episode_id": "EP8_LINKED", "revision": 1}), encoding="utf-8")
+    (history / "request.json").write_text(json.dumps({"language": "pt-BR"}), encoding="utf-8")
+    (history / "renders/final.mp4").write_bytes(b"video")
+    (history / "thumbnails/thumbnail.png").write_bytes(b"thumbnail")
+    (history / "approval/rejection.json").write_text(json.dumps({
+        "status": "REJECTED", "reason": "redo", "reviewer": "operator", "directives": ["redo"],
+        "artifacts": [{"kind": "video", "path": "renders/final.mp4"}, {"kind": "thumbnail", "path": "thumbnails/thumbnail.png"}],
+    }), encoding="utf-8")
+    target = history / "copies" / Path(linked_path).name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes((history / linked_path).read_bytes())
+    (history / linked_path).unlink()
+    try:
+        os.symlink(target, history / linked_path)
+        os.symlink(target, history / "irrelevant-link")
+    except OSError as error:
+        pytest.skip(f"symlink unsupported on this host: {error}")
+
+    with pytest.raises(EditorialContractError, match="link|inside source root|required"):
+        bootstrap_ep8_history(history)

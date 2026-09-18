@@ -296,6 +296,32 @@ def test_durable_queue_is_bounded_fifo_with_prefetch_and_closed_states(tmp_path)
     assert reopened.claim("worker-1")["id"] == "third"
 
 
+@pytest.mark.asyncio
+async def test_bounded_wave_returns_persisted_complete_result_without_rerunning_handler(tmp_path):
+    from src.hybrid.throughput import DurableQueue, run_bounded_wave
+
+    database = tmp_path / "completed.db"
+    first_queue = DurableQueue(database, workers=1)
+    first_calls = 0
+
+    async def first_handler(item):
+        nonlocal first_calls
+        first_calls += 1
+        return {"result_sha256": "a" * 64, "actual_cost": "0.12", "payload": item}
+
+    expected = {"result_sha256": "a" * 64, "actual_cost": "0.12", "payload": "work"}
+    assert await run_bounded_wave(first_queue, (("request-1", "work"),), first_handler) == {"request-1": expected}
+    assert first_calls == 1
+
+    second_queue = DurableQueue(database, workers=1)
+
+    async def should_not_run(_item):
+        raise AssertionError("COMPLETE queue item must return its durable result")
+
+    assert await run_bounded_wave(second_queue, (("request-1", "work"),), should_not_run) == {"request-1": expected}
+    assert second_queue.inspect("request-1")["result"]["handler_result"] == expected
+
+
 def test_failed_queue_item_cannot_requeue_beyond_materialized_limit(tmp_path):
     from src.hybrid.throughput import DurableQueue
 

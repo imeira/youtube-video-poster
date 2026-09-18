@@ -306,7 +306,10 @@ async def _run_bounded_wave(
                         raise RuntimeError(f"queued wave item failed: {item_id}")
                     queue.requeue_failed(item_id)
                 if existing["status"] == "COMPLETE":
-                    results[item_id] = await handler(item)
+                    persisted = existing.get("result") or {}
+                    if "handler_result" not in persisted:
+                        raise RuntimeError(f"completed queue item is missing durable result: {item_id}")
+                    results[item_id] = persisted["handler_result"]
                 continue
             job_payload = getattr(item, "payload", {})
             prompt = job_payload.get("prompt", "") if isinstance(job_payload, dict) else ""
@@ -366,7 +369,7 @@ async def _run_bounded_wave(
                 await asyncio.gather(*active, return_exceptions=True)
                 queue.requeue_running()
                 raise
-            summary = {"request_id": item_id}
+            summary = {"request_id": item_id, "handler_result": result}
             if isinstance(result, dict):
                 summary.update(
                     result_sha256=result.get("result_sha256"),

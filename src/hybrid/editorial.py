@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
@@ -863,6 +864,38 @@ def _read_only_manifest(root: Path) -> dict[str, str]:
     return manifest
 
 
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return False
+    return path.is_symlink() or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
+
+
+def _safe_historical_path(root: Path, path: Path, label: str, *, file: bool = True) -> Path:
+    """Reject critical link/reparse traversal before reading historical evidence."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise EditorialContractError(f"historical {label} must remain inside source root") from error
+    current = root
+    for component in relative.parts:
+        current /= component
+        if _is_link_or_reparse(current):
+            raise EditorialContractError(f"historical {label} cannot be a link or reparse point")
+    try:
+        resolved = current.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise EditorialContractError(f"historical {label} file is missing") from error
+    if root not in resolved.parents and resolved != root:
+        raise EditorialContractError(f"historical {label} must remain inside source root")
+    if file and not resolved.is_file():
+        raise EditorialContractError(f"historical {label} file is missing")
+    if not file and not resolved.is_dir():
+        raise EditorialContractError(f"historical {label} directory is missing")
+    return resolved
+
+
 def _read_json_object(path: Path, label: str) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -879,17 +912,17 @@ def bootstrap_ep8_history(source_root: str | Path) -> dict:
     if not root.is_dir():
         raise EditorialContractError("historical EP8 source directory is required")
     before = _read_only_manifest(root)
-    required_files = {"state.json", "request.json"}
-    if not required_files <= set(before):
-        raise EditorialContractError("historical state and request are required")
-    legacy_rejection = root / "approval" / "rejection.json"
+    state_path = _safe_historical_path(root, root / "state.json", "state")
+    request_path = _safe_historical_path(root, root / "request.json", "request")
+    approval_root = _safe_historical_path(root, root / "approval", "approval", file=False)
+    legacy_rejection = approval_root / "rejection.json"
     rejection_candidates = [legacy_rejection] if legacy_rejection.is_file() else sorted(
-        (root / "approval").glob("*operator_rejection.json"))
+        approval_root.glob("*operator_rejection.json"))
     if len(rejection_candidates) != 1:
         raise EditorialContractError("one historical rejection receipt is required")
-    rejection_path = rejection_candidates[0]
-    state = _read_json_object(root / "state.json", "state")
-    request = _read_json_object(root / "request.json", "request")
+    rejection_path = _safe_historical_path(root, rejection_candidates[0], "rejection receipt")
+    state = _read_json_object(state_path, "state")
+    request = _read_json_object(request_path, "request")
     rejection = _read_json_object(rejection_path, "rejection receipt")
     episode_id = str(rejection.get("episode_id") or state.get("episode_id", ""))
     revision = rejection.get("revision", state.get("revision"))
@@ -910,12 +943,7 @@ def bootstrap_ep8_history(source_root: str | Path) -> dict:
         kind = {"video_gate": "video", "thumbnail_gate": "thumbnail"}.get(artifact["kind"], artifact["kind"])
         if kind not in {"video", "thumbnail"} or kind in kinds:
             raise EditorialContractError("one historical video and thumbnail are required")
-        try:
-            path = (root / artifact["path"]).resolve(strict=True)
-        except (OSError, RuntimeError) as error:
-            raise EditorialContractError("historical artifact file is missing") from error
-        if root not in path.parents or not path.is_file():
-            raise EditorialContractError("historical artifact must remain inside source root")
+        path = _safe_historical_path(root, root / artifact["path"], "artifact")
         identity = {"kind": kind, "path": str(path), "sha256": file_sha256(path)}
         identities.append(identity)
         successor_artifacts.append({"kind": kind, "sha256": identity["sha256"]})

@@ -254,6 +254,44 @@ async def test_explicit_cancel_is_persisted_and_sent_at_most_once(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_failed_remote_cancel_stays_recoverable_until_reconciliation_succeeds(tmp_path):
+    class FlakyCancelTransport(FakeTransport):
+        def __init__(self):
+            super().__init__([RuntimeError("pause after checkpoint")])
+            self.cancel_attempts = 0
+
+        async def cancel(self, endpoint_id: str, job_id: str) -> None:
+            self.calls.append(("CANCEL", endpoint_id, job_id))
+            self.cancel_attempts += 1
+            if self.cancel_attempts == 1:
+                raise RuntimeError("remote cancel unavailable")
+
+    clock = FakeClock()
+    transport = FlakyCancelTransport()
+    provider = build_provider(tmp_path, transport, clock)
+    job = build_job(tmp_path)
+
+    with pytest.raises(RuntimeError, match="pause after checkpoint"):
+        await provider.submit(job, job.request_id, lambda **data: None)
+    with pytest.raises(RuntimeError, match="remote cancel unavailable"):
+        await provider.cancel(job.request_id)
+
+    state_path = tmp_path / "state" / f"{job.request_id}.json"
+    state = json.loads(state_path.read_text())
+    assert state["status"] == RunPodState.IN_QUEUE.value
+    assert state["cancel_claimed"] is True
+    assert state["terminal_reason"] == "CALLER_CANCELLED"
+
+    with pytest.raises(RunPodCancelled, match="CALLER_CANCELLED"):
+        await provider.recover(job, job.request_id, "job_123", "", lambda **data: None)
+
+    assert [call[0] for call in transport.calls[-1:]] == ["CANCEL"]
+    assert transport.cancel_attempts == 2
+    state = json.loads(state_path.read_text())
+    assert state["status"] == RunPodState.CANCELLED.value
+
+
+@pytest.mark.asyncio
 async def test_bad_download_is_failed_persistently_without_second_download(tmp_path):
     clock = FakeClock()
     transport = FakeTransport([completed()], content=b"corrupt-video")

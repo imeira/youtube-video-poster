@@ -231,15 +231,12 @@ class ProductionRun:
         )
 
         async def execute(job):
-            receipt = await self.executor.run(
+            return await self.executor.run(
                 job,
                 provider,
                 authorization=authorizations.get(job.request_id),
                 price=prices.get(job.request_id),
             )
-            if on_completed is not None:
-                await on_completed(receipt)
-            return receipt
 
         jobs = tuple(self._baselines.values())
         by_request = await run_bounded_wave(
@@ -248,6 +245,10 @@ class ProductionRun:
             execute,
             recover_failed=True,
         )
+        if on_completed is not None:
+            for job in jobs:
+                if self._active_images.get(job.scene) == job:
+                    await on_completed(self.executor.inspect(job.request_id) or by_request[job.request_id])
         return {job.scene: by_request[job.request_id] for job in jobs}
 
     def _completed_job_for_result(self, scene_id: str, result_sha256: str):
@@ -350,15 +351,12 @@ class ProductionRun:
         prices = prices or {}
 
         async def execute(job):
-            receipt = await self.executor.run(
+            return await self.executor.run(
                 job,
                 provider,
                 authorization=authorizations.get(job.request_id),
                 price=prices.get(job.request_id),
             )
-            if on_completed is not None:
-                await on_completed(receipt)
-            return receipt
 
         by_request = await run_bounded_wave(
             queue,
@@ -366,6 +364,10 @@ class ProductionRun:
             execute,
             recover_failed=True,
         )
+        if on_completed is not None:
+            for job in jobs:
+                if self._active_images.get(job.scene) == job:
+                    await on_completed(self.executor.inspect(job.request_id) or by_request[job.request_id])
         return {job.scene: by_request[job.request_id] for job in jobs}
 
     def render_ready(self):

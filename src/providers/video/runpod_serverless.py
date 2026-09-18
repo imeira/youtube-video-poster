@@ -237,19 +237,24 @@ class RunPodHeroProvider:
         latest = self._load(state["request_id"])
         if latest is not None:
             state = latest
-        if state.get("cancel_claimed"):
+        if state.get("status") == RunPodState.CANCELLED.value:
             return
-        state["cancel_claimed"] = True
-        state["terminal_reason"] = reason
-        self._save(state)
+        if not state.get("cancel_claimed"):
+            state["cancel_claimed"] = True
+            state["terminal_reason"] = reason
+            self._save(state)
         try:
             await asyncio.wait_for(
                 self.transport.cancel(self.endpoint_id, state["provider_id"]),
                 timeout=self.poll_policy.maximum_delay,
             )
-        finally:
-            state["status"] = RunPodState.CANCELLED.value
+        except BaseException:
+            # A local cancellation intent is not evidence that the remote job stopped.
+            # Keep the non-terminal checkpoint so a later recovery can reconcile it.
             self._save(state)
+            raise
+        state["status"] = RunPodState.CANCELLED.value
+        self._save(state)
 
     async def _drive(self, job: Job, state: dict[str, Any], response: dict[str, Any]) -> ProviderResult:
         delay = self.poll_policy.initial_delay
@@ -406,6 +411,10 @@ class RunPodHeroProvider:
         if state is None or state.get("provider_id") != provider_id:
             raise ValueError("RunPod recovery checkpoint mismatch")
         status = RunPodState(state["status"])
+        if state.get("cancel_claimed") and status != RunPodState.CANCELLED:
+            await self._cancel_once(state, state.get("terminal_reason") or "CALLER_CANCELLED")
+            state = self._load(request_id) or state
+            status = RunPodState(state["status"])
         if status == RunPodState.COMPLETED and state.get("result_path"):
             return self._persisted_result(state)
         if status == RunPodState.FAILED:
