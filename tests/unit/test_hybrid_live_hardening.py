@@ -30,6 +30,11 @@ def test_fal_current_documented_cdn_host_is_allowed():
     ) == "https://v3b.fal.media/files/b/example/result.png"
 
 
+def test_runpod_current_cloudfront_result_host_is_allowed():
+    url = "https://d2h7xmz5gqybh9.cloudfront.net/output/example.mp4?signature=opaque"
+    assert _url(url, hosts=RunPodSeedanceProvider.allowed_result_hosts) == url
+
+
 class AsyncTransport:
     def __init__(self):
         self.posts = 0

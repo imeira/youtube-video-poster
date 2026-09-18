@@ -277,7 +277,10 @@ class RunPodSeedanceProvider(_QuarantineProvider):
     """RunPod Seedance hero adapter with POST once and status GET-only recovery."""
 
     suffix = ".mp4"
-    allowed_result_hosts: ClassVar[set[str]] = {"video.runpod.ai"}
+    allowed_result_hosts: ClassVar[set[str]] = {
+        "video.runpod.ai",
+        "d2h7xmz5gqybh9.cloudfront.net",
+    }
 
     def __init__(
         self,
