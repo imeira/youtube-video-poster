@@ -23,7 +23,7 @@ from PIL import Image
 
 from src.hybrid.artifacts import FrozenAsset, Manifest, atomic_json, digest, sha256
 from src.hybrid.locks import try_lock
-from src.hybrid.observability import StructuredEventLog
+from src.hybrid.observability import StructuredEventLog, safe_json_value
 from src.hybrid.sanitization import provider_error
 
 TITLE = "A promessa de um filho para Abraão e Sara"
@@ -408,10 +408,18 @@ class RevisionHarness:
             raise ValueError("explicit publication provider deployment required before I/O")
         contract = read(deployment)
         provider = contract.get("publication_provider")
-        if (not isinstance(provider, dict) or set(provider) - {"adapter", "mode", "config"}
+        if (not isinstance(provider, dict)
+                or set(provider) - {"adapter", "mode", "config", "local_fake", "capability"}
                 or not isinstance(provider.get("adapter"), str) or not provider["adapter"].strip()
                 or provider.get("mode") != mode):
             raise ValueError("explicit publication provider deployment required before I/O")
+        if mode == "TEST":
+            config = provider.get("config", {})
+            serialized_config = json.dumps(config, sort_keys=True, ensure_ascii=False)
+            if (provider.get("local_fake") is not True
+                    or provider.get("capability") != "local-only-v1"
+                    or "://" in serialized_config):
+                raise ValueError("TEST publication requires an explicit local fake without network endpoints")
         module_name, separator, factory_name = provider["adapter"].partition(":")
         if not separator or not module_name or not factory_name:
             raise ValueError("publication provider adapter must be module:factory")
@@ -661,6 +669,10 @@ class RevisionHarness:
             # cookies or signed URLs.  Persist a stable allowlisted code only.
             self.event("FAILED", stage=name, error="STAGE_FAILURE", recovery=bool(receipt))
             raise
+        # Successful provider results are durable recovery state too. Sanitize
+        # them before both persistence and return so callers cannot accidentally
+        # propagate a credential-bearing variant that differs from the receipt.
+        result = safe_json_value(result)
         self.load()  # revalidate upstream inputs after any external work
         self.control["stages"][name] = dict(status="COMPLETE", result=result,
             outputs={str(Path(p).resolve()): sha256(p) for p in paths},

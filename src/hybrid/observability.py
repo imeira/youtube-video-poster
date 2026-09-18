@@ -53,7 +53,7 @@ _CREDENTIAL = re.compile(
     re.IGNORECASE,
 )
 _CREDENTIAL_KEY = re.compile(
-    r"^(?:token|secret|api[_ -]?key|authorization|password|passwd|cookie|session(?:id|[_ -]?id)?)$",
+    r"^(?:.*[_ -])?(?:token|secret|api[_ -]?key|authorization|password|passwd|cookie|session(?:id|[_ -]?id)?)$",
     re.IGNORECASE,
 )
 _COOKIE = re.compile(
@@ -70,7 +70,8 @@ def _safe_text(value: str) -> str:
     return _COOKIE.sub("[REDACTED_CREDENTIAL]", value)
 
 
-def _json_value(value):
+def safe_json_value(value):
+    """Return a JSON-compatible value with credentials and URLs redacted."""
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, Path):
@@ -82,12 +83,12 @@ def _json_value(value):
             key: (
                 "[REDACTED_CREDENTIAL]"
                 if _CREDENTIAL_KEY.fullmatch(str(key))
-                else _json_value(item)
+                else safe_json_value(item)
             )
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
-        return [_json_value(item) for item in value]
+        return [safe_json_value(item) for item in value]
     return value
 
 
@@ -105,7 +106,7 @@ class StructuredEventLog:
         if status not in {"QUEUED", "RUNNING", "COMPLETE", "FAILED"}:
             raise ValueError("event status must be QUEUED/RUNNING/COMPLETE/FAILED")
         event = {
-            key: _json_value(value)
+            key: safe_json_value(value)
             for key, value in fields.items()
             if key in _ALLOWED_FIELDS and value is not None
         }

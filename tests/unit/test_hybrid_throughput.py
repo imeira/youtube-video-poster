@@ -581,6 +581,32 @@ async def test_revision_stage_failure_never_persists_cookie_session_bearer_or_si
         assert secret not in raw
 
 
+@pytest.mark.asyncio
+async def test_revision_stage_success_sanitizes_result_before_persisting(tmp_path):
+    from src.hybrid.revision import RevisionHarness
+
+    with RevisionHarness(tmp_path / "revision") as harness:
+        harness.create_plan(mode="TEST", request="test")
+
+        async def successful_stage():
+            return ({
+                "provider_token": "STAGE_RESULT_SECRET",
+                "nested": {
+                    "cookie": "sessionid=COOKIE_SECRET",
+                    "result_url": "https://provider.invalid/result?X-Amz-Signature=SIGNED_SECRET",
+                },
+            }, [])
+
+        result = await harness.stage("leaking-success", successful_stage)
+
+    assert result["provider_token"] == "[REDACTED_CREDENTIAL]"
+    raw = (tmp_path / "revision" / "revision.json").read_text(encoding="utf-8")
+    for secret in ("STAGE_RESULT_SECRET", "COOKIE_SECRET", "SIGNED_SECRET"):
+        assert secret not in raw
+    assert "[REDACTED_CREDENTIAL]" in raw
+    assert "[REDACTED_URL]" in raw
+
+
 def test_structured_events_retry_short_os_writes_until_complete(tmp_path, monkeypatch):
     import src.hybrid.observability as observability
 

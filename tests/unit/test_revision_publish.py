@@ -89,7 +89,10 @@ def prepared_harness(tmp_path: Path, monkeypatch, *, publisher: FakePublisher, m
     module = types.ModuleType("tests.fake_publish_provider")
     module.factory = lambda **kwargs: publisher
     monkeypatch.setitem(sys.modules, "tests.fake_publish_provider", module)
-    deployment.write_text(json.dumps({"publication_provider": {"adapter": factory, "mode": mode}}), encoding="utf-8")
+    provider_contract = {"adapter": factory, "mode": mode}
+    if mode == "TEST":
+        provider_contract.update(local_fake=True, capability="local-only-v1")
+    deployment.write_text(json.dumps({"publication_provider": provider_contract}), encoding="utf-8")
     return harness, deployment, revision
 
 
@@ -161,6 +164,27 @@ def test_publish_blocks_missing_provider_before_io_for_test_and_live(tmp_path, m
         with pytest.raises(ValueError, match="explicit publication provider"):
             asyncio.run(harness.publish(command="PUBLICAR EP8", deployment=deployment))
         assert publisher.uploads == 0
+
+
+def test_test_publish_rejects_unmarked_or_network_provider_before_factory_side_effect(tmp_path, monkeypatch):
+    publisher = FakePublisher()
+    harness, deployment, _revision = prepared_harness(tmp_path, monkeypatch, publisher=publisher)
+    factory_calls = []
+    import sys
+    sys.modules["tests.fake_publish_provider"].factory = lambda **kwargs: factory_calls.append(kwargs) or publisher
+
+    for provider in (
+        {"adapter": "tests.fake_publish_provider:factory", "mode": "TEST"},
+        {"adapter": "tests.fake_publish_provider:factory", "mode": "TEST",
+         "local_fake": True, "capability": "local-only-v1",
+         "config": {"endpoint": "https://remote.invalid/upload"}},
+    ):
+        deployment.write_text(json.dumps({"publication_provider": provider}), encoding="utf-8")
+        with pytest.raises(ValueError, match="local fake"):
+            asyncio.run(harness.publish(command="PUBLICAR EP8", deployment=deployment))
+
+    assert factory_calls == []
+    assert publisher.uploads == 0
 
 
 def test_ambiguous_upload_requires_readback_and_never_reposts(tmp_path, monkeypatch):
