@@ -126,3 +126,22 @@ async def test_terminal_hero_failure_records_local_fallback_without_resubmit(tmp
     assert saved["fallback_scenes"] == ["S001"]
     assert saved["receipts"][0]["status"] == "FALLBACK_LOCAL"
     assert provider.posts == 1
+
+
+@pytest.mark.asyncio
+async def test_hero_manifest_replaces_provider_error_before_persistence(tmp_path):
+    manifest, stills = _manifest(tmp_path)
+    provider = FakeHeroProvider(tmp_path / "provider", terminal_scene="S001")
+    target = tmp_path / "hero-manifest.json"
+
+    async def leaking_submit(job, request_id, checkpoint):
+        checkpoint(provider_id="remote-" + job.scene)
+        raise RuntimeError("https://provider.invalid/clip?token=SIGNED Authorization: Bearer SECRET")
+
+    provider.submit = leaking_submit
+    await h_execute(RevisionHarness(tmp_path / "revision"), _plan(), manifest, stills, provider, target)
+
+    persisted = target.read_text(encoding="utf-8")
+    assert read(target)["receipts"][0]["terminal_reason"] == "PROVIDER_ERROR"
+    for forbidden in ("https://", "SIGNED", "SECRET", "Authorization"):
+        assert forbidden not in persisted

@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 from src.hybrid.artifacts import atomic_json, sha256
 from src.hybrid.execution import Job, ProviderResult
 from src.hybrid.planner import money
+from src.hybrid.sanitization import provider_error
 
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -337,7 +338,7 @@ class RunPodHeroProvider:
                 status = self._parse_status(response, state["provider_id"])
                 state["status"] = status.value
                 if status in {RunPodState.FAILED, RunPodState.CANCELLED}:
-                    state["terminal_reason"] = str(response.get("error") or status.value)
+                    state["terminal_reason"] = provider_error(response.get("error"))
                 self._save(state)
                 delay = min(delay * self.poll_policy.multiplier, self.poll_policy.maximum_delay)
         except asyncio.CancelledError:
@@ -488,6 +489,6 @@ class RunPodHeroProvider:
         status = self._parse_status(response, provider_id)
         state["status"] = status.value
         if status in {RunPodState.FAILED, RunPodState.CANCELLED}:
-            state["terminal_reason"] = str(response.get("error") or status.value)
+            state["terminal_reason"] = provider_error(response.get("error"))
         self._save(state)
         return await self._drive(job, state, response)

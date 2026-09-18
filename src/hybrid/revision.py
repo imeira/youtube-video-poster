@@ -24,6 +24,7 @@ from PIL import Image
 from src.hybrid.artifacts import FrozenAsset, Manifest, atomic_json, digest, sha256
 from src.hybrid.locks import try_lock
 from src.hybrid.observability import StructuredEventLog
+from src.hybrid.sanitization import provider_error
 
 TITLE = "A promessa de um filho para Abraão e Sara"
 THEME = TITLE + " — Gênesis 15–18"
@@ -481,8 +482,8 @@ class RevisionHarness:
         self.load()
         from src.publishing.controller import PublicationController
         PublicationController.require_exact_command(command, "PUBLICAR EP8")
-        provider = self._publication_provider(deployment, self.control["plan"].get("mode"))
         revision_dir, package_path, package, video, thumbnail = self._publication_inputs()
+        provider = self._publication_provider(deployment, self.control["plan"].get("mode"))
         approval_dir = revision_dir / "approval"
         intent_path = approval_dir / "publication-intent.json"
         receipt_path = approval_dir / "publication-receipt.json"
@@ -508,12 +509,12 @@ class RevisionHarness:
                     thumbnail=thumbnail.artifact_path, captions=package["artifacts"]["captions_srt"]["path"])
             except Exception as error:
                 intent["status"] = "AMBIGUOUS"
-                intent["error"] = str(error)
+                intent["error"] = provider_error(error)
                 atomic_json(intent_path, intent)
                 raise ValueError("publication requires readback/recovery; never resubmit") from error
             if not uploaded.success or not uploaded.video_id or not uploaded.video_url:
                 intent["status"] = "FAILED"
-                intent["error"] = getattr(uploaded, "error", "provider rejected") or "provider rejected"
+                intent["error"] = provider_error(getattr(uploaded, "error", None))
                 atomic_json(intent_path, intent)
                 raise ValueError(intent["error"])
             intent.update(status="REMOTE_ACCEPTED", video_id=uploaded.video_id, video_url=uploaded.video_url)
@@ -801,7 +802,7 @@ class RevisionHarness:
                 # A durable provider ID makes a terminal error non-ambiguous; it
                 # is a local-motion fallback, never an implicit retry.
                 if entry.get("provider_id"):
-                    entry.update(status="FALLBACK_LOCAL", terminal_reason=str(error))
+                    entry.update(status="FALLBACK_LOCAL", terminal_reason=provider_error(error))
                     if scene_id not in state["fallback_scenes"]:
                         state["fallback_scenes"].append(scene_id)
                     atomic_json(target, state)

@@ -559,6 +559,24 @@ def test_structured_events_are_allowlisted_and_redact_secrets_and_signed_urls(tm
     assert json.loads(raw) == event
 
 
+def test_structured_events_retry_short_os_writes_until_complete(tmp_path, monkeypatch):
+    import src.hybrid.observability as observability
+
+    path = tmp_path / "events.jsonl"
+    real_write = observability.os.write
+    calls = []
+
+    def short_write(descriptor, payload):
+        calls.append(len(payload))
+        return real_write(descriptor, payload[:3])
+
+    monkeypatch.setattr(observability.os, "write", short_write)
+    observability.StructuredEventLog(path, clock=lambda: 1).emit(status="COMPLETE", episode="EP8")
+
+    assert len(calls) > 1
+    assert json.loads(path.read_text(encoding="utf-8")) == {"episode": "EP8", "status": "COMPLETE", "timestamp": 1}
+
+
 def test_durable_queue_emits_structured_lifecycle_events(tmp_path):
     from src.hybrid.observability import StructuredEventLog
     from src.hybrid.throughput import DurableQueue

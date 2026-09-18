@@ -225,12 +225,29 @@ async def test_remote_terminal_states_are_persisted(tmp_path, remote_status, err
     provider = build_provider(tmp_path, transport, clock)
     job = build_job(tmp_path)
 
-    with pytest.raises(error_type, match="remote terminal"):
+    with pytest.raises(error_type, match="PROVIDER_ERROR"):
         await provider.submit(job, job.request_id, lambda **data: None)
 
     state = json.loads((tmp_path / "state" / f"{job.request_id}.json").read_text())
     assert state["status"] == remote_status
-    assert state["terminal_reason"] == "remote terminal"
+    assert state["terminal_reason"] == "PROVIDER_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_provider_terminal_error_is_replaced_before_checkpoint_persistence(tmp_path):
+    clock = FakeClock()
+    secret = "https://runpod.invalid/result?token=SIGNED_TOKEN Authorization: Bearer VERY_SECRET"
+    transport = FakeTransport([{"id": "job_123", "status": "FAILED", "error": secret}])
+    provider = build_provider(tmp_path, transport, clock)
+    job = build_job(tmp_path)
+
+    with pytest.raises(RunPodFailed):
+        await provider.submit(job, job.request_id, lambda **data: None)
+
+    persisted = (tmp_path / "state" / f"{job.request_id}.json").read_text(encoding="utf-8")
+    assert json.loads(persisted)["terminal_reason"] == "PROVIDER_ERROR"
+    for forbidden in ("https://", "SIGNED_TOKEN", "VERY_SECRET", "Authorization"):
+        assert forbidden not in persisted
 
 
 @pytest.mark.asyncio

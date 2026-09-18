@@ -119,7 +119,12 @@ class StructuredEventLog:
                 0o600,
             )
             try:
-                os.write(descriptor, encoded)
+                pending = memoryview(encoded)
+                while pending:
+                    written = os.write(descriptor, pending)
+                    if written <= 0:
+                        raise OSError("structured event write made no progress")
+                    pending = pending[written:]
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)

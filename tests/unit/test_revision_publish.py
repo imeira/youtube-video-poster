@@ -138,6 +138,21 @@ def test_publish_rejects_tampered_package_before_provider_io(tmp_path, monkeypat
     assert publisher.uploads == 0
 
 
+def test_publish_validates_tampered_package_before_importing_or_calling_provider_factory(tmp_path, monkeypatch):
+    publisher = FakePublisher()
+    harness, deployment, revision = prepared_harness(tmp_path, monkeypatch, publisher=publisher)
+    factory_calls = []
+    import sys
+    sys.modules["tests.fake_publish_provider"].factory = lambda **kwargs: factory_calls.append(kwargs) or publisher
+    (revision / "video.mp4").write_bytes(b"tampered")
+
+    with pytest.raises(ValueError, match="package artifact hash mismatch"):
+        asyncio.run(harness.publish(command="PUBLICAR EP8", deployment=deployment))
+
+    assert factory_calls == []
+    assert publisher.uploads == 0
+
+
 def test_publish_blocks_missing_provider_before_io_for_test_and_live(tmp_path, monkeypatch):
     for mode in ("TEST", "LIVE"):
         publisher = FakePublisher()
@@ -166,8 +181,23 @@ def test_failed_upload_records_intent_and_never_reposts(tmp_path, monkeypatch):
     publisher = FakePublisher(fail=True)
     harness, deployment, _revision = prepared_harness(tmp_path, monkeypatch, publisher=publisher)
 
-    with pytest.raises(ValueError, match="provider rejected"):
+    with pytest.raises(ValueError, match="PROVIDER_ERROR"):
         asyncio.run(harness.publish(command="PUBLICAR EP8", deployment=deployment))
     with pytest.raises(ValueError, match="readback/recovery"):
         asyncio.run(harness.publish(command="PUBLICAR EP8", deployment=deployment))
     assert publisher.uploads == 1
+
+
+def test_publish_intent_replaces_provider_error_before_persistence(tmp_path, monkeypatch):
+    publisher = FakePublisher(fail=True)
+    harness, deployment, revision = prepared_harness(tmp_path, monkeypatch, publisher=publisher)
+    publisher.upload = lambda *args, **kwargs: asyncio.sleep(0, result=PublishResult(
+        False, error="https://upload.invalid/?token=SIGNED Authorization: Bearer SECRET"))
+
+    with pytest.raises(ValueError):
+        asyncio.run(harness.publish(command="PUBLICAR EP8", deployment=deployment))
+
+    persisted = (revision / "approval" / "publication-intent.json").read_text(encoding="utf-8")
+    assert json.loads(persisted)["error"] == "PROVIDER_ERROR"
+    for forbidden in ("https://", "SIGNED", "SECRET", "Authorization"):
+        assert forbidden not in persisted
