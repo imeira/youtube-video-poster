@@ -857,8 +857,8 @@ def _read_only_manifest(root: Path) -> dict[str, str]:
     manifest = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
-            raise EditorialContractError("historical bootstrap forbids symbolic links")
-        if path.is_file():
+            manifest[path.relative_to(root).as_posix()] = "SYMLINK:" + digest(str(path.readlink()))
+        elif path.is_file():
             manifest[path.relative_to(root).as_posix()] = file_sha256(path)
     return manifest
 
@@ -879,30 +879,35 @@ def bootstrap_ep8_history(source_root: str | Path) -> dict:
     if not root.is_dir():
         raise EditorialContractError("historical EP8 source directory is required")
     before = _read_only_manifest(root)
-    required_files = {"state.json", "request.json", "approval/rejection.json"}
+    required_files = {"state.json", "request.json"}
     if not required_files <= set(before):
-        raise EditorialContractError("historical state, request, and rejection receipt are required")
+        raise EditorialContractError("historical state and request are required")
+    legacy_rejection = root / "approval" / "rejection.json"
+    rejection_candidates = [legacy_rejection] if legacy_rejection.is_file() else sorted(
+        (root / "approval").glob("*operator_rejection.json"))
+    if len(rejection_candidates) != 1:
+        raise EditorialContractError("one historical rejection receipt is required")
+    rejection_path = rejection_candidates[0]
     state = _read_json_object(root / "state.json", "state")
     request = _read_json_object(root / "request.json", "request")
-    rejection = _read_json_object(root / "approval" / "rejection.json", "rejection receipt")
-    if (
-        not str(state.get("episode_id", "")).startswith("EP8")
-        or type(state.get("revision")) is not int
-        or state["revision"] < 1
-        or state.get("status") not in {"REJECTED", "SUPERSEDED"}
-        or rejection.get("status") != "REJECTED"
-    ):
+    rejection = _read_json_object(rejection_path, "rejection receipt")
+    episode_id = str(rejection.get("episode_id") or state.get("episode_id", ""))
+    revision = rejection.get("revision", state.get("revision"))
+    rejection_status = str(rejection.get("status", ""))
+    if (not episode_id.startswith("EP8") or type(revision) is not int or revision < 1
+            or not (rejection_status == "REJECTED" or rejection_status.startswith("REJECTED_"))):
         raise EditorialContractError("historical EP8 must contain rejected revision evidence")
-    raw_artifacts = rejection.get("artifacts")
+    real_schema = isinstance(rejection.get("human_decision"), dict)
+    raw_artifacts = rejection.get("superseded_artifacts" if real_schema else "artifacts")
     if not isinstance(raw_artifacts, list):
         raise EditorialContractError("historical rejection artifact list is required")
     identities = []
     successor_artifacts = []
     kinds = set()
     for artifact in raw_artifacts:
-        if not isinstance(artifact, dict) or set(artifact) != {"kind", "path"}:
+        if not isinstance(artifact, dict) or not {"kind", "path"} <= set(artifact):
             raise EditorialContractError("historical artifact entry is invalid")
-        kind = artifact["kind"]
+        kind = {"video_gate": "video", "thumbnail_gate": "thumbnail"}.get(artifact["kind"], artifact["kind"])
         if kind not in {"video", "thumbnail"} or kind in kinds:
             raise EditorialContractError("one historical video and thumbnail are required")
         try:
@@ -917,21 +922,29 @@ def bootstrap_ep8_history(source_root: str | Path) -> dict:
         kinds.add(kind)
     if kinds != {"video", "thumbnail"}:
         raise EditorialContractError("both historical video and thumbnail are required")
-    feedback = {
-        "reason": rejection.get("reason", ""),
-        "directives": rejection.get("directives", []),
-        "reviewer": rejection.get("reviewer", ""),
-    }
+    if real_schema:
+        human_decision = rejection["human_decision"]
+        feedback = {
+            "reason": human_decision.get("reason", ""),
+            "directives": rejection.get("required_rebuild_dependencies", []),
+            "reviewer": "operator",
+        }
+    else:
+        feedback = {
+            "reason": rejection.get("reason", ""),
+            "directives": rejection.get("directives", []),
+            "reviewer": rejection.get("reviewer", ""),
+        }
     predecessor = {
-        "episode_id": state["episode_id"],
-        "revision": state["revision"],
-        "status": state["status"],
+        "episode_id": episode_id,
+        "revision": revision,
+        "status": "SUPERSEDED",
         "artifacts": successor_artifacts,
     }
     brief = create_successor_brief(
         predecessor,
         feedback,
-        successor_revision=state["revision"] + 1,
+        successor_revision=revision + 1,
     )
     after = _read_only_manifest(root)
     if before != after:

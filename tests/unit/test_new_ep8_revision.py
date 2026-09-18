@@ -27,6 +27,13 @@ def planned(root, **kwargs):
     return h
 
 
+def run_after_visual_freeze(h):
+    frozen = asyncio.run(h.run())
+    assert frozen["status"] == "WAITING_VISUAL_FREEZE_APPROVAL"
+    h.approve("visual-freeze", frozen["artifacts"]["visual_freeze"]["sha256"], "human")
+    return asyncio.run(h.run())
+
+
 def cli(root, action, *args, ok=True):
     # Apply the repository's offline audit to the CLI subprocess too. This denies
     # sockets, legacy episode reads and secret-file reads, not just HTTP mocks.
@@ -51,11 +58,15 @@ def test_public_cli_offline_end_to_end_separate_gates_and_supersession(tmp_path)
     assert cli(root, "run", ok=False)["status"] == "BLOCKED"
     cli(root, "approve-plan", "--plan-hash", "stale", "--reviewer", "human", ok=False)
     cli(root, "approve-plan", "--plan-hash", first["plan_hash"], "--reviewer", "human")
+    frozen = cli(root, "run")
+    assert frozen["status"] == "WAITING_VISUAL_FREEZE_APPROVAL"
+    cli(root, "approve", "--kind", "visual-freeze", "--artifact-hash",
+        frozen["artifacts"]["visual_freeze"]["sha256"], "--reviewer", "human")
     ready = cli(root, "run")
     assert ready["status"] == "WAITING_THUMBNAIL_APPROVAL"
     artifacts = ready["artifacts"]
     control = read(root / "revision.json")
-    assert set(control["stages"]) == {"script", "audio_storyboard", "images", "encode", "sidecars", "final_qa", "telegram_thumbnail"}
+    assert set(control["stages"]) == {"script", "audio_storyboard", "images", "telegram_visual_freeze", "encode", "sidecars", "final_qa", "telegram_thumbnail"}
     assert all(s["status"] == "COMPLETE" and s["elapsed_seconds"] >= 0 for s in control["stages"].values())
     assert control["stages"]["encode"]["result"]["render_invocations"] == 1
     assert control["stages"]["sidecars"]["result"]["layers"] == [
@@ -82,7 +93,7 @@ def test_public_cli_offline_end_to_end_separate_gates_and_supersession(tmp_path)
     assert cli(root, "resume") == sent
     cli(root, "approve", "--kind", "video", "--artifact-hash", "stale", "--reviewer", "human", ok=False)
     final = cli(root, "approve", "--kind", "video", "--artifact-hash", artifacts["video"]["sha256"], "--reviewer", "human")
-    assert final["status"] == "WAITING_FINAL_APPROVAL" and final["publication_authorized"] is False
+    assert final["status"] == "WAITING_PUBLICATION_AUTHORIZATION" and final["publication_authorized"] is False
     assert cli(root, "resume") == final
     rejected = cli(root, "reject", "--reason", "new artistic direction")
     assert rejected["revision"] == 2 and rejected["approvals"] == {}
@@ -90,6 +101,10 @@ def test_public_cli_offline_end_to_end_separate_gates_and_supersession(tmp_path)
     assert retired["status"] == "SUPERSEDED" and retired["artifacts"] == artifacts
     cli(root, "approve-plan", "--plan-hash", first["plan_hash"], "--reviewer", "human", ok=False)
     cli(root, "approve-plan", "--plan-hash", rejected["plan_hash"], "--reviewer", "human")
+    second_frozen = cli(root, "run")
+    assert second_frozen["status"] == "WAITING_VISUAL_FREEZE_APPROVAL"
+    cli(root, "approve", "--kind", "visual-freeze", "--artifact-hash",
+        second_frozen["artifacts"]["visual_freeze"]["sha256"], "--reviewer", "human")
     second = cli(root, "run")
     assert second["status"] == "WAITING_THUMBNAIL_APPROVAL"
     assert all(second["artifacts"][k]["sha256"] != artifacts[k]["sha256"] for k in artifacts)
@@ -139,7 +154,7 @@ def test_image_crash_recovers_without_resubmission_and_completed_tamper_blocks(t
 
         recovered.submit = submit
         h.dependencies = recovered
-        assert asyncio.run(h.run())["status"] == "WAITING_THUMBNAIL_APPROVAL"
+        assert asyncio.run(h.run())["status"] == "WAITING_VISUAL_FREEZE_APPROVAL"
         image = next((tmp_path / "r001/EP8/compiled/approved_images").glob("*.png"))
         image.write_bytes(b"tampered")
         with pytest.raises(ValueError, match="completed stage hash"):
@@ -169,7 +184,7 @@ def test_one_correction_wave_and_bounded_overlapping_qa(tmp_path):
     deps = Tracking(tmp_path / "r001/providers")
     h = planned(tmp_path, dependencies=deps)
     try:
-        assert asyncio.run(h.run())["status"] == "WAITING_THUMBNAIL_APPROVAL"
+        assert asyncio.run(h.run())["status"] == "WAITING_VISUAL_FREEZE_APPROVAL"
         assert 1 < deps.qa_max <= 2 and deps.maximum <= 3
         assert deps.waves.count(1) == 1
         assert len(list((tmp_path / "r001/EP8/compiled/qa").glob("*.json"))) == len(deps.waves)
@@ -204,14 +219,16 @@ def test_interrupted_encode_requires_receipt_never_second_encode(tmp_path, monke
     h = planned(tmp_path)
     calls = []
 
-    def encode(*args):
+    def encode(*args, **kwargs):
         calls.append(1)
-        result = original(*args)
+        result = original(*args, **kwargs)
         if not durable:
             raise RuntimeError("crashed after encoding")
         return result
 
     monkeypatch.setattr(production, "render_once", encode)
+    frozen = asyncio.run(h.run())
+    h.approve("visual-freeze", frozen["artifacts"]["visual_freeze"]["sha256"], "human")
     try:
         if not durable:
             with pytest.raises(RuntimeError, match="crashed"):
@@ -259,7 +276,7 @@ def test_ambiguous_telegram_never_resends(tmp_path):
     try:
         with pytest.raises(RuntimeError, match="lost Telegram"):
             asyncio.run(h.run())
-        with pytest.raises(ValueError, match="ambiguous telegram_thumbnail"):
+        with pytest.raises(ValueError, match="ambiguous telegram_visual_freeze"):
             asyncio.run(h.run())
         assert deps.sends == 1
         assert not (deps.root / "telegram-video.json").exists()
@@ -455,7 +472,7 @@ def test_delivery_recovery_both_gates(tmp_path, monkeypatch, kind, durable):
     # Frozen, QA-completed artifacts from a public run are the only delivery inputs.
     h = planned(tmp_path)
     try:
-        asyncio.run(h.run())
+        run_after_visual_freeze(h)
         if kind == 'video':
             h.approve('thumbnail', h.control['artifacts']['thumbnail']['sha256'], 'human')
         else:

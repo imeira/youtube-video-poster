@@ -383,9 +383,15 @@ class VerifiedRender:
         return dict(api_cost=0, render_invocations=0, reused_sha256=self.expected)
 
 
-def render_once(episode, manifest, output, hold):
+def render_once(episode, manifest, output, hold, *, motion_plan=None):
     """One filtergraph, one bounded H.264 encode with derived AAC audio."""
     started = time.perf_counter()
+    operations = {}
+    if motion_plan is not None:
+        scenes = motion_plan.get("scenes", []) if isinstance(motion_plan, dict) else []
+        operations = {scene.get("scene_id"): scene.get("operation") for scene in scenes}
+        if set(operations) != {frame.scene_id for frame in episode.frames}:
+            raise ValueError("motion plan must bind every compiled scene exactly once")
     audio_info = probe(episode.audio.path)
     duration = episode.frames[-1].end
     if len([s for s in audio_info["streams"] if s["codec_type"] == "audio"]) != 1 or abs(float(audio_info["format"]["duration"]) - duration) > 1 / 30:
@@ -395,7 +401,16 @@ def render_once(episode, manifest, output, hold):
     for i, (frame, asset) in enumerate(zip(episode.frames, manifest.assets)):
         args += ["-threads", "1", "-i", str(asset.path)]
         frames = round(frame.end * 30) - round(frame.start * 30)
-        filters.append(f"[{i}:v]zoompan=z='min(1+on*0.0002,1.04)':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d={frames}:s=1920x1080:fps=30,setsar=1,format=yuv420p[v{i}]")
+        operation = operations.get(frame.scene_id, "push_in")
+        if operation == "push_in":
+            effect = "z='min(1+on*0.0002,1.04)':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2'"
+        elif operation == "pan_left":
+            effect = f"z='1.04':x='(iw-iw/zoom)*(1-on/{max(frames - 1, 1)})':y='ih/2-ih/zoom/2'"
+        elif operation == "pull_back":
+            effect = "z='max(1.04-on*0.0002,1.0)':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2'"
+        else:
+            raise ValueError("unsupported motion operation")
+        filters.append(f"[{i}:v]zoompan={effect}:d={frames}:s=1920x1080:fps=30,setsar=1,format=yuv420p[v{i}]")
         labels.append(f"[v{i}]")
     # concat exposes a variable frame rate. Establish 30fps before tpad so the
     # closing duration cannot be converted using an inferred, incorrect rate.

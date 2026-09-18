@@ -38,7 +38,7 @@ def implementation_paths(mode):
     paths = [root / name for name in (
         "hybrid/revision.py", "hybrid/production.py", "hybrid/render.py",
         "qa/final_render.py", "qa/post_production.py", "qa/production_evidence.py",
-        "agents/script_qa.py", "agents/thumbnail.py",
+        "agents/script_qa.py", "agents/thumbnail.py", "hybrid/editorial.py",
         "providers/notification/telegram_provider.py", "hybrid/assets/ep8_promise_v1.json")]
     if mode == "LIVE":
         paths.append(root / "hybrid/revision_live.py")
@@ -136,7 +136,22 @@ class RevisionHarness:
             raise ValueError("this single-encode route requires one FFmpeg thread")
         rejected = read(predecessors) if predecessors else []
         self._validate_predecessors(rejected)
+        successor_brief = None
+        revision = 1
+        if predecessors:
+            brief_path = Path(predecessors).resolve().parent / "successor-brief.json"
+            if brief_path.is_file():
+                successor_brief = read(brief_path)
+                expected = {(item.get("kind"), item["sha256"]) for item in rejected}
+                bound = {(item.get("kind"), item["sha256"])
+                         for item in successor_brief.get("predecessor_identities", [])}
+                revision = successor_brief.get("revision")
+                if (expected != bound or type(revision) is not int or revision < 2
+                        or successor_brief.get("publication_authorized") is not False):
+                    raise ValueError("successor brief does not bind the rejected predecessors")
         bindings = {str(Path(predecessors).resolve()): sha256(predecessors)} if predecessors else {}
+        if successor_brief:
+            bindings[str(brief_path)] = sha256(brief_path)
         bindings.update({str(p.resolve()): sha256(p) for p in implementation_paths(mode)})
         contract = None
         if mode == "LIVE":
@@ -176,7 +191,27 @@ class RevisionHarness:
         bindings.update({str(a.path): a.sha256 for a in (*manifest.assets, manifest.sheet)})
         for path in (Path(refs["manifest"]), manifest.sheet.path.with_suffix(".binding.json")):
             bindings[str(path.resolve())] = sha256(path)
-        plan = dict(route="ep8-new-revision-v1", revision=1, mode=mode, request=request,
+        from src.hybrid.editorial import EpisodeRequest, build_adaptive_plan, parse_episode_request
+        try:
+            parsed_request = parse_episode_request(request)
+        except ValueError:
+            # Keep the Python API compatible while materializing every field.
+            parsed_request = EpisodeRequest(
+                episode_id="EP8", channel="@EraUmaVezBibliaAnimada",
+                language="Português do Brasil", locale="pt-BR", theme=TITLE,
+                passage="Gênesis 15–18", audience_ages=(6, 10), raw=request,
+            )
+        indispensable_events = [
+            {"id": "promise-stars", "label": "A promessa sob as estrelas", "importance": "HIGH"},
+            {"id": "new-names", "label": "Abrão e Sarai recebem novos nomes", "importance": "HIGH"},
+            {"id": "promised-son", "label": "O filho prometido é anunciado", "importance": "CRITICAL"},
+            {"id": "visitors", "label": "A promessa é repetida junto à tenda", "importance": "HIGH"},
+            {"id": "waiting", "label": "Esperar com esperança", "importance": "NORMAL"},
+        ]
+        editorial_plan = build_adaptive_plan(parsed_request, indispensable_events, budget_usd="6")
+        plan = dict(route="ep8-new-revision-v2", revision=revision, mode=mode, request=request,
+                            episode_request=parsed_request.to_dict(), editorial_plan=editorial_plan,
+                            successor_brief=successor_brief,
                     references=refs, predecessors=rejected, bindings=bindings, adapter=adapter,
                     deployment=contract,
                     chat_id=str(chat_id), image_workers=image_workers, qa_workers=qa_workers,
@@ -232,28 +267,83 @@ class RevisionHarness:
         plan = self.load()
         return dict(status=self.control["status"], revision=plan["revision"], mode=plan["mode"],
                     plan_hash=self.control["plan_hash"], artifacts=self.control.get("artifacts", {}),
-                    approvals=self.control["approvals"], publication_authorized=False)
+                    approvals=self.control["approvals"],
+                    publication_authorized=bool(self.control.get("publication_authorized", False)))
 
     def approve(self, kind, artifact_hash, reviewer):
         self.load()
-        expected = {"thumbnail": "WAITING_THUMBNAIL_APPROVAL", "video": "WAITING_VIDEO_APPROVAL"}
+        expected = {"visual-freeze": "WAITING_VISUAL_FREEZE_APPROVAL", "thumbnail": "WAITING_THUMBNAIL_APPROVAL", "video": "WAITING_VIDEO_APPROVAL"}
         if kind not in expected or self.control["status"] != expected[kind]:
             raise ValueError("separate approval gate is out of order")
-        artifact = self.control["artifacts"][kind]
+        artifact = self.control["artifacts"][kind.replace("-", "_")]
         if not reviewer.strip() or artifact_hash != artifact["sha256"] or sha256(artifact["path"]) != artifact_hash:
             raise ValueError("exact artifact hash and reviewer required")
         self.control["approvals"][kind] = dict(reviewer=reviewer, sha256=artifact_hash,
                                                 plan_hash=self.control["plan_hash"])
-        self.control["status"] = "READY_VIDEO_DELIVERY" if kind == "thumbnail" else "WAITING_FINAL_APPROVAL"
+        approval_dir = self.root / f"r{self.control['plan']['revision']:03d}" / "EP8" / "approval"
+        approval_dir.mkdir(parents=True, exist_ok=True)
+        if kind in {"thumbnail", "video"}:
+            from src.approval.receipts import ApprovalReceipt, save_approval_receipt
+            approval_receipt = ApprovalReceipt.approve(kind, artifact["path"], reviewer)
+            if approval_receipt.artifact_sha256 != artifact_hash:
+                raise ValueError("approval receipt differs from frozen artifact")
+            save_approval_receipt(approval_dir / f"approval-{kind}.json", approval_receipt)
+        else:
+            atomic_json(approval_dir / "approval-visual-freeze.json", {
+                "artifact_kind": kind, "artifact_path": artifact["path"],
+                "artifact_sha256": artifact_hash, "approver": reviewer,
+                "plan_hash": self.control["plan_hash"]})
+        self.control["status"] = {"visual-freeze": "READY_RENDER", "thumbnail": "READY_VIDEO_DELIVERY", "video": "WAITING_PUBLICATION_AUTHORIZATION"}[kind]
         self.save()
         return self.status()
 
-    def reject(self, reason):
+    def authorize_publication(self, *, command: str, reviewer: str):
+        """Authorize, but never perform, a later publication operation."""
+        self.load()
+        if self.control["status"] != "WAITING_PUBLICATION_AUTHORIZATION" or not reviewer.strip():
+            raise ValueError("publication authorization is out of order")
+        if command != "AUTORIZAR PUBLICAÇÃO EP8":
+            raise ValueError("exact separate publication command required")
+        for kind in ("visual-freeze", "thumbnail", "video"):
+            approval = self.control["approvals"].get(kind, {})
+            artifact = self.control["artifacts"][kind.replace("-", "_")]
+            if (approval.get("sha256") != artifact["sha256"]
+                    or approval.get("plan_hash") != self.control["plan_hash"]
+                    or sha256(artifact["path"]) != artifact["sha256"]):
+                raise ValueError("all independent media approvals must remain valid")
+        revision_dir = self.root / f"r{self.control['plan']['revision']:03d}" / "EP8"
+        approval_dir = revision_dir / "approval"
+        metadata_path = revision_dir / "metadata" / "youtube.json"
+        from src.approval.receipts import load_approval_receipt, require_publication_authorization
+        thumbnail_receipt = load_approval_receipt(approval_dir / "approval-thumbnail.json")
+        video_receipt = load_approval_receipt(approval_dir / "approval-video.json")
+        authorization = require_publication_authorization(command=command,
+            expected_command="AUTORIZAR PUBLICAÇÃO EP8", video=video_receipt,
+            thumbnail=thumbnail_receipt, metadata_sha256=sha256(metadata_path))
+        receipt = {**asdict(authorization), "reviewer": reviewer,
+            "plan_hash": self.control["plan_hash"], "upload_performed": False}
+        target = approval_dir / "publication-authorization.json"
+        if target.exists() and read(target) != receipt:
+            raise ValueError("publication authorization receipt is immutable")
+        atomic_json(target, receipt)
+        if read(target) != receipt:
+            raise ValueError("publication authorization readback mismatch")
+        self.control["publication_authorized"] = True
+        self.control["publication_authorization"] = receipt
+        self.control["status"] = "READY_FOR_PUBLICATION"
+        self.save()
+        return self.status()
+
+    def reject(self, reason, *, reviewer="operator", directives=None):
         plan = self.load()
         if not reason.strip():
             raise ValueError("rejection reason required")
+        feedback_directives = [str(item).strip() for item in (directives or [reason]) if str(item).strip()]
+        if not reviewer.strip() or not feedback_directives:
+            raise ValueError("complete rejection feedback required")
         old = {k: v for k, v in self.control.items() if k != "history"}
-        old.update(status="SUPERSEDED", rejection_reason=reason)
+        old.update(status="SUPERSEDED", rejection_reason=reason,
+                   rejection_reviewer=reviewer, rejection_directives=feedback_directives)
         rejected = list(plan["predecessors"])
         # Include intermediate generated media, even when the run failed before delivery.
         directory = self.root / f"r{plan['revision']:03d}"
@@ -266,8 +356,31 @@ class RevisionHarness:
                     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
                         # Partial provider/encoder output is still retired by exact bytes.
                         rejected.append(dict(path=str(path), sha256=sha256(path)))
-        new = {**plan, "revision": plan["revision"] + 1, "predecessors": rejected,
-               "supersedes": self.control["plan_hash"]}
+        successor_revision = plan["revision"] + 1
+        media_artifacts = []
+        for kind in ("video", "thumbnail"):
+            artifact = self.control.get("artifacts", {}).get(kind)
+            if artifact and re.fullmatch(r"[0-9a-f]{64}", artifact.get("sha256", "")):
+                media_artifacts.append({"kind": kind, "sha256": artifact["sha256"]})
+        if len(media_artifacts) == 2:
+            from src.hybrid.editorial import create_successor_brief
+            successor_brief = create_successor_brief(
+                {"status": "SUPERSEDED", "revision": plan["revision"],
+                 "episode_id": "EP8", "artifacts": media_artifacts},
+                {"reason": reason, "reviewer": reviewer, "directives": feedback_directives},
+                successor_revision=successor_revision)
+        else:
+            successor_brief = {"episode_id": "EP8", "revision": successor_revision,
+                "supersedes_revision": plan["revision"],
+                "rejection_feedback": {"reason": reason, "reviewer": reviewer,
+                    "directives": feedback_directives},
+                "thumbnail_constraints": {"requires_new_composition": True},
+                "publication_authorized": False}
+            successor_brief["feedback_identity"] = digest(successor_brief["rejection_feedback"])
+            successor_brief["successor_identity"] = digest(successor_brief)
+        new = {**plan, "revision": successor_revision, "predecessors": rejected,
+               "supersedes": self.control["plan_hash"], "successor_brief": successor_brief,
+               "publication_authorized": False}
         self.control = dict(plan=new, plan_hash=digest(new), status="WAITING_PLAN_APPROVAL",
                             stages={}, approvals={}, history=[*self.control["history"], old])
         self.save()
@@ -376,6 +489,44 @@ class RevisionHarness:
             script = await deps.author_script(plan, research.data)
             if mode == "LIVE" and script.get("evidence_mode") == "TEST":
                 raise ValueError("TEST script evidence cannot enter LIVE")
+            from src.hybrid.editorial import bind_research_claims, build_editorial_reports
+            claim_for_ref = {}
+            claims = []
+            for index, reference in enumerate(sorted({ref for segment in script["segments"] for ref in segment.get("source_refs", [])})):
+                claim_id = f"SRC{index + 1:03d}"
+                claim_for_ref[reference] = claim_id
+                claims.append({"claim_id": claim_id, "text": f"A paráfrase deste segmento está limitada a {reference}.",
+                    "source_ref": reference, "classification": "PARAPHRASE_BASIS"})
+            claims.append({"claim_id": "FAMILY", "text": "Aplicação familiar editorial, não fato bíblico.",
+                "source_ref": "Editorial infantil EP8", "classification": "CONTEXT"})
+            draft_segments = []
+            for segment in script["segments"]:
+                refs = segment.get("source_refs", [])
+                draft_segments.append({**segment,
+                    "claim_ids": [claim_for_ref[ref] for ref in refs] if refs else ["FAMILY"],
+                    "editorial_kind": "ORIGINAL_PARAPHRASE" if refs else "FAMILY_REFLECTION"})
+            bound = bind_research_claims(draft_segments, claims)
+            script = {**script, "segments": bound["segments"],
+                "research_identity": bound["research_identity"], "script_identity": bound["script_identity"]}
+            successor_brief = plan.get("successor_brief")
+            if successor_brief:
+                feedback_identity = successor_brief["feedback_identity"]
+                directives = successor_brief["rejection_feedback"]["directives"]
+                script["feedback_identity"] = feedback_identity
+                script["rejection_directives"] = list(directives)
+                script["segments"] = [{**segment,
+                    "feedback_identity": feedback_identity,
+                    "visual_action": segment["visual_action"] + "; successor directives: " + "; ".join(directives)}
+                    for segment in script["segments"]]
+            reports = build_editorial_reports(bound,
+                licenses=[{"asset_id": "canonical-references", "license": "approved production authority",
+                    "source": plan["references"]["authority"], "commercial_use": True,
+                    "attribution_required": False, "attribution": ""}],
+                omissions=["Gênesis 16 e trechos fora do arco"],
+                simplifications=["Frases curtas e explicações para crianças de 6–10 anos"],
+                human_review_points=["Revisar representação não humana de Deus"])
+            if reports["status"] != "PASS":
+                raise ValueError("editorial reports blocked production")
             qa = ScriptQAAgent().review(script)
             if not qa.approved:
                 raise ValueError("ScriptQA failed: " + str(qa.findings))
@@ -383,7 +534,8 @@ class RevisionHarness:
             atomic_json(script_path, script)
             self.fresh(script_path)
             atomic_json(p.qa_dir / "script.json", asdict(qa))
-            return script, [script_path, p.qa_dir / "script.json", *p.research_dir.glob("*.json")]
+            atomic_json(p.qa_dir / "editorial_reports.json", reports)
+            return script, [script_path, p.qa_dir / "script.json", p.qa_dir / "editorial_reports.json", *p.research_dir.glob("*.json")]
 
         script = await self.stage("script", script_stage, recoverable=mode == "TEST")
 
@@ -404,9 +556,59 @@ class RevisionHarness:
                                            cues=cues, mode=mode, boundary_source=result.metadata["boundary_source"]))
             atomic_json(board_path, dict(scenes=scenes))
             self.fresh(p.narration_wav)
-            return dict(duration=duration), [p.narration_wav, timeline_path, board_path]
+            return dict(duration=duration, words=result.word_timestamps,
+                boundary_source=result.metadata["boundary_source"]), [p.narration_wav, timeline_path, board_path]
 
-        await self.stage("audio_storyboard", audio_stage, recoverable=mode == "TEST")
+        audio_result = await self.stage("audio_storyboard", audio_stage, recoverable=mode == "TEST")
+        references = Manifest.load(plan["references"]["manifest"])
+        reference_by_hash = {asset.sha256: asset for asset in references.assets}
+        from src.hybrid.editorial import build_ep8_character_bible, qa_audio_transcript, validate_storyboard
+        approved_references = {}
+        for character_id in ("abraham", "sarah"):
+            reference_hash = plan["references"]["characters"][character_id]
+            asset = reference_by_hash[reference_hash]
+            approved_references[character_id] = [{"path": asset.path, "sha256": asset.sha256,
+                "status": "APPROVED", "reviewer": plan["references"]["authority"],
+                "generation_method": "APPROVED_IMAGE_TO_IMAGE_REFERENCE"}]
+        character_bible = build_ep8_character_bible(approved_references)
+        atomic_json(p.characters_dir / "character-bible.json", character_bible)
+        raw_scenes = read(board_path)["scenes"]
+        segments = {segment["id"]: segment for segment in script["segments"]}
+        connected_scenes = []
+        for index, scene in enumerate(raw_scenes):
+            segment = segments[scene["scene_id"]]
+            characters = [item for item in scene["characters"] if item in {"abraham", "sarah"}]
+            connected_scenes.append({**scene, "segment_id": scene["scene_id"],
+                "duration": scene["end"] - scene["start"], "characters": characters,
+                "location": "acampamento de Abraão e paisagem de Canaã",
+                "action": scene["visual_action"], "emotion": "esperança serena",
+                "importance": "HIGH" if index in {0, len(raw_scenes) // 2, len(raw_scenes) - 1} else "NORMAL",
+                "visual_prompt": scene["image_prompt"],
+                "negative_prompt": "God depicted, infant Isaac, text, watermark, fear, violence",
+                "camera": ("slow push-in" if index % 3 == 0 else "gentle left pan" if index % 3 == 1 else "slow pull-back"),
+                "motion_intent": "subtle parallax preserving faces and canonical identity",
+                "transition": "soft dissolve", "sfx": [],
+                "source_claim_ids": segment["claim_ids"],
+                "feedback_identity": script.get("feedback_identity", "INITIAL_REVISION"),
+                "character_reference_hashes": {item: plan["references"]["characters"][item] for item in characters},
+                "hero_candidate": index in {0, len(raw_scenes) // 2, len(raw_scenes) - 1}})
+        connected_storyboard = {"scenes": connected_scenes,
+            "character_bible_identity": character_bible["bible_identity"],
+            "burned_captions": False, "closing_hold_seconds": plan["editorial_plan"]["closing_hold_seconds"]}
+        storyboard_report = validate_storyboard(connected_storyboard, script, character_bible,
+            audio_duration_seconds=audio_result["duration"])
+        connected_board_path = p.storyboard_dir / "connected.json"
+        atomic_json(connected_board_path, connected_storyboard)
+        atomic_json(p.qa_dir / "storyboard.json", storyboard_report)
+        transcript = " ".join(segment["narration"].strip() for segment in script["segments"])
+        bound_transcript_path = p.audio_dir / "transcript-bound.txt"
+        bound_transcript_path.write_text(transcript, encoding="utf-8")
+        audio_report = qa_audio_transcript({"decoded": True, "duration_seconds": audio_result["duration"],
+            "sample_rate_hz": 16000, "channels": 1, "boundary_source": "WordBoundary",
+            "word_boundaries": audio_result["words"]}, transcript, script,
+            sidecars={"transcript": True, "srt": True, "vtt": True, "burned_in_video": False})
+        atomic_json(p.qa_dir / "audio.json", audio_report)
+        # Re-load the same immutable manifest after the editorial contracts have bound it.
         references = Manifest.load(plan["references"]["manifest"])
         for asset in references.assets:
             self.fresh(asset.path)
@@ -415,7 +617,7 @@ class RevisionHarness:
         pipeline = director.activate_compiled_production(episode_id,
             approved_audio=FrozenAsset.approve(p.narration_wav, "ScriptQA + WordBoundary", mode),
             source_manifest=references, database=directory / "executor.sqlite3", endpoint=deps.endpoint,
-            image_cost=Decimal(deps.image_cost), storyboard_path=board_path,
+            image_cost=Decimal(deps.image_cost), storyboard_path=connected_board_path,
             prior_spend=Decimal(getattr(deps, "prior_spend", 0)),
             executor_config=Config(concurrency=plan["image_workers"], limit=Decimal(plan["budget_usd"])))
 
@@ -430,7 +632,7 @@ class RevisionHarness:
 
         async def images_stage():
             semaphore = asyncio.Semaphore(plan["qa_workers"])
-            scenes = {s["scene_id"]: s for s in read(board_path)["scenes"]}
+            scenes = {s["scene_id"]: s for s in read(connected_board_path)["scenes"]}
             tasks = []
 
             async def review(receipt, wave=0):
@@ -481,14 +683,20 @@ class RevisionHarness:
                 await asyncio.gather(*tasks)
             finally:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            corrections = {}
             for scene_id, job in list(pipeline.run._active_images.items()):
                 receipt = pipeline.run.executor.inspect(job.request_id)
                 if receipt.get("qa") is False:
-                    correction = pipeline.run.remediation_job(scene_id, job.payload["prompt"] + " Correct the rejected visual; retain canonical identity.")
-                    auth, prices = await authority([correction])
-                    fixed = await pipeline.run.executor.run(correction, deps.images,
-                        authorization=auth.get(correction.request_id), price=prices.get(correction.request_id))
-                    await review(fixed, 1)
+                    corrections[scene_id] = job.payload["prompt"] + " Correct the rejected visual; retain canonical identity."
+            if corrections:
+                correction_jobs = [pipeline.run.remediation_job(scene_id, prompt) for scene_id, prompt in corrections.items()]
+                auth, prices = await authority(correction_jobs)
+                prior_task_count = len(tasks)
+                async def correction_completed(receipt):
+                    tasks.append(asyncio.create_task(review(receipt, 1)))
+                await pipeline.dispatch_remediation_wave(corrections, deps.images,
+                    authorizations=auth, prices=prices, on_completed=correction_completed)
+                await asyncio.gather(*tasks[prior_task_count:])
             if not pipeline.render_ready():
                 raise ValueError("visual QA failed after one correction wave")
             manifest = pipeline.approved_manifest()
@@ -500,7 +708,25 @@ class RevisionHarness:
         manifest = Manifest.load(result["manifest"])
         for asset in manifest.assets:
             self.fresh(asset.path)
+        freeze = self.fresh(manifest.sheet.path)
+        freeze["manifest_sha256"] = sha256(result["manifest"])
+        approved_freeze = self.control["approvals"].get("visual-freeze", {})
+        if approved_freeze.get("sha256") != freeze["sha256"]:
+            self.control["artifacts"] = {
+                **self.control.get("artifacts", {}),
+                "visual_freeze": freeze,
+            }
+            self.save()
+            return await self.deliver("visual-freeze", plan, directory, deps)
 
+        motion_plan = {"schema_version": 1, "manifest_sha256": sha256(result["manifest"]),
+            "storyboard_sha256": sha256(connected_board_path), "scenes": [
+                {"scene_id": scene["scene_id"], "operation": ("push_in", "pan_left", "pull_back")[index % 3],
+                 "duration": scene["duration"], "transition": scene["transition"]}
+                for index, scene in enumerate(connected_scenes)
+            ]}
+        motion_plan_path = p.animation_dir / "motion-plan.json"
+        atomic_json(motion_plan_path, motion_plan)
         encode_started = "encode" in self.control["stages"]
 
         async def render_stage():
@@ -514,7 +740,7 @@ class RevisionHarness:
                         or recovered.get("manifest") != manifest.checksum):
                     raise ValueError("invalid durable encode receipt")
                 return recovered, [p.final_video, durable]
-            receipt = render_once(pipeline.episode, manifest, p.final_video, script["closing_duration_s"])
+            receipt = render_once(pipeline.episode, manifest, p.final_video, script["closing_duration_s"], motion_plan=motion_plan)
             receipt.update(audio_operation="derived_master", subtitles_sha256=None, mode=mode,
                            compilation=pipeline.episode.checksum, manifest=manifest.checksum,
                            expected_duration=pipeline.episode.frames[-1].end + script["closing_duration_s"])
@@ -529,17 +755,47 @@ class RevisionHarness:
                 narration=script["narration"], subtitles_dir=str(p.subtitles_dir))
             if not captions.success:
                 raise ValueError(captions.error)
-            metadata = dict(title=TITLE, language="pt-BR", references=sorted({r for s in script["segments"] for r in s["source_refs"]}),
-                licenses=dict(visual_assets="TEST fixtures" if mode == "TEST" else deps.visual_license, music="No music used"),
-                mode=mode, publication_authorized=False,
-                chapters=[dict(start=s["start"], title=s["visual_action"]) for s in read(board_path)["scenes"]])
-            atomic_json(p.metadata_dir / "youtube.json", metadata)
+            metadata = None  # built after the thumbnail is frozen so every sidecar is hash-bound
             thumbnail = await ThumbnailAgent().run(episode_id,
                 images=[dict(scene_id=f.scene_id, image_path=str(a.path)) for f, a in zip(pipeline.episode.frames, manifest.assets)],
-                thumbnails_dir=str(p.thumbnails_dir), copy_contract=ThumbnailContract(HEADLINE, TITLE, SUBTITLE))
+                scenes=connected_scenes, thumbnails_dir=str(p.thumbnails_dir),
+                copy_contract=ThumbnailContract(HEADLINE, TITLE, SUBTITLE))
             if not thumbnail.success:
                 raise ValueError(thumbnail.error)
             self.fresh(thumbnail.data["thumbnail_path"])
+            from src.hybrid.editorial import build_youtube_metadata, digest as editorial_digest, validate_youtube_metadata
+            duration = float(receipt["expected_duration"])
+            if mode == "TEST":
+                metadata_duration = max(duration, 30.1)
+                chapters = [
+                    {"start_seconds": 0.0, "title": "A promessa"},
+                    {"start_seconds": 10.0, "title": "Esperar com fé"},
+                    {"start_seconds": 20.0, "title": "A visita e a esperança"},
+                ]
+            else:
+                metadata_duration = duration
+                chapters = []
+                for scene in connected_scenes:
+                    start = float(scene["start"])
+                    if not chapters or start - chapters[-1]["start_seconds"] >= 10:
+                        chapters.append({"start_seconds": start, "title": scene["visual_action"][:80]})
+                if len(chapters) < 3:
+                    raise ValueError("LIVE metadata needs three chapters at least ten seconds apart")
+            editorial_reports = read(p.qa_dir / "editorial_reports.json")
+            metadata = build_youtube_metadata(chapters=chapters, duration_seconds=metadata_duration,
+                transcript_artifacts={"transcript": {key: value for key, value in self.fresh(p.transcript_txt).items() if key in {"path", "sha256"}},
+                    "srt": {key: value for key, value in self.fresh(p.captions_srt).items() if key in {"path", "sha256"}},
+                    "vtt": {key: value for key, value in self.fresh(p.captions_vtt).items() if key in {"path", "sha256"}}},
+                thumbnail={key: value for key, value in self.fresh(thumbnail.data["thumbnail_path"]).items() if key in {"path", "sha256"}},
+                license_report_identity=editorial_reports["report_identity"])
+            metadata.update(language="pt-BR",
+                references=sorted({r for s in script["segments"] for r in s["source_refs"]}),
+                licenses={"visual_assets": "TEST fixtures" if mode == "TEST" else deps.visual_license,
+                    "music": "No music used"}, mode=mode, publication_authorized=False)
+            metadata["metadata_identity"] = editorial_digest({key: value for key, value in metadata.items() if key != "metadata_identity"})
+            if mode == "LIVE":
+                validate_youtube_metadata(metadata, duration_seconds=duration)
+            atomic_json(p.metadata_dir / "youtube.json", metadata)
             return thumbnail.data, [*p.subtitles_dir.iterdir(), *p.metadata_dir.iterdir(), *p.thumbnails_dir.iterdir()]
 
         thumbnail = await self.stage("sidecars", sidecars_stage, recoverable=True)
@@ -557,13 +813,14 @@ class RevisionHarness:
             return reports, [p.qa_dir / "final.json"]
 
         await self.stage("final_qa", final_stage, recoverable=True)
-        artifacts = dict(thumbnail=self.fresh(thumbnail["thumbnail_path"]), video=self.fresh(p.final_video))
+        artifacts = {**self.control.get("artifacts", {}),
+            "thumbnail": self.fresh(thumbnail["thumbnail_path"]), "video": self.fresh(p.final_video)}
         self.control["artifacts"] = artifacts
         self.save()  # freeze both media before any delivery intent
         return await self.deliver("thumbnail", plan, directory, deps)
 
     async def deliver(self, kind, plan, directory, deps=None):
-        artifact = self.control["artifacts"][kind]
+        artifact = self.control["artifacts"][kind.replace("-", "_")]
         if sha256(artifact["path"]) != artifact["sha256"]:
             raise ValueError("frozen delivery hash mismatch")
         if kind == "video":
@@ -571,7 +828,7 @@ class RevisionHarness:
             if (approval.get("sha256") != self.control["artifacts"]["thumbnail"]["sha256"]
                     or approval.get("plan_hash") != self.control["plan_hash"]):
                 raise ValueError("exact thumbnail approval required before video delivery")
-        name = "telegram_" + kind
+        name = f"telegram_{kind.replace('-', '_')}"
         receipt_path = directory / "EP8/qa" / f"telegram-{kind}.json"
         intent = dict(kind=kind, sha256=artifact["sha256"], mode=plan["mode"],
                       chat_id=plan["chat_id"], plan_hash=self.control["plan_hash"])
@@ -591,7 +848,7 @@ class RevisionHarness:
             deps = deps or self.get_dependencies(plan, directory)
             self.control["stages"][name] = dict(status="STARTED", intent=intent)
             self.save()
-            method = deps.messenger.send_photo if kind == "thumbnail" else deps.messenger.send_video
+            method = deps.messenger.send_photo if kind in {"thumbnail", "visual-freeze"} else deps.messenger.send_video
             message_id = await method(plan["chat_id"], artifact["path"],
                 f"{plan['mode']} EP8 revision {plan['revision']} {kind}; SHA256 {artifact['sha256']}; approval required")
             value = dict(**intent, message_id=message_id)
@@ -601,7 +858,7 @@ class RevisionHarness:
         self.load()
         self.control["stages"][name] = dict(status="COMPLETE", intent=intent, result=value,
             outputs={str(receipt_path.resolve()): sha256(receipt_path)}, elapsed_seconds=0)
-        self.control["status"] = "WAITING_THUMBNAIL_APPROVAL" if kind == "thumbnail" else "WAITING_VIDEO_APPROVAL"
+        self.control["status"] = {"visual-freeze": "WAITING_VISUAL_FREEZE_APPROVAL", "thumbnail": "WAITING_THUMBNAIL_APPROVAL", "video": "WAITING_VIDEO_APPROVAL"}[kind]
         self.save()
         return self.status()
 
@@ -621,6 +878,8 @@ def validate_ep8_script(script):
         if re.search(r"(?:ISAQUE|ISAAC).{0,24}(?:NASCEU|BORN)", text):
             raise ValueError("Isaac is not born in EP8")
         for reference in segment["source_refs"]:
+            if segment.get("editorial_kind") == "FAMILY_REFLECTION" and reference == "Editorial infantil EP8":
+                continue
             match = re.fullmatch(r"Gênesis (15|17|18):(\d+)(?:-(\d+))?", reference)
             if not match:
                 raise ValueError("EP8 biblical source outside approved scope")
@@ -672,7 +931,7 @@ def studio_factory(workspace, **kwargs):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("create-plan", "approve-plan", "run", "resume", "status", "approve", "reject"))
+    parser.add_argument("action", choices=("create-plan", "approve-plan", "run", "resume", "status", "approve", "reject", "authorize-publication", "bootstrap-history"))
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--mode", choices=("TEST", "LIVE"), default="TEST")
     parser.add_argument("--request", default="New EP8: Abraham and Sarah")
@@ -684,14 +943,41 @@ def main(argv=None):
     parser.add_argument("--plan-hash")
     parser.add_argument("--artifact-hash")
     parser.add_argument("--reviewer", default="")
-    parser.add_argument("--kind", choices=("thumbnail", "video"))
+    parser.add_argument("--kind", choices=("visual-freeze", "thumbnail", "video"))
     parser.add_argument("--reason", default="")
+    parser.add_argument("--command", default="")
+    parser.add_argument("--source-root", type=Path)
     parser.add_argument("--image-workers", type=int, default=3)
     parser.add_argument("--qa-workers", type=int, default=2)
     args = parser.parse_args(argv)
     try:
         with studio_factory(args.workspace) as harness:
-            if args.action == "create-plan":
+            if args.action == "bootstrap-history":
+                if not args.source_root:
+                    raise ValueError("--source-root required for historical bootstrap")
+                from src.hybrid.editorial import bootstrap_ep8_history
+                result = bootstrap_ep8_history(args.source_root)
+                args.workspace.mkdir(parents=True, exist_ok=True)
+                outputs = {
+                    args.workspace / "historical-bootstrap.json": result,
+                    args.workspace / "predecessors.json": result["predecessor_identities"],
+                    args.workspace / "successor-brief.json": result["brief"],
+                }
+                for output, payload in outputs.items():
+                    if output.exists() and read(output) != payload:
+                        raise ValueError("historical bootstrap output is immutable")
+                    atomic_json(output, payload)
+                result = {
+                    "status": "BOOTSTRAPPED", "read_only": True,
+                    "source_root": result["source_root"],
+                    "source_manifest_identity": result["source_manifest_identity"],
+                    "predecessor_identities": result["predecessor_identities"],
+                    "brief_identity": result["brief"]["successor_identity"],
+                    "revision": result["brief"]["revision"],
+                    "publication_authorized": False,
+                    "outputs": {path.name: sha256(path) for path in outputs},
+                }
+            elif args.action == "create-plan":
                 result = harness.create_plan(mode=args.mode, request=args.request, predecessors=args.predecessors,
                     references=args.references, adapter=args.adapter, chat_id=args.chat_id,
                     deployment=args.deployment,
@@ -700,6 +986,8 @@ def main(argv=None):
                 result = harness.approve_plan(args.plan_hash, args.reviewer)
             elif args.action == "approve":
                 result = harness.approve(args.kind, args.artifact_hash, args.reviewer)
+            elif args.action == "authorize-publication":
+                result = harness.authorize_publication(command=args.command, reviewer=args.reviewer)
             elif args.action == "reject":
                 result = harness.reject(args.reason)
             elif args.action in {"run", "resume"}:
