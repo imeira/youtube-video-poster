@@ -133,7 +133,8 @@ class RevisionHarness:
         return plan
 
     def create_plan(self, *, mode, request, predecessors=None, references=None, adapter=None,
-                    deployment=None, image_workers=3, qa_workers=2, ffmpeg_threads=1, chat_id="TEST"):
+                    deployment=None, image_workers=3, qa_workers=2, ffmpeg_threads=1, chat_id="TEST",
+                    heroes=False, hero_endpoint="", hero_cost=None):
         if self.path.exists():
             raise ValueError("plan exists; reject to create a new revision")
         if mode not in {"TEST", "LIVE"} or not request.strip():
@@ -231,13 +232,43 @@ class RevisionHarness:
                 "words": 0, "duration_seconds": 0, "scenes": 0, "cost_usd": "0.01"}
             editorial_plan["plan_identity"] = digest({key: value for key, value in editorial_plan.items()
                                                         if key != "plan_identity"})
+        # Hero generation is deliberately a separately priced opt-in.  The
+        # selection is part of the plan hash and never enables itself.
+        if type(heroes) is not bool:
+            raise ValueError("heroes flag must be explicit boolean")
+        candidates = editorial_plan["hero_candidates"]
+        if not heroes:
+            hero_plan = dict(enabled=False, endpoint="", unit_cost_usd="0",
+                             selected_event_ids=[], selected_scene_ids=[],
+                             authorization_required=True,
+                             fallback="LOCAL_FULL_MOTION")
+        else:
+            if not isinstance(hero_endpoint, str) or not hero_endpoint.strip():
+                raise ValueError("explicit hero endpoint required")
+            try:
+                unit_cost = Decimal(str(hero_cost))
+            except (InvalidOperation, ValueError, TypeError) as error:
+                raise ValueError("explicit hero price required") from error
+            if not unit_cost.is_finite() or unit_cost <= 0:
+                raise ValueError("explicit positive hero price required")
+            selected = [item for item in candidates if item["importance"] in {"HIGH", "CRITICAL"}]
+            reserved = unit_cost * len(selected)
+            if reserved >= Decimal("6"):
+                raise ValueError("hero budget exceeds revision budget")
+            hero_plan = dict(enabled=True, endpoint=hero_endpoint.strip(), unit_cost_usd=str(unit_cost),
+                             reserved_usd=str(reserved),
+                             selected_event_ids=[item["event_id"] for item in selected],
+                             # Script/timing maps event candidates to scene IDs later.  This
+                             # empty binding cannot grant a provider request by itself.
+                             selected_scene_ids=[], authorization_required=True,
+                             fallback="LOCAL_FULL_MOTION")
         plan = dict(route="ep8-new-revision-v2", revision=revision, mode=mode, request=request,
                             episode_request=parsed_request.to_dict(), editorial_plan=editorial_plan,
                             successor_brief=successor_brief,
                     references=refs, predecessors=rejected, bindings=bindings, adapter=adapter,
                     deployment=contract,
                     chat_id=str(chat_id), image_workers=image_workers, qa_workers=qa_workers,
-                    ffmpeg_threads=ffmpeg_threads, correction_waves=1, heroes=False, budget_usd="6",
+                    ffmpeg_threads=ffmpeg_threads, correction_waves=1, heroes=heroes, hero_plan=hero_plan, budget_usd="6",
                     provider_contract="transactional-executor-v1; exact-price-and-authority; recover-only",
                     publication_authorized=False)
         self.control = dict(plan=plan, plan_hash=digest(plan), status="WAITING_PLAN_APPROVAL",
@@ -515,6 +546,11 @@ class RevisionHarness:
         if any(not callable(getattr(owner, name, None)) for owner, name in required_methods):
             raise ValueError("incomplete deployment providers")
         if plan["mode"] == "LIVE":
+            if plan.get("heroes"):
+                # The checked-in LIVE deployment has no bound RunPod hero
+                # authority.  Do not silently fall through to an image adapter
+                # or make a speculative paid request.
+                raise ValueError("LIVE hero preflight requires an audited RunPod hero adapter")
             # Deployment performs credential/authority checks, never prints secrets.
             evidence = deps.preflight(plan)
             required = {"credentials", "script_authority", "tts_authority", "visual_qa_authority",
@@ -814,12 +850,48 @@ class RevisionHarness:
             if not pipeline.render_ready():
                 raise ValueError("visual QA failed after one correction wave")
             manifest = pipeline.approved_manifest()
+            # The revision route currently has one final encode.  Keep every
+            # unselected/unavailable hero on the complete local motion path;
+            # never serialise scene rendering behind a remote clip.  This
+            # manifest is durable package evidence even when heroes are off.
+            hero_config = plan["hero_plan"]
+            selected_events = hero_config["selected_event_ids"]
+            high_scenes = [scene for scene in connected_scenes
+                           if scene["importance"] in {"HIGH", "CRITICAL"}]
+            selected_scenes = [
+                {"event_id": event_id, "scene_id": scene["scene_id"],
+                 "importance": scene["importance"], "duration": scene["duration"]}
+                for event_id, scene in zip(selected_events, high_scenes, strict=False)
+            ]
+            hero_manifest = {
+                "schema_version": 1,
+                "enabled": hero_config["enabled"],
+                "plan_hash": self.control["plan_hash"],
+                "authorization": self.control["plan_approval"],
+                "endpoint": hero_config["endpoint"],
+                "unit_cost_usd": hero_config["unit_cost_usd"],
+                "selected": selected_scenes,
+                "receipts": [],
+                "fallback": "LOCAL_FULL_MOTION",
+                "fallback_scenes": [scene["scene_id"] for scene in connected_scenes],
+                "remote_io": False,
+            }
+            # A five-second slot and a dedicated audited provider are required
+            # before remote I/O is ever enabled.  Without both, normal local
+            # motion remains complete rather than becoming a bottleneck.
+            if hero_config["enabled"]:
+                hero_manifest["blocked_reason"] = "NO_AUDITED_HERO_PROVIDER_OR_EXACT_FIVE_SECOND_SLOT"
+            hero_manifest_path = p.animation_dir / "hero-manifest.json"
+            atomic_json(hero_manifest_path, hero_manifest)
             pipeline.run.executor.sync_cost_ledger(p.costs_json, episode_id=episode_id, budget=cfg.budget)
-            paths = [*pipeline.workspace.rglob("*.json"), *pipeline.workspace.rglob("*.png"), p.costs_json]
-            return dict(manifest=str(pipeline.workspace / "manifest.json")), paths
+            paths = [*pipeline.workspace.rglob("*.json"), *pipeline.workspace.rglob("*.png"),
+                     p.costs_json, hero_manifest_path]
+            return dict(manifest=str(pipeline.workspace / "manifest.json"),
+                        hero_manifest=str(hero_manifest_path)), paths
 
         result = await self.stage("images", images_stage, recoverable=True)
         manifest = Manifest.load(result["manifest"])
+        hero_manifest_path = Path(result["hero_manifest"])
         for asset in manifest.assets:
             self.fresh(asset.path)
         freeze = self.fresh(manifest.sheet.path)
@@ -861,6 +933,7 @@ class RevisionHarness:
             receipt = render_once(pipeline.episode, manifest, p.final_video, script["closing_duration_s"], motion_plan=motion_plan)
             receipt.update(audio_operation="derived_master", subtitles_sha256=None, mode=mode,
                            compilation=pipeline.episode.checksum, manifest=manifest.checksum,
+                           hero_manifest_sha256=sha256(hero_manifest_path),
                            expected_duration=pipeline.episode.frames[-1].end + script["closing_duration_s"])
             self.fresh(p.final_video)
             atomic_json(p.qa_dir / "encode.json", receipt)
@@ -910,6 +983,8 @@ class RevisionHarness:
                 references=sorted({r for s in script["segments"] for r in s["source_refs"]}),
                 licenses={"visual_assets": "TEST fixtures" if mode == "TEST" else deps.visual_license,
                     "music": "No music used"}, mode=mode, publication_authorized=False)
+            metadata["hero_manifest"] = {"path": str(hero_manifest_path),
+                "sha256": sha256(hero_manifest_path)}
             metadata["metadata_identity"] = editorial_digest({key: value for key, value in metadata.items() if key != "metadata_identity"})
             if mode == "LIVE":
                 validate_youtube_metadata(metadata, duration_seconds=duration)
@@ -1058,6 +1133,9 @@ def main(argv=None):
     parser.add_argument("--adapter")
     parser.add_argument("--deployment", type=Path)
     parser.add_argument("--chat-id", default="TEST")
+    parser.add_argument("--heroes", action="store_true", help="opt in to separately priced hero clips")
+    parser.add_argument("--hero-endpoint", default="")
+    parser.add_argument("--hero-cost")
     parser.add_argument("--plan-hash")
     parser.add_argument("--artifact-hash")
     parser.add_argument("--reviewer", default="")
@@ -1099,7 +1177,8 @@ def main(argv=None):
                 result = harness.create_plan(mode=args.mode, request=args.request, predecessors=args.predecessors,
                     references=args.references, adapter=args.adapter, chat_id=args.chat_id,
                     deployment=args.deployment,
-                    image_workers=args.image_workers, qa_workers=args.qa_workers)
+                    image_workers=args.image_workers, qa_workers=args.qa_workers,
+                    heroes=args.heroes, hero_endpoint=args.hero_endpoint, hero_cost=args.hero_cost)
             elif args.action == "approve-plan":
                 result = harness.approve_plan(args.plan_hash, args.reviewer)
             elif args.action == "approve":

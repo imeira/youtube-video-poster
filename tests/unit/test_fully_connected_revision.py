@@ -71,6 +71,13 @@ def test_visual_freeze_is_a_separate_gate_before_the_only_encode(tmp_path):
         assert motion_path.is_file()
         motions = json.loads(motion_path.read_text(encoding="utf-8"))["scenes"]
         assert len({scene["operation"] for scene in motions}) >= 3
+        heroes = json.loads((tmp_path / "r001/EP8/animation/hero-manifest.json").read_text(encoding="utf-8"))
+        assert heroes["enabled"] is False
+        assert heroes["fallback"] == "LOCAL_FULL_MOTION"
+        assert heroes["fallback_scenes"] == [scene["scene_id"] for scene in motions]
+        assert control["stages"]["encode"]["result"]["hero_manifest_sha256"] == sha256(
+            tmp_path / "r001/EP8/animation/hero-manifest.json"
+        )
         assert (tmp_path / "r001/EP8/characters/character-bible.json").is_file()
         assert (tmp_path / "r001/EP8/qa/audio.json").is_file()
         assert (tmp_path / "r001/EP8/qa/storyboard.json").is_file()
