@@ -402,6 +402,141 @@ class RevisionHarness:
                    result_sha256=sha256(target))
         return self.status()
 
+    def _publication_provider(self, deployment, mode):
+        """Load only an explicitly deployment-bound publication adapter."""
+        if deployment is None:
+            raise ValueError("explicit publication provider deployment required before I/O")
+        contract = read(deployment)
+        provider = contract.get("publication_provider")
+        if (not isinstance(provider, dict) or set(provider) - {"adapter", "mode", "config"}
+                or not isinstance(provider.get("adapter"), str) or not provider["adapter"].strip()
+                or provider.get("mode") != mode):
+            raise ValueError("explicit publication provider deployment required before I/O")
+        module_name, separator, factory_name = provider["adapter"].partition(":")
+        if not separator or not module_name or not factory_name:
+            raise ValueError("publication provider adapter must be module:factory")
+        factory = getattr(importlib.import_module(module_name), factory_name, None)
+        if not callable(factory):
+            raise ValueError("publication provider adapter factory is required")
+        adapter = factory(config=provider.get("config", {}), mode=mode)
+        if not callable(getattr(adapter, "upload", None)) or not callable(getattr(adapter, "readback", None)):
+            raise ValueError("publication provider requires upload and readback")
+        return adapter
+
+    def _publication_inputs(self):
+        """Read and re-verify the immutable package and all authorization evidence."""
+        if self.control["status"] != "READY_FOR_PUBLICATION":
+            raise ValueError("publication requires READY_FOR_PUBLICATION")
+        revision_dir = self.root / f"r{self.control['plan']['revision']:03d}" / "EP8"
+        package_path = revision_dir / "publication-package.json"
+        authorization_path = revision_dir / "approval" / "publication-authorization.json"
+        if not package_path.is_file() or not authorization_path.is_file():
+            raise ValueError("publication package and authorization receipt required")
+        package, authorization = read(package_path), read(authorization_path)
+        stored_hash = package.pop("package_hash", None)
+        if not isinstance(stored_hash, str) or digest(package) != stored_hash:
+            raise ValueError("publication package hash mismatch")
+        package["package_hash"] = stored_hash
+        if (package.get("plan_hash") != self.control["plan_hash"]
+                or package.get("plan", {}).get("mode") != self.control["plan"].get("mode")
+                or package.get("publication_authorized") is not False
+                or package.get("upload_performed") is not False):
+            raise ValueError("publication package is not an authorized unuploaded package")
+        required = {"video", "thumbnail", "metadata", "captions_srt", "captions_vtt", "transcript"}
+        if not required <= set(package.get("artifacts", {})):
+            raise ValueError("publication package delivery artifacts incomplete")
+        for entry in package["artifacts"].values():
+            path = Path(entry.get("path", ""))
+            if not path.is_file() or sha256(path) != entry.get("sha256"):
+                raise ValueError("package artifact hash mismatch")
+        approvals = {entry.get("kind"): entry for entry in package.get("approval_receipts", [])}
+        if set(approvals) != {"visual-freeze", "thumbnail", "video"}:
+            raise ValueError("publication package approvals incomplete")
+        for entry in approvals.values():
+            path = Path(entry.get("path", ""))
+            if not path.is_file() or sha256(path) != entry.get("sha256"):
+                raise ValueError("publication approval receipt hash mismatch")
+        from src.approval.receipts import load_approval_receipt, require_publication_authorization
+        video = load_approval_receipt(approvals["video"]["path"])
+        thumbnail = load_approval_receipt(approvals["thumbnail"]["path"])
+        metadata_sha256 = package["artifacts"]["metadata"]["sha256"]
+        bound = require_publication_authorization(command=authorization.get("command", ""),
+            expected_command="AUTORIZAR PUBLICAÇÃO EP8", video=video, thumbnail=thumbnail,
+            metadata_sha256=metadata_sha256)
+        if (authorization.get("video_sha256") != bound.video_sha256
+                or authorization.get("thumbnail_sha256") != bound.thumbnail_sha256
+                or authorization.get("metadata_sha256") != bound.metadata_sha256
+                or authorization.get("plan_hash") != self.control["plan_hash"]
+                or authorization.get("upload_performed") is not False):
+            raise ValueError("publication authorization receipt does not bind package")
+        return revision_dir, package_path, package, video, thumbnail
+
+    def notify_publication(self, receipt):
+        """Record the publish notification boundary; transports remain deployment-owned."""
+        self.event("COMPLETE", stage="publication-notification", video_id=receipt["video_id"],
+                   video_url=receipt["video_url"])
+
+    async def publish(self, *, command, deployment=None):
+        """Separate public command: persist intent, submit once, then require remote GET."""
+        self.load()
+        from src.publishing.controller import PublicationController
+        PublicationController.require_exact_command(command, "PUBLICAR EP8")
+        provider = self._publication_provider(deployment, self.control["plan"].get("mode"))
+        revision_dir, package_path, package, video, thumbnail = self._publication_inputs()
+        approval_dir = revision_dir / "approval"
+        intent_path = approval_dir / "publication-intent.json"
+        receipt_path = approval_dir / "publication-receipt.json"
+        if receipt_path.is_file():
+            raise ValueError("publication receipt exists; readback/recovery required")
+        metadata = read(package["artifacts"]["metadata"]["path"])
+        intent = {"command": command, "package_hash": package["package_hash"],
+                  "video_sha256": video.artifact_sha256, "thumbnail_sha256": thumbnail.artifact_sha256,
+                  "metadata_sha256": package["artifacts"]["metadata"]["sha256"], "status": "PENDING"}
+        if intent_path.exists():
+            existing = read(intent_path)
+            if existing.get("package_hash") != intent["package_hash"]:
+                raise ValueError("publication intent does not bind package")
+            video_id = existing.get("video_id")
+            if not isinstance(video_id, str) or not video_id:
+                raise ValueError("publication requires readback/recovery; never resubmit")
+            readback = await PublicationController.require_readback(provider, video_id)
+            result = {"video_id": video_id, "video_url": existing.get("video_url", ""), "readback": readback}
+        else:
+            atomic_json(intent_path, intent)
+            try:
+                uploaded = await provider.upload(video.artifact_path, metadata,
+                    thumbnail=thumbnail.artifact_path, captions=package["artifacts"]["captions_srt"]["path"])
+            except Exception as error:
+                intent["status"] = "AMBIGUOUS"
+                intent["error"] = str(error)
+                atomic_json(intent_path, intent)
+                raise ValueError("publication requires readback/recovery; never resubmit") from error
+            if not uploaded.success or not uploaded.video_id or not uploaded.video_url:
+                intent["status"] = "FAILED"
+                intent["error"] = getattr(uploaded, "error", "provider rejected") or "provider rejected"
+                atomic_json(intent_path, intent)
+                raise ValueError(intent["error"])
+            intent.update(status="REMOTE_ACCEPTED", video_id=uploaded.video_id, video_url=uploaded.video_url)
+            atomic_json(intent_path, intent)
+            readback = await PublicationController.require_readback(provider, uploaded.video_id)
+            result = {"video_id": uploaded.video_id, "video_url": uploaded.video_url, "readback": readback}
+        receipt = {**intent, **result, "status": "PUBLISHED"}
+        atomic_json(receipt_path, receipt)
+        package["publication_authorized"] = True
+        package["upload_performed"] = True
+        package["publication_receipt"] = str(receipt_path.resolve())
+        package.pop("package_hash")
+        package["package_hash"] = digest(package)
+        atomic_json(package_path, package)
+        package_stage = self.control.get("stages", {}).get("publication_package")
+        if package_stage and str(package_path.resolve()) in package_stage.get("outputs", {}):
+            package_stage["outputs"][str(package_path.resolve())] = sha256(package_path)
+        self.control["status"] = "PUBLISHED"
+        self.control["publication_receipt"] = str(receipt_path.resolve())
+        self.save()
+        self.notify_publication(receipt)
+        return {"status": "PUBLISHED", **receipt}
+
     def _freeze_publication_package(self):
         """Bind delivery inputs after video approval; authorization never uploads or rewrites it."""
         plan = self.control["plan"]
@@ -1253,7 +1388,7 @@ def studio_factory(workspace, **kwargs):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("create-plan", "approve-plan", "run", "resume", "status", "approve", "reject", "authorize-publication", "bootstrap-history"))
+    parser.add_argument("action", choices=("create-plan", "approve-plan", "run", "resume", "status", "approve", "reject", "authorize-publication", "publish", "bootstrap-history"))
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--mode", choices=("TEST", "LIVE"), default="TEST")
     parser.add_argument("--request", default="New EP8: Abraham and Sarah")
@@ -1314,6 +1449,8 @@ def main(argv=None):
                 result = harness.approve(args.kind, args.artifact_hash, args.reviewer)
             elif args.action == "authorize-publication":
                 result = harness.authorize_publication(command=args.command, reviewer=args.reviewer)
+            elif args.action == "publish":
+                result = asyncio.run(harness.publish(command=args.command, deployment=args.deployment))
             elif args.action == "reject":
                 result = harness.reject(args.reason)
             elif args.action in {"run", "resume"}:

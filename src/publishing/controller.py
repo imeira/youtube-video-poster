@@ -36,6 +36,23 @@ class PublicationController:
     def __init__(self, publisher: Any):
         self.publisher = publisher
 
+    @staticmethod
+    def require_exact_command(command: str, expected_command: str) -> None:
+        if command != expected_command or not command.strip():
+            raise PublicationControllerError("A separate exact publication command is required")
+
+    @staticmethod
+    async def require_readback(publisher: Any, video_id: str) -> dict[str, Any]:
+        readback_method = getattr(publisher, "readback", None)
+        if not callable(readback_method):
+            raise PublicationControllerError("publisher readback is required before publication")
+        readback = readback_method(video_id)
+        if inspect.isawaitable(readback):
+            readback = await readback
+        if not isinstance(readback, dict) or readback.get("video_id") != video_id:
+            raise PublicationControllerError("publisher readback does not bind the uploaded video")
+        return readback
+
     async def publish(
         self,
         *,
