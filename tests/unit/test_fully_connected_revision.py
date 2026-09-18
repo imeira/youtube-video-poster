@@ -79,6 +79,25 @@ def test_visual_freeze_is_a_separate_gate_before_the_only_encode(tmp_path):
 
 
 @MEDIA
+def test_post_audio_contracts_are_hash_bound_and_resume_does_not_regenerate_them(tmp_path):
+    harness = _planned(tmp_path)
+    try:
+        frozen = asyncio.run(harness.run())
+        control = read(tmp_path / "revision.json")
+        receipt = control["stages"]["post_audio_contracts"]
+        connected = tmp_path / "r001/EP8/storyboard/connected.json"
+        assert str(connected.resolve()) in receipt["outputs"]
+        before = connected.read_bytes()
+        assert asyncio.run(harness.run()) == frozen
+        assert connected.read_bytes() == before
+        connected.write_bytes(before + b" ")
+        with pytest.raises(ValueError, match="completed stage hash mismatch"):
+            harness.status()
+    finally:
+        harness.__exit__()
+
+
+@MEDIA
 def test_rejection_feedback_is_mandatory_in_successor_plan(tmp_path):
     with RevisionHarness(tmp_path) as harness:
         result = harness.create_plan(mode="TEST", request="New EP8: Abraham and Sarah")
@@ -204,5 +223,15 @@ def test_complete_metadata_and_three_independent_final_authorities(tmp_path):
         assert receipt["thumbnail_sha256"] == artifacts["thumbnail"]["sha256"]
         assert receipt["video_sha256"] == artifacts["video"]["sha256"]
         assert receipt["upload_performed"] is False
+        package_path = tmp_path / "r001/EP8/publication-package.json"
+        package = read(package_path)
+        assert package["publication_authorized"] is False
+        assert package["upload_performed"] is False
+        assert package["plan_hash"] == authorized["plan_hash"]
+        assert {entry["kind"] for entry in package["approval_receipts"]} == {
+            "visual-freeze", "thumbnail", "video"
+        }
+        control = read(tmp_path / "revision.json")
+        assert control["stages"]["publication_package"]["outputs"][str(package_path.resolve())] == sha256(package_path)
     finally:
         harness.__exit__()

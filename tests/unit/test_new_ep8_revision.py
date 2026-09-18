@@ -66,7 +66,7 @@ def test_public_cli_offline_end_to_end_separate_gates_and_supersession(tmp_path)
     assert ready["status"] == "WAITING_THUMBNAIL_APPROVAL"
     artifacts = ready["artifacts"]
     control = read(root / "revision.json")
-    assert set(control["stages"]) == {"script", "audio_storyboard", "images", "telegram_visual_freeze", "encode", "sidecars", "final_qa", "telegram_thumbnail"}
+    assert set(control["stages"]) == {"script", "audio_storyboard", "post_audio_contracts", "images", "telegram_visual_freeze", "motion_plan", "encode", "sidecars", "final_qa", "telegram_thumbnail"}
     assert all(s["status"] == "COMPLETE" and s["elapsed_seconds"] >= 0 for s in control["stages"].values())
     assert control["stages"]["encode"]["result"]["render_invocations"] == 1
     assert control["stages"]["sidecars"]["result"]["layers"] == [
@@ -91,6 +91,16 @@ def test_public_cli_offline_end_to_end_separate_gates_and_supersession(tmp_path)
     assert sent["status"] == "WAITING_VIDEO_APPROVAL"
     assert sent["artifacts"] == artifacts
     assert cli(root, "resume") == sent
+    connected = root / "r001/EP8/storyboard/connected.json"
+    original_connected = connected.read_bytes()
+    connected.write_bytes(original_connected + b" ")
+    assert cli(root, "status", ok=False)["status"] == "BLOCKED"
+    connected.write_bytes(original_connected)
+    assert cli(root, "resume") == sent
+    events = [json.loads(line) for line in (root / "revision-events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert {"request", "provider", "qa", "gate"} <= {event["stage"] for event in events}
+    assert any(event.get("recovery") is True for event in events)
+    assert all("https://" not in json.dumps(event) and "authorization" not in json.dumps(event).casefold() for event in events)
     cli(root, "approve", "--kind", "video", "--artifact-hash", "stale", "--reviewer", "human", ok=False)
     final = cli(root, "approve", "--kind", "video", "--artifact-hash", artifacts["video"]["sha256"], "--reviewer", "human")
     assert final["status"] == "WAITING_PUBLICATION_AUTHORIZATION" and final["publication_authorized"] is False

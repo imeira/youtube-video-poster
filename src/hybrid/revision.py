@@ -23,6 +23,7 @@ from PIL import Image
 
 from src.hybrid.artifacts import FrozenAsset, Manifest, atomic_json, digest, sha256
 from src.hybrid.locks import try_lock
+from src.hybrid.observability import StructuredEventLog
 
 TITLE = "A promessa de um filho para Abraão e Sara"
 THEME = TITLE + " — Gênesis 15–18"
@@ -90,6 +91,13 @@ class RevisionHarness:
         self.dependencies = dependencies
         self.test_options = test_options or {}
         self.lock = None
+        self.events = StructuredEventLog(self.root / "revision-events.jsonl")
+
+    def event(self, status, *, stage, **fields):
+        """Append sanitized public lifecycle evidence; raw requests never enter it."""
+        plan = getattr(self, "control", {}).get("plan", {})
+        return self.events.emit(status=status, episode="EP8", revision=plan.get("revision"),
+            stage=stage, request_id=getattr(self, "control", {}).get("plan_hash"), **fields)
 
     def __enter__(self):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -237,6 +245,7 @@ class RevisionHarness:
         for asset in manifest.assets:
             self.fresh(asset.path)
         self.save()
+        self.event("COMPLETE", stage="request", category="plan")
         return self.status()
 
     @staticmethod
@@ -275,6 +284,7 @@ class RevisionHarness:
         self.control["plan_approval"] = dict(plan_hash=plan_hash, reviewer=reviewer)
         self.control["status"] = "READY"
         self.save()
+        self.event("COMPLETE", stage="gate", category="plan-approval", agent=reviewer)
         return self.status()
 
     def status(self):
@@ -308,7 +318,11 @@ class RevisionHarness:
                 "artifact_sha256": artifact_hash, "approver": reviewer,
                 "plan_hash": self.control["plan_hash"]})
         self.control["status"] = {"visual-freeze": "READY_RENDER", "thumbnail": "READY_VIDEO_DELIVERY", "video": "WAITING_PUBLICATION_AUTHORIZATION"}[kind]
+        if kind == "video":
+            self._freeze_publication_package()
         self.save()
+        self.event("COMPLETE", stage="gate", category=kind, agent=reviewer,
+                   result_sha256=artifact_hash)
         return self.status()
 
     def authorize_publication(self, *, command: str, reviewer: str):
@@ -346,7 +360,62 @@ class RevisionHarness:
         self.control["publication_authorization"] = receipt
         self.control["status"] = "READY_FOR_PUBLICATION"
         self.save()
+        self.event("COMPLETE", stage="gate", category="publication-authorization", agent=reviewer,
+                   result_sha256=sha256(target))
         return self.status()
+
+    def _freeze_publication_package(self):
+        """Bind delivery inputs after video approval; authorization never uploads or rewrites it."""
+        plan = self.control["plan"]
+        revision_dir = self.root / f"r{plan['revision']:03d}" / "EP8"
+        approval_dir = revision_dir / "approval"
+        metadata = revision_dir / "metadata" / "youtube.json"
+        named_paths = {
+            "video": Path(self.control["artifacts"]["video"]["path"]),
+            "thumbnail": Path(self.control["artifacts"]["thumbnail"]["path"]),
+            "metadata": metadata,
+            "captions_srt": revision_dir / "subtitles" / "captions.srt",
+            "captions_vtt": revision_dir / "subtitles" / "captions.vtt",
+            "transcript": revision_dir / "subtitles" / "transcript.txt",
+        }
+        approvals = []
+        for kind in ("visual-freeze", "thumbnail", "video"):
+            receipt_path = approval_dir / f"approval-{kind}.json"
+            if not receipt_path.is_file():
+                raise ValueError("all approval receipts required for publication package")
+            approvals.append({"kind": kind, "path": str(receipt_path.resolve()),
+                              "sha256": sha256(receipt_path)})
+        if any(not path.is_file() for path in named_paths.values()):
+            raise ValueError("all delivery artifacts required for publication package")
+        artifacts = {name: {"path": str(path.resolve()), "sha256": sha256(path)}
+                     for name, path in named_paths.items()}
+        package = {
+            "schema_version": 1,
+            "plan_hash": self.control["plan_hash"],
+            "revision": plan["revision"],
+            "plan": {"route": plan["route"], "mode": plan["mode"], "episode_id": "EP8"},
+            "artifacts": artifacts,
+            "approval_receipts": approvals,
+            "publication_authorized": False,
+            "upload_performed": False,
+        }
+        package["package_hash"] = digest(package)
+        target = revision_dir / "publication-package.json"
+        if target.exists() and read(target) != package:
+            raise ValueError("publication package is immutable")
+        atomic_json(target, package)
+        if read(target) != package:
+            raise ValueError("publication package readback mismatch")
+        outputs = {str(target.resolve()): sha256(target)}
+        outputs.update({str(path.resolve()): sha256(path) for path in named_paths.values()})
+        outputs.update({entry["path"]: entry["sha256"] for entry in approvals})
+        previous = self.control["stages"].get("publication_package")
+        receipt = {"status": "COMPLETE", "result": {"package": str(target.resolve()),
+                   "package_hash": package["package_hash"]}, "outputs": outputs,
+                   "elapsed_seconds": 0}
+        if previous and previous != receipt:
+            raise ValueError("publication package stage is immutable")
+        self.control["stages"]["publication_package"] = receipt
 
     def reject(self, reason, *, reviewer="operator", directives=None):
         plan = self.load()
@@ -403,18 +472,28 @@ class RevisionHarness:
     async def stage(self, name, operation, *, recoverable=False):
         receipt = self.control["stages"].get(name)
         if receipt and receipt["status"] == "COMPLETE":
+            self.event("COMPLETE", stage=name, recovery=True,
+                       result_sha256=digest(receipt["outputs"]))
             return receipt["result"]
         if receipt and not recoverable:
             raise ValueError(f"ambiguous {name}; explicit reconciliation or rejection required")
         self.control["stages"][name] = dict(status="STARTED")
         self.save()
+        self.event("RUNNING", stage=name, recovery=bool(receipt))
         started = time.perf_counter()
-        result, paths = await operation()
+        try:
+            result, paths = await operation()
+        except Exception as error:
+            self.event("FAILED", stage=name, error=str(error), recovery=bool(receipt))
+            raise
         self.load()  # revalidate upstream inputs after any external work
         self.control["stages"][name] = dict(status="COMPLETE", result=result,
             outputs={str(Path(p).resolve()): sha256(p) for p in paths},
             elapsed_seconds=time.perf_counter() - started)
         self.save()
+        self.event("COMPLETE", stage=name, recovery=bool(receipt),
+                   result_sha256=digest(self.control["stages"][name]["outputs"]),
+                   cost=result.get("cost") if isinstance(result, dict) else None)
         return result
 
     def get_dependencies(self, plan, directory):
@@ -485,6 +564,7 @@ class RevisionHarness:
             return await self.deliver("video", plan, directory)
         deps = self.get_dependencies(plan, directory)
         mode = plan["mode"]
+        self.event("RUNNING", stage="provider", provider=type(deps).__name__, model=mode)
         cfg = SimpleNamespace(**load_config().__dict__, episodes_dir=directory)
         # This façade owns delivery; constructing legacy Telegram must not read secrets in TEST.
         director = DirectorAgent(config=cfg, approval_gate=SimpleNamespace())
@@ -585,52 +665,59 @@ class RevisionHarness:
         audio_result = await self.stage("audio_storyboard", audio_stage, recoverable=mode == "TEST")
         references = Manifest.load(plan["references"]["manifest"])
         reference_by_hash = {asset.sha256: asset for asset in references.assets}
-        from src.hybrid.editorial import build_ep8_character_bible, qa_audio_transcript, validate_storyboard
-        approved_references = {}
-        for character_id in ("abraham", "sarah"):
-            reference_hash = plan["references"]["characters"][character_id]
-            asset = reference_by_hash[reference_hash]
-            approved_references[character_id] = [{"path": asset.path, "sha256": asset.sha256,
-                "status": "APPROVED", "reviewer": plan["references"]["authority"],
-                "generation_method": "APPROVED_IMAGE_TO_IMAGE_REFERENCE"}]
-        character_bible = build_ep8_character_bible(approved_references)
-        atomic_json(p.characters_dir / "character-bible.json", character_bible)
-        raw_scenes = read(board_path)["scenes"]
-        segments = {segment["id"]: segment for segment in script["segments"]}
-        connected_scenes = []
-        for index, scene in enumerate(raw_scenes):
-            segment = segments[scene["scene_id"]]
-            characters = [item for item in scene["characters"] if item in {"abraham", "sarah"}]
-            connected_scenes.append({**scene, "segment_id": scene["scene_id"],
-                "duration": scene["end"] - scene["start"], "characters": characters,
-                "location": "acampamento de Abraão e paisagem de Canaã",
-                "action": scene["visual_action"], "emotion": "esperança serena",
-                "importance": "HIGH" if index in {0, len(raw_scenes) // 2, len(raw_scenes) - 1} else "NORMAL",
-                "visual_prompt": scene["image_prompt"],
-                "negative_prompt": "God depicted, infant Isaac, text, watermark, fear, violence",
-                "camera": ("slow push-in" if index % 3 == 0 else "gentle left pan" if index % 3 == 1 else "slow pull-back"),
-                "motion_intent": "subtle parallax preserving faces and canonical identity",
-                "transition": "soft dissolve", "sfx": [],
-                "source_claim_ids": segment["claim_ids"],
-                "feedback_identity": script.get("feedback_identity", "INITIAL_REVISION"),
-                "character_reference_hashes": {item: plan["references"]["characters"][item] for item in characters},
-                "hero_candidate": index in {0, len(raw_scenes) // 2, len(raw_scenes) - 1}})
-        connected_storyboard = {"scenes": connected_scenes,
-            "character_bible_identity": character_bible["bible_identity"],
-            "burned_captions": False, "closing_hold_seconds": plan["editorial_plan"]["closing_hold_seconds"]}
-        storyboard_report = validate_storyboard(connected_storyboard, script, character_bible,
-            audio_duration_seconds=audio_result["duration"])
-        connected_board_path = p.storyboard_dir / "connected.json"
-        atomic_json(connected_board_path, connected_storyboard)
-        atomic_json(p.qa_dir / "storyboard.json", storyboard_report)
-        transcript = " ".join(segment["narration"].strip() for segment in script["segments"])
-        bound_transcript_path = p.audio_dir / "transcript-bound.txt"
-        bound_transcript_path.write_text(transcript, encoding="utf-8")
-        audio_report = qa_audio_transcript({"decoded": True, "duration_seconds": audio_result["duration"],
-            "sample_rate_hz": 16000, "channels": 1, "boundary_source": "WordBoundary",
-            "word_boundaries": audio_result["words"]}, transcript, script,
-            sidecars={"transcript": True, "srt": True, "vtt": True, "burned_in_video": False})
-        atomic_json(p.qa_dir / "audio.json", audio_report)
+        connected_board_path = p.storyboard_dir / 'connected.json'
+
+        async def post_audio_contracts_stage():
+            from src.hybrid.editorial import build_ep8_character_bible, qa_audio_transcript, validate_storyboard
+            approved_references = {}
+            for character_id in ("abraham", "sarah"):
+                reference_hash = plan["references"]["characters"][character_id]
+                asset = reference_by_hash[reference_hash]
+                approved_references[character_id] = [{"path": asset.path, "sha256": asset.sha256,
+                    "status": "APPROVED", "reviewer": plan["references"]["authority"],
+                    "generation_method": "APPROVED_IMAGE_TO_IMAGE_REFERENCE"}]
+            character_bible = build_ep8_character_bible(approved_references)
+            atomic_json(p.characters_dir / "character-bible.json", character_bible)
+            raw_scenes = read(board_path)["scenes"]
+            segments = {segment["id"]: segment for segment in script["segments"]}
+            connected_scenes = []
+            for index, scene in enumerate(raw_scenes):
+                segment = segments[scene["scene_id"]]
+                characters = [item for item in scene["characters"] if item in {"abraham", "sarah"}]
+                connected_scenes.append({**scene, "segment_id": scene["scene_id"],
+                    "duration": scene["end"] - scene["start"], "characters": characters,
+                    "location": "acampamento de Abraão e paisagem de Canaã",
+                    "action": scene["visual_action"], "emotion": "esperança serena",
+                    "importance": "HIGH" if index in {0, len(raw_scenes) // 2, len(raw_scenes) - 1} else "NORMAL",
+                    "visual_prompt": scene["image_prompt"],
+                    "negative_prompt": "God depicted, infant Isaac, text, watermark, fear, violence",
+                    "camera": ("slow push-in" if index % 3 == 0 else "gentle left pan" if index % 3 == 1 else "slow pull-back"),
+                    "motion_intent": "subtle parallax preserving faces and canonical identity",
+                    "transition": "soft dissolve", "sfx": [],
+                    "source_claim_ids": segment["claim_ids"],
+                    "feedback_identity": script.get("feedback_identity", "INITIAL_REVISION"),
+                    "character_reference_hashes": {item: plan["references"]["characters"][item] for item in characters},
+                    "hero_candidate": index in {0, len(raw_scenes) // 2, len(raw_scenes) - 1}})
+            connected_storyboard = {"scenes": connected_scenes,
+                "character_bible_identity": character_bible["bible_identity"],
+                "burned_captions": False, "closing_hold_seconds": plan["editorial_plan"]["closing_hold_seconds"]}
+            storyboard_report = validate_storyboard(connected_storyboard, script, character_bible,
+                audio_duration_seconds=audio_result["duration"])
+            connected_board_path = p.storyboard_dir / "connected.json"
+            atomic_json(connected_board_path, connected_storyboard)
+            atomic_json(p.qa_dir / "storyboard.json", storyboard_report)
+            transcript = " ".join(segment["narration"].strip() for segment in script["segments"])
+            bound_transcript_path = p.audio_dir / "transcript-bound.txt"
+            bound_transcript_path.write_text(transcript, encoding="utf-8")
+            audio_report = qa_audio_transcript({"decoded": True, "duration_seconds": audio_result["duration"],
+                "sample_rate_hz": 16000, "channels": 1, "boundary_source": "WordBoundary",
+                "word_boundaries": audio_result["words"]}, transcript, script,
+                sidecars={"transcript": True, "srt": True, "vtt": True, "burned_in_video": False})
+            atomic_json(p.qa_dir / "audio.json", audio_report)
+            return {"storyboard_sha256": sha256(connected_board_path)}, [p.characters_dir / "character-bible.json", connected_board_path, p.qa_dir / "storyboard.json", bound_transcript_path, p.qa_dir / "audio.json"]
+
+        await self.stage("post_audio_contracts", post_audio_contracts_stage, recoverable=True)
+        connected_scenes = read(connected_board_path)["scenes"]
         # Re-load the same immutable manifest after the editorial contracts have bound it.
         references = Manifest.load(plan["references"]["manifest"])
         for asset in references.assets:
@@ -696,11 +783,15 @@ class RevisionHarness:
                         raise ValueError("invalid independent visual QA")
                     atomic_json(decision_path, decision)
                     pipeline.record_visual_qa(**decision)
+                    self.event("COMPLETE", stage="qa", category="visual", agent=decision["reviewer"],
+                               scene=scene_id, result_sha256=decision["result_sha256"])
 
             async def completed(receipt):
                 tasks.append(asyncio.create_task(review(receipt)))
 
             auth, prices = await authority(pipeline.baseline_jobs())
+            self.event("RUNNING", stage="provider", provider=type(deps.images).__name__,
+                       cost=sum((Decimal(price.amount) for price in prices.values()), Decimal(0)))
             try:
                 await pipeline.dispatch_baselines(deps.images, authorizations=auth, prices=prices, on_completed=completed)
                 await asyncio.gather(*tasks)
@@ -742,14 +833,18 @@ class RevisionHarness:
             self.save()
             return await self.deliver("visual-freeze", plan, directory, deps)
 
-        motion_plan = {"schema_version": 1, "manifest_sha256": sha256(result["manifest"]),
-            "storyboard_sha256": sha256(connected_board_path), "scenes": [
-                {"scene_id": scene["scene_id"], "operation": ("push_in", "pan_left", "pull_back")[index % 3],
-                 "duration": scene["duration"], "transition": scene["transition"]}
-                for index, scene in enumerate(connected_scenes)
-            ]}
         motion_plan_path = p.animation_dir / "motion-plan.json"
-        atomic_json(motion_plan_path, motion_plan)
+
+        async def motion_plan_stage():
+            motion_plan = {"schema_version": 1, "manifest_sha256": sha256(result["manifest"]),
+                "storyboard_sha256": sha256(connected_board_path), "scenes": [
+                    {"scene_id": scene["scene_id"], "operation": ("push_in", "pan_left", "pull_back")[index % 3],
+                     "duration": scene["duration"], "transition": scene["transition"]}
+                    for index, scene in enumerate(connected_scenes)]}
+            atomic_json(motion_plan_path, motion_plan)
+            return motion_plan, [motion_plan_path]
+
+        motion_plan = await self.stage("motion_plan", motion_plan_stage, recoverable=True)
         encode_started = "encode" in self.control["stages"]
 
         async def render_stage():
