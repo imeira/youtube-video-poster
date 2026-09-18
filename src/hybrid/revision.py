@@ -171,7 +171,7 @@ class RevisionHarness:
             bindings[str(Path(deployment).resolve())] = sha256(deployment)
             if contract.get("adapter") == "src.hybrid.revision_live:factory":
                 from src.hybrid.revision_live import validate_contract, SCRIPT
-                validate_contract(contract)
+                validate_contract(contract, heroes=heroes)
                 bindings[str(SCRIPT.resolve())] = sha256(SCRIPT)
             elif (set(contract) != ({"adapter", "endpoint", "image_cost", "non_image_reserve", "hero"}
                                     if heroes else {"adapter", "endpoint", "image_cost", "non_image_reserve"})
@@ -185,9 +185,8 @@ class RevisionHarness:
                 raise ValueError("LIVE endpoint price/adapter mismatch")
             if heroes:
                 hero = contract["hero"]
-                if (not isinstance(hero, dict) or set(hero) != {"endpoint_id", "unit_cost_usd", "authority"}
-                        or hero["endpoint_id"] != hero_endpoint or str(hero["unit_cost_usd"]) != str(hero_cost)
-                        or not isinstance(hero["authority"], str) or not hero["authority"].strip()):
+                if (hero["endpoint_id"] != hero_endpoint
+                        or str(hero["unit_cost_usd"]) != str(hero_cost)):
                     raise ValueError("audited LIVE RunPod hero deployment contract required")
             adapter = contract["adapter"]
         if references:
@@ -694,9 +693,6 @@ class RevisionHarness:
             raise ValueError("incomplete injected hero provider")
         if plan["mode"] == "LIVE":
             if plan.get("heroes") and type(getattr(deps, "hero", None)).__name__ != "RunPodHeroProvider":
-                # The checked-in LIVE deployment has no bound RunPod hero
-                # authority.  Do not silently fall through to an image adapter
-                # or make a speculative paid request.
                 raise ValueError("LIVE hero preflight requires an audited RunPod hero adapter")
             if plan.get("heroes"):
                 hero_contract = plan.get("deployment", {}).get("hero", {})

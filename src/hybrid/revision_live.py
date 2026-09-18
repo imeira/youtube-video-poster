@@ -20,6 +20,7 @@ import re
 import shutil
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 from src.agents.script_qa import ScriptQAAgent
 from src.hybrid.artifacts import Manifest, atomic_json, digest, sha256
@@ -29,6 +30,7 @@ from src.hybrid.live_editorial import BiblicalFactVerifier, DeterministicLiveScr
 from src.hybrid.revision import read, validate_ep8_script
 from src.providers.notification.telegram_provider import TelegramNotificationProvider
 from src.providers.tts.edge_tts_provider import EdgeTTSProvider
+from src.providers.video.runpod_serverless import PollPolicy, RunPodHeroProvider
 
 ADAPTER = "src.hybrid.revision_live:factory"
 ENDPOINT = "fal-ai/flux-2/klein/9b/edit"
@@ -49,10 +51,12 @@ def _schema(value, spec):
     if "const" in spec and value != spec["const"]:
         raise ValueError("deployment contract mismatch")
     if kind == "object":
-        if set(value) != set(spec["properties"]):
+        properties = spec["properties"]
+        if not set(spec.get("required", properties)) <= set(value) or not set(value) <= set(properties):
             raise ValueError("deployment requires exact schema fields")
-        for key, child in spec["properties"].items():
-            _schema(value[key], child)
+        for key, child in properties.items():
+            if key in value:
+                _schema(value[key], child)
     if kind == "array":
         if not spec["minItems"] <= len(value) <= spec["maxItems"]:
             raise ValueError("deployment array bounds")
@@ -73,11 +77,43 @@ def amount(value):
     return result
 
 
-def validate_contract(contract):
+def _hero_contract(hero):
+    """Validate the deployed RunPod route and fresh, reviewed unit-price evidence."""
+    required = {"endpoint_id", "submit_url", "status_url", "cancel_url", "unit_cost_usd",
+                "authority", "observed_at", "valid_until", "key_env", "result_hosts"}
+    if not isinstance(hero, dict) or set(hero) != required:
+        raise ValueError("audited LIVE RunPod hero deployment contract required")
+    endpoint = hero["endpoint_id"]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", endpoint):
+        raise ValueError("audited LIVE RunPod endpoint required")
+    expected = {
+        "submit_url": f"https://api.runpod.ai/v2/{endpoint}/run",
+        "status_url": f"https://api.runpod.ai/v2/{endpoint}/status/{{job_id}}",
+        "cancel_url": f"https://api.runpod.ai/v2/{endpoint}/cancel/{{job_id}}",
+    }
+    if any(hero[key] != value for key, value in expected.items()):
+        raise ValueError("audited LIVE RunPod route contract mismatch")
+    if not 0 < amount(hero["unit_cost_usd"]) < 6 or not hero["authority"].strip():
+        raise ValueError("audited LIVE RunPod price authority required")
+    if (not re.fullmatch(r"[A-Z][A-Z0-9_]{2,127}", hero["key_env"])
+            or not isinstance(hero["result_hosts"], list) or not hero["result_hosts"]):
+        raise ValueError("audited LIVE RunPod credential/result contract required")
+    for host in hero["result_hosts"]:
+        parsed = urlsplit("//" + host) if isinstance(host, str) else None
+        if not parsed or host != host.lower() or parsed.hostname != host or parsed.path:
+            raise ValueError("audited LIVE RunPod result hosts required")
+    now = time.time()
+    if not hero["observed_at"] <= now < hero["valid_until"] <= hero["observed_at"] + 86400:
+        raise ValueError("current non-expired RunPod hero price evidence required")
+
+
+def validate_contract(contract, *, heroes=False):
     _schema(contract, read(SCHEMA))
     for key in ("image_cost", "non_image_reserve"):
         if not 0 < amount(contract[key]) < 6:
             raise ValueError("deployment budget bounds")
+    if heroes:
+        _hero_contract(contract.get("hero"))
 
 
 def _script(contract):
@@ -100,10 +136,62 @@ def _secret(name):
     return value
 
 
+class _RunPodHttpTransport:
+    """Small injected-at-deployment RunPod transport; never retries or persists keys."""
+
+    def __init__(self, contract, api_key):
+        self.contract = deepcopy(contract)
+        self.api_key = api_key
+
+    async def _json(self, method, url, payload=None):
+        def request():
+            data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
+            value = urllib.request.Request(url, data=data, method=method, headers={
+                "Authorization": "Bearer " + self.api_key, "Content-Type": "application/json"})
+            with _opener().open(value, timeout=120) as response:
+                body = response.read(MAX_API_BYTES + 1)
+            if len(body) > MAX_API_BYTES:
+                raise ValueError("RunPod response exceeds byte limit")
+            return strict_json(body)
+        return await asyncio.to_thread(request)
+
+    async def submit(self, endpoint_id, payload):
+        if endpoint_id != self.contract["endpoint_id"]:
+            raise ValueError("RunPod endpoint binding mismatch")
+        return await self._json("POST", self.contract["submit_url"], payload)
+
+    async def status(self, endpoint_id, job_id):
+        if endpoint_id != self.contract["endpoint_id"]:
+            raise ValueError("RunPod endpoint binding mismatch")
+        return await self._json("GET", self.contract["status_url"].replace("{job_id}", job_id))
+
+    async def cancel(self, endpoint_id, job_id):
+        if endpoint_id != self.contract["endpoint_id"]:
+            raise ValueError("RunPod endpoint binding mismatch")
+        await self._json("POST", self.contract["cancel_url"].replace("{job_id}", job_id), {})
+
+    async def download(self, url):
+        def request():
+            with _opener().open(urllib.request.Request(url, method="GET"), timeout=120) as response:
+                body = response.read(64 << 20)
+            if len(body) >= 64 << 20:
+                raise ValueError("RunPod result exceeds byte limit")
+            return body
+        return await asyncio.to_thread(request)
+
+
+class _RealClock:
+    def time(self):
+        return time.time()
+
+    async def sleep(self, seconds):
+        await asyncio.sleep(seconds)
+
+
 class LiveDependencies:
     mode = "LIVE"
 
-    def __init__(self, root, plan):
+    def __init__(self, root, plan, *, hero_transport_factory=None, hero_clock=None):
         self.root = Path(root).resolve()
         self.plan = deepcopy(plan)
         self.contract = self.plan["deployment"]
@@ -114,6 +202,14 @@ class LiveDependencies:
         self.prior_spend = amount(self.contract["non_image_reserve"])
         self.visual_license = self.contract["visual_license"]
         self.images = FalFluxProvider(self.root / "quarantine")
+        if plan["heroes"]:
+            hero = self.contract["hero"]
+            transport = (hero_transport_factory(hero) if hero_transport_factory else
+                         _RunPodHttpTransport(hero, _secret(hero["key_env"])))
+            self.hero = RunPodHeroProvider(endpoint_id=hero["endpoint_id"], transport=transport,
+                clock=hero_clock or _RealClock(), state_dir=self.root / "hero-checkpoints",
+                output_dir=self.root / "hero-output", poll_policy=PollPolicy(), mode="LIVE",
+                result_hosts=set(hero["result_hosts"]))
         self.tts = EdgeTTSProvider()
         self.messenger = RevisionTelegramProvider(
             bot_token=_secret("TELEGRAM_BOT_TOKEN"), chat_id=plan["chat_id"])
@@ -139,9 +235,9 @@ class LiveDependencies:
     def preflight(self, plan):
         self._approved(plan)
         c = self.contract
-        validate_contract(c)
+        validate_contract(c, heroes=plan["heroes"])
         if (plan["mode"] != "LIVE" or plan["adapter"] != ADAPTER
-                or plan["publication_authorized"] is not False or plan["heroes"] is not False
+                or plan["publication_authorized"] is not False
                 or plan["correction_waves"] != 1 or amount(plan["budget_usd"]) > 6):
             raise ValueError("LIVE plan contract mismatch")
         script = _script(c)
@@ -171,6 +267,8 @@ class LiveDependencies:
         _secret("FAL_KEY")
         _secret("TELEGRAM_BOT_TOKEN")
         _secret(c["reviewer"]["key_env"])
+        if plan["heroes"]:
+            _secret(c["hero"]["key_env"])
         for module in ("fal_client", "edge_tts"):
             if importlib.util.find_spec(module) is None:
                 raise ValueError("required provider SDK missing: " + module)
@@ -193,8 +291,9 @@ class LiveDependencies:
                       + amount(r["price"]["image_per_item"]) * 3
                       + amount(r["price"]["request"]))
         count = plan["editorial_plan"]["estimated_scene_count"] + 10
+        hero_reserve = amount(plan["hero_plan"].get("reserved_usd", "0"))
         if (per_review * count > amount(c["non_image_reserve"])
-                or amount(c["image_cost"]) * count + amount(c["non_image_reserve"]) > amount(plan["budget_usd"])):
+                or amount(c["image_cost"]) * count + amount(c["non_image_reserve"]) + hero_reserve > amount(plan["budget_usd"])):
             raise ValueError("worst-case images, correction and review budget exceeded")
         self.review_cap = per_review
         self.review_count = count
@@ -411,5 +510,6 @@ class RevisionTelegramProvider(TelegramNotificationProvider):
             raise ValueError("Telegram video delivery ambiguous; reconciliation required") from None
 
 
-def factory(root, plan):
-    return LiveDependencies(root, plan)
+def factory(root, plan, *, hero_transport_factory=None, hero_clock=None):
+    """Public deployment factory; test transports are explicit and never defaulted."""
+    return LiveDependencies(root, plan, hero_transport_factory=hero_transport_factory, hero_clock=hero_clock)

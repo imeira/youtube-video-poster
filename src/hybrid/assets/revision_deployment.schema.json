@@ -193,6 +193,23 @@
         }
       }
     },
+    "hero": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint_id", "submit_url", "status_url", "cancel_url", "unit_cost_usd", "authority", "observed_at", "valid_until", "key_env", "result_hosts"],
+      "properties": {
+        "endpoint_id": {"type": "string", "pattern": "[A-Za-z0-9_-]{1,128}"},
+        "submit_url": {"type": "string", "pattern": "https://[^\\s]+"},
+        "status_url": {"type": "string", "pattern": "https://[^\\s]+"},
+        "cancel_url": {"type": "string", "pattern": "https://[^\\s]+"},
+        "unit_cost_usd": {"type": "string", "pattern": "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?"},
+        "authority": {"type": "string", "minLength": 1},
+        "observed_at": {"type": "number", "minimum": 1, "maximum": 4102444800},
+        "valid_until": {"type": "number", "minimum": 1, "maximum": 4102444800},
+        "key_env": {"type": "string", "pattern": "[A-Z][A-Z0-9_]{2,127}"},
+        "result_hosts": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "pattern": "[a-z0-9.-]+"}}
+      }
+    },
     "reviewer": {
       "type": "object",
       "additionalProperties": false,
