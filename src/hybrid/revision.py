@@ -172,7 +172,8 @@ class RevisionHarness:
                 from src.hybrid.revision_live import validate_contract, SCRIPT
                 validate_contract(contract)
                 bindings[str(SCRIPT.resolve())] = sha256(SCRIPT)
-            elif (set(contract) != {"adapter", "endpoint", "image_cost", "non_image_reserve"}
+            elif (set(contract) != ({"adapter", "endpoint", "image_cost", "non_image_reserve", "hero"}
+                                    if heroes else {"adapter", "endpoint", "image_cost", "non_image_reserve"})
                     or not contract["adapter"] or not contract["endpoint"]):
                 raise ValueError("invalid LIVE deployment contract")
             for key in ("image_cost", "non_image_reserve"):
@@ -181,6 +182,12 @@ class RevisionHarness:
                     raise ValueError("invalid LIVE deployment budget")
             if Decimal(contract["image_cost"]) <= 0 or (adapter and adapter != contract["adapter"]):
                 raise ValueError("LIVE endpoint price/adapter mismatch")
+            if heroes:
+                hero = contract["hero"]
+                if (not isinstance(hero, dict) or set(hero) != {"endpoint_id", "unit_cost_usd", "authority"}
+                        or hero["endpoint_id"] != hero_endpoint or str(hero["unit_cost_usd"]) != str(hero_cost)
+                        or not isinstance(hero["authority"], str) or not hero["authority"].strip()):
+                    raise ValueError("audited LIVE RunPod hero deployment contract required")
             adapter = contract["adapter"]
         if references:
             refs = read(references)
@@ -545,12 +552,22 @@ class RevisionHarness:
                             (deps.messenger, "send_photo"), (deps.messenger, "send_video"))
         if any(not callable(getattr(owner, name, None)) for owner, name in required_methods):
             raise ValueError("incomplete deployment providers")
+        if plan.get("heroes") and (not getattr(deps, "hero", None)
+                                    or not callable(getattr(deps.hero, "submit", None))
+                                    or not callable(getattr(deps.hero, "recover", None))):
+            raise ValueError("incomplete injected hero provider")
         if plan["mode"] == "LIVE":
-            if plan.get("heroes"):
+            if plan.get("heroes") and type(getattr(deps, "hero", None)).__name__ != "RunPodHeroProvider":
                 # The checked-in LIVE deployment has no bound RunPod hero
                 # authority.  Do not silently fall through to an image adapter
                 # or make a speculative paid request.
                 raise ValueError("LIVE hero preflight requires an audited RunPod hero adapter")
+            if plan.get("heroes"):
+                hero_contract = plan.get("deployment", {}).get("hero", {})
+                if (not hero_contract.get("authority") or deps.hero.endpoint_id != hero_contract.get("endpoint_id")
+                        or plan["hero_plan"]["endpoint"] != hero_contract.get("endpoint_id")
+                        or plan["hero_plan"]["unit_cost_usd"] != str(hero_contract.get("unit_cost_usd"))):
+                    raise ValueError("LIVE RunPod hero differs from audited deployment contract")
             # Deployment performs credential/authority checks, never prints secrets.
             evidence = deps.preflight(plan)
             required = {"credentials", "script_authority", "tts_authority", "visual_qa_authority",
@@ -571,6 +588,102 @@ class RevisionHarness:
                     or Decimal(deps.prior_spend) != Decimal(contract["non_image_reserve"])):
                 raise ValueError("LIVE provider differs from approved deployment contract")
         return deps
+
+    async def execute_heroes(self, plan, plan_hash, manifest, images, scenes, provider, target):
+        """Run approved hero work once, or recover it without another POST.
+
+        The manifest is the write-ahead checkpoint at this provider boundary.
+        A record without a provider ID is deliberately unrecoverable: the submit
+        outcome may be zero or one remote jobs, so a new POST is unsafe.
+        """
+        from src.hybrid.execution import Job
+
+        config = plan["hero_plan"]
+        target = Path(target)
+        if not config.get("enabled"):
+            payload = read(target) if target.exists() else {"schema_version": 2, "enabled": False, "plan_hash": plan_hash,
+                       "receipts": [], "fallback_scenes": [scene["scene_id"] for scene in scenes]}
+            if not target.exists():
+                atomic_json(target, payload)
+            return {"clips": {}, "manifest": payload}
+        if getattr(provider, "mode", None) != plan["mode"]:
+            raise ValueError("hero provider mode mismatch")
+        if target.exists():
+            state = read(target)
+            if (state.get("schema_version") != 2 or state.get("plan_hash") != plan_hash
+                    or state.get("endpoint") != config["endpoint"]):
+                raise ValueError("hero manifest binding mismatch")
+        else:
+            state = {"schema_version": 2, "enabled": True, "plan_hash": plan_hash,
+                     "endpoint": config["endpoint"], "unit_cost_usd": config["unit_cost_usd"],
+                     "receipts": [], "fallback_scenes": []}
+            atomic_json(target, state)
+        selected = [scene for scene in scenes if scene.get("importance") in {"HIGH", "CRITICAL"}]
+        known = {entry["scene_id"]: entry for entry in state["receipts"]}
+        clips = {}
+        lock = asyncio.Semaphore(min(2, plan["image_workers"]))
+
+        async def one(scene):
+            scene_id = scene["scene_id"]
+            image = images[scene_id]
+            entry = known.get(scene_id)
+            payload = {"input": {"image": str(image.path), "prompt": scene["motion_intent"],
+                       "duration": 5, "resolution": "720p", "aspect_ratio": "16:9",
+                       "camera_fixed": True, "generate_audio": False}}
+            job = Job(scene=scene_id, category="hero", mode=plan["mode"], endpoint=config["endpoint"],
+                      payload=payload, manifest=manifest, cost=Decimal(config["unit_cost_usd"]))
+            if entry and entry.get("request_id") != job.request_id:
+                raise ValueError("hero request binding mismatch")
+            if entry and entry["status"] == "COMPLETE":
+                path = Path(entry["clip_path"])
+                if not path.is_file() or sha256(path) != entry["clip_sha256"]:
+                    raise ValueError("hero clip checkpoint mismatch")
+                clips[scene_id] = FrozenAsset.approve(path, "hero-provider", plan["mode"])
+                return
+            if entry and entry["status"] == "FALLBACK_LOCAL":
+                return
+            if entry and not entry.get("provider_id"):
+                raise ValueError("ambiguous hero submission; reconcile without a new POST")
+            def checkpoint(**values):
+                entry.update(values)
+                entry["status"] = "PENDING"
+                atomic_json(target, state)
+            if entry is None:
+                entry = {"scene_id": scene_id, "request_id": job.request_id, "provider_id": "",
+                         "status": "SUBMITTING", "payload": payload, "clip_path": "", "clip_sha256": ""}
+                state["receipts"].append(entry)
+                known[scene_id] = entry
+                atomic_json(target, state)
+            try:
+                async with lock:
+                    result = (await provider.recover(job, job.request_id, entry["provider_id"], "", checkpoint)
+                              if entry.get("provider_id") else await provider.submit(job, job.request_id, checkpoint))
+            except (TimeoutError, asyncio.CancelledError):
+                entry["status"] = "AMBIGUOUS"
+                atomic_json(target, state)
+                raise
+            except Exception as error:
+                # A durable provider ID makes a terminal error non-ambiguous; it
+                # is a local-motion fallback, never an implicit retry.
+                if entry.get("provider_id"):
+                    entry.update(status="FALLBACK_LOCAL", terminal_reason=str(error))
+                    if scene_id not in state["fallback_scenes"]:
+                        state["fallback_scenes"].append(scene_id)
+                    atomic_json(target, state)
+                    return
+                entry["status"] = "AMBIGUOUS"
+                atomic_json(target, state)
+                raise
+            path = Path(result.path).resolve()
+            if not path.is_file():
+                raise ValueError("hero provider result missing")
+            entry.update(status="COMPLETE", clip_path=str(path), clip_sha256=sha256(path),
+                         actual_cost_usd=str(result.actual_cost))
+            atomic_json(target, state)
+            clips[scene_id] = FrozenAsset.approve(path, "hero-provider", plan["mode"])
+
+        await asyncio.gather(*(one(scene) for scene in selected))
+        return {"clips": clips, "manifest": state}
 
     async def run(self):
         from src.agents.captions import CaptionsAgent
@@ -864,7 +977,7 @@ class RevisionHarness:
                 for event_id, scene in zip(selected_events, high_scenes, strict=False)
             ]
             hero_manifest = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "enabled": hero_config["enabled"],
                 "plan_hash": self.control["plan_hash"],
                 "authorization": self.control["plan_approval"],
@@ -879,8 +992,6 @@ class RevisionHarness:
             # A five-second slot and a dedicated audited provider are required
             # before remote I/O is ever enabled.  Without both, normal local
             # motion remains complete rather than becoming a bottleneck.
-            if hero_config["enabled"]:
-                hero_manifest["blocked_reason"] = "NO_AUDITED_HERO_PROVIDER_OR_EXACT_FIVE_SECOND_SLOT"
             hero_manifest_path = p.animation_dir / "hero-manifest.json"
             atomic_json(hero_manifest_path, hero_manifest)
             pipeline.run.executor.sync_cost_ledger(p.costs_json, episode_id=episode_id, budget=cfg.budget)
@@ -904,6 +1015,15 @@ class RevisionHarness:
             }
             self.save()
             return await self.deliver("visual-freeze", plan, directory, deps)
+
+        async def heroes_stage():
+            images = {frame.scene_id: asset for frame, asset in zip(pipeline.episode.frames, manifest.assets, strict=True)}
+            result = await self.execute_heroes(plan, self.control["plan_hash"], manifest, images,
+                connected_scenes, deps.hero if plan["heroes"] else None, hero_manifest_path)
+            return {"hero_manifest": str(hero_manifest_path),
+                    "clip_hashes": {scene: asset.sha256 for scene, asset in result["clips"].items()}}, [hero_manifest_path]
+
+        await self.stage("heroes", heroes_stage, recoverable=True)
 
         motion_plan_path = p.animation_dir / "motion-plan.json"
 
@@ -930,7 +1050,16 @@ class RevisionHarness:
                         or recovered.get("manifest") != manifest.checksum):
                     raise ValueError("invalid durable encode receipt")
                 return recovered, [p.final_video, durable]
-            receipt = render_once(pipeline.episode, manifest, p.final_video, script["closing_duration_s"], motion_plan=motion_plan)
+            hero_state = read(hero_manifest_path)
+            hero_clips = {}
+            for entry in hero_state.get("receipts", []):
+                if entry.get("status") == "COMPLETE":
+                    clip_path = Path(entry["clip_path"])
+                    if sha256(clip_path) != entry.get("clip_sha256"):
+                        raise ValueError("hero manifest clip hash mismatch")
+                    hero_clips[entry["scene_id"]] = FrozenAsset.approve(clip_path, "hero-provider", mode)
+            receipt = render_once(pipeline.episode, manifest, p.final_video, script["closing_duration_s"], motion_plan=motion_plan,
+                                  hero_clips=hero_clips)
             receipt.update(audio_operation="derived_master", subtitles_sha256=None, mode=mode,
                            compilation=pipeline.episode.checksum, manifest=manifest.checksum,
                            hero_manifest_sha256=sha256(hero_manifest_path),

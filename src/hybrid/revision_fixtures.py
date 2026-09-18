@@ -31,6 +31,7 @@ class TestDependencies:
         self.options = options or {}
         self.active = self.maximum = 0
         self.images = self
+        self.hero = self
         self.tts = self
         self.messenger = self
 

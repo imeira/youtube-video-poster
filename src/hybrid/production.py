@@ -383,7 +383,7 @@ class VerifiedRender:
         return dict(api_cost=0, render_invocations=0, reused_sha256=self.expected)
 
 
-def render_once(episode, manifest, output, hold, *, motion_plan=None):
+def render_once(episode, manifest, output, hold, *, motion_plan=None, hero_clips=None):
     """One filtergraph, one bounded H.264 encode with derived AAC audio."""
     started = time.perf_counter()
     operations = {}
@@ -398,9 +398,18 @@ def render_once(episode, manifest, output, hold, *, motion_plan=None):
         raise ValueError("approved audio duration/streams do not match semantic timeline")
     args = ["ffmpeg", "-v", "error", "-nostdin", "-n", "-filter_complex_threads", "1"]
     filters, labels = [], []
+    hero_clips = hero_clips or {}
     for i, (frame, asset) in enumerate(zip(episode.frames, manifest.assets)):
-        args += ["-threads", "1", "-i", str(asset.path)]
+        clip = hero_clips.get(frame.scene_id)
+        source = clip.path if clip is not None else asset.path
+        args += ["-threads", "1", "-i", str(source)]
         frames = round(frame.end * 30) - round(frame.start * 30)
+        if clip is not None:
+            if sha256(clip.path) != clip.sha256:
+                raise ValueError("hero clip hash mismatch before encode")
+            filters.append(f"[{i}:v]trim=duration={frame.end - frame.start},setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v{i}]")
+            labels.append(f"[v{i}]")
+            continue
         operation = operations.get(frame.scene_id, "push_in")
         if operation == "push_in":
             effect = "z='min(1+on*0.0002,1.04)':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2'"
