@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -75,7 +76,6 @@ class RunPodPodLifecycle:
         self.owner_tag = owner_tag
         self.state_dir = Path(state_dir).resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self._locks: dict[str, asyncio.Lock] = {}
 
     def _path(self, pod_id: str) -> Path:
         if not isinstance(pod_id, str) or not _ID.fullmatch(pod_id):
@@ -94,6 +94,37 @@ class RunPodPodLifecycle:
     def _save(self, state: dict[str, Any]) -> None:
         atomic_json(self._path(state["pod_id"]), state)
 
+    def _claim_path(self, kind: str, identifier: str) -> Path:
+        return self.state_dir / f".{kind}-{identifier}.claim"
+
+    def _claim_once(self, kind: str, identifier: str) -> bool:
+        path = self._claim_path(kind, identifier)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        except FileExistsError:
+            return False
+        claim = {"owner_tag": self.owner_tag, "kind": kind, "identifier": identifier}
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(claim, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return True
+
+    def _release_claim(self, kind: str, identifier: str) -> None:
+        path = self._claim_path(kind, identifier)
+        try:
+            claim = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        expected = {"owner_tag": self.owner_tag, "kind": kind, "identifier": identifier}
+        if claim != expected:
+            raise ValueError("refusing to remove foreign lifecycle claim")
+        path.unlink()
+
     async def run(
         self,
         pod_spec: dict[str, Any],
@@ -110,21 +141,28 @@ class RunPodPodLifecycle:
         if existing is not None and existing != self.owner_tag:
             raise ValueError("pod specification has a conflicting ownership tag")
         tags[OWNERSHIP_TAG_KEY] = self.owner_tag
+        if not self._claim_once("create", self.owner_tag):
+            raise RuntimeError("pod creation already claimed; recover or reconcile instead")
         created = await self.transport.create_pod(spec)
         pod_id = created.get("id") if isinstance(created, dict) else None
         if not isinstance(pod_id, str) or not _ID.fullmatch(pod_id):
             raise ValueError("RunPod create response has invalid pod ID")
         if self._load(pod_id) is not None:
             raise RuntimeError("pod ID already has a lifecycle checkpoint")
-        self._save(
-            {
-                "schema_version": 1,
-                "pod_id": pod_id,
-                "owner_tag": self.owner_tag,
-                "terminate_claimed": False,
-                "terminated": False,
-            }
-        )
+        try:
+            self._save(
+                {
+                    "schema_version": 1,
+                    "pod_id": pod_id,
+                    "owner_tag": self.owner_tag,
+                    "terminate_claimed": False,
+                    "terminated": False,
+                }
+            )
+        except BaseException:
+            if self._claim_once("terminate", pod_id):
+                await self.transport.terminate_pod(pod_id)
+            raise
         try:
             return await operation(pod_id)
         finally:
@@ -132,24 +170,22 @@ class RunPodPodLifecycle:
 
     async def terminate_once(self, pod_id: str) -> bool:
         """Claim termination durably before making its one external call."""
-        lock = self._locks.setdefault(pod_id, asyncio.Lock())
-        async with lock:
-            state = self._load(pod_id)
-            if state is None:
-                raise ValueError("refusing to terminate an unowned pod")
-            if state.get("terminate_claimed"):
-                return False
-            state["terminate_claimed"] = True
+        state = self._load(pod_id)
+        if state is None:
+            raise ValueError("refusing to terminate an unowned pod")
+        if state.get("terminate_claimed") or not self._claim_once("terminate", pod_id):
+            return False
+        state["terminate_claimed"] = True
+        self._save(state)
+        try:
+            await self.transport.terminate_pod(pod_id)
+        except BaseException as error:
+            state["termination_error"] = type(error).__name__
             self._save(state)
-            try:
-                await self.transport.terminate_pod(pod_id)
-            except BaseException as error:
-                state["termination_error"] = type(error).__name__
-                self._save(state)
-                raise
-            state["terminated"] = True
-            self._save(state)
-            return True
+            raise
+        state["terminated"] = True
+        self._save(state)
+        return True
 
     async def cleanup_orphans(self) -> list[str]:
         """Terminate active pods whose ownership tag is an exact match."""
@@ -181,6 +217,7 @@ class RunPodPodLifecycle:
                 state["terminate_claimed"] = False
                 state["reconciled_active_orphan"] = True
                 self._save(state)
+                self._release_claim("terminate", pod_id)
             if await self.terminate_once(pod_id):
                 terminated.append(pod_id)
         return terminated

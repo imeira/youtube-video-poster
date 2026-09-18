@@ -197,3 +197,70 @@ async def test_orphan_cleanup_reconciles_failed_termination_claim(tmp_path):
     resumed = lifecycle(tmp_path, transport)
     assert await resumed.cleanup_orphans() == ["pod_123"]
     assert transport.terminate_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_separate_lifecycles_racing_create_make_one_pod(tmp_path):
+    class BlockingCreateTransport(FakePodTransport):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def create_pod(self, spec: dict) -> dict:
+            self.calls.append(("CREATE", spec))
+            self.started.set()
+            await self.release.wait()
+            return {"id": "pod_123"}
+
+    transport = BlockingCreateTransport()
+    first = lifecycle(tmp_path, transport)
+    second = lifecycle(tmp_path, transport)
+    first_task = asyncio.create_task(first.run({"gpu_type_id": "gpu_1"}, lambda pod_id: asyncio.sleep(0)))
+    await transport.started.wait()
+
+    with pytest.raises(RuntimeError, match="creation already claimed"):
+        await asyncio.wait_for(
+            second.run({"gpu_type_id": "gpu_1"}, lambda pod_id: asyncio.sleep(0)), timeout=0.05
+        )
+    assert [call[0] for call in transport.calls] == ["CREATE"]
+
+    transport.release.set()
+    await first_task
+    assert sum(call[0] == "TERMINATE" for call in transport.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_after_create_immediately_cleans_up_once(tmp_path, monkeypatch):
+    transport = FakePodTransport()
+    manager = lifecycle(tmp_path, transport)
+    original_save = manager._save
+    calls = 0
+
+    def fail_first_save(state):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("disk full")
+        original_save(state)
+
+    monkeypatch.setattr(manager, "_save", fail_first_save)
+    with pytest.raises(OSError, match="disk full"):
+        await manager.run({"gpu_type_id": "gpu_1"}, lambda pod_id: asyncio.sleep(0))
+
+    assert [call[0] for call in transport.calls] == ["CREATE", "TERMINATE"]
+
+
+@pytest.mark.asyncio
+async def test_separate_lifecycles_racing_termination_make_one_call(tmp_path):
+    transport = FakePodTransport()
+    manager = lifecycle(tmp_path, transport)
+    manager._save({"schema_version": 1, "pod_id": "pod_123", "owner_tag": manager.owner_tag,
+                   "terminate_claimed": False, "terminated": False})
+    first = lifecycle(tmp_path, transport)
+    second = lifecycle(tmp_path, transport)
+
+    results = await asyncio.gather(first.terminate_once("pod_123"), second.terminate_once("pod_123"))
+
+    assert sorted(results) == [False, True]
+    assert [call for call in transport.calls if call[0] == "TERMINATE"] == [("TERMINATE", "pod_123")]

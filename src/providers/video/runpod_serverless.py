@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass
 from enum import Enum
@@ -144,6 +145,35 @@ class RunPodHeroProvider:
     def _save(self, state: dict[str, Any]) -> None:
         atomic_json(self._state_path(state["request_id"]), state)
 
+    def _claim_submission(self, state: dict[str, Any]) -> None:
+        """Atomically create the write-ahead record that owns the sole POST."""
+        path = self._state_path(state["request_id"])
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        except FileExistsError as error:
+            raise RuntimeError("submission already checkpointed; recover instead") from error
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(state, stream, sort_keys=True, allow_nan=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _safe_final_output(path: Path) -> bool:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return False
+        attributes = getattr(info, "st_file_attributes", 0)
+        if stat.S_ISLNK(info.st_mode) or attributes & 0x400:
+            raise ValueError("unsafe final output link or reparse point")
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("unsafe final output is not a regular file")
+        return True
+
     def _validate_payload(self, job: Job) -> None:
         if job.endpoint != self.endpoint_id:
             raise ValueError("RunPod endpoint binding mismatch")
@@ -193,8 +223,6 @@ class RunPodHeroProvider:
         self._validate_payload(job)
         if request_id != job.request_id:
             raise ValueError("request identity mismatch")
-        if self._load(request_id) is not None:
-            raise RuntimeError("submission already checkpointed; recover instead")
         started_at = self.clock.time()
         state = {
             "schema_version": 1,
@@ -210,7 +238,7 @@ class RunPodHeroProvider:
             "result_sha256": "",
             "actual_cost": "",
         }
-        self._save(state)
+        self._claim_submission(state)
         try:
             response = await asyncio.wait_for(
                 self.transport.submit(self.endpoint_id, job.payload),
@@ -339,7 +367,7 @@ class RunPodHeroProvider:
         ):
             raise ValueError("unsafe or unverifiable RunPod output")
         target = self.output_dir / f"{state['request_id']}.mp4"
-        if target.exists():
+        if self._safe_final_output(target):
             if sha256(target) != expected:
                 raise ValueError("existing hero output hash mismatch")
         else:
@@ -354,7 +382,11 @@ class RunPodHeroProvider:
                     stream.write(content)
                     stream.flush()
                     os.fsync(stream.fileno())
-                os.replace(temporary, target)
+                try:
+                    os.link(temporary, target)
+                except FileExistsError:
+                    if not self._safe_final_output(target) or sha256(target) != expected:
+                        raise ValueError("final hero output already exists with different bytes") from None
             finally:
                 Path(temporary).unlink(missing_ok=True)
         actual_cost = money(response.get("actual_cost", job.cost))

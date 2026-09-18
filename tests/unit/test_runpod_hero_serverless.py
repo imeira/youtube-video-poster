@@ -435,6 +435,55 @@ async def test_ambiguous_submit_is_claimed_durably_and_never_reposted(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_separate_instances_racing_same_request_make_one_post_and_second_fails_closed(tmp_path):
+    class BlockingTransport(FakeTransport):
+        def __init__(self):
+            super().__init__([])
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def submit(self, endpoint_id: str, payload: dict) -> dict:
+            self.calls.append(("POST", endpoint_id, payload))
+            self.started.set()
+            await self.release.wait()
+            return {"id": "job_123", "status": "FAILED", "error": "stop"}
+
+    clock = FakeClock()
+    transport = BlockingTransport()
+    job = build_job(tmp_path)
+    first = build_provider(tmp_path, transport, clock)
+    second = build_provider(tmp_path, transport, clock)
+    first_task = asyncio.create_task(first.submit(job, job.request_id, lambda **data: None))
+    await transport.started.wait()
+
+    with pytest.raises(RuntimeError, match="already checkpointed"):
+        await asyncio.wait_for(second.submit(job, job.request_id, lambda **data: None), timeout=0.05)
+    assert [call[0] for call in transport.calls] == ["POST"]
+
+    transport.release.set()
+    with pytest.raises(RunPodFailed):
+        await first_task
+
+
+@pytest.mark.asyncio
+async def test_completed_output_rejects_a_preexisting_symlink_without_download(tmp_path):
+    clock = FakeClock()
+    transport = FakeTransport([completed()])
+    provider = build_provider(tmp_path, transport, clock)
+    job = build_job(tmp_path)
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"outside")
+    target = tmp_path / "output" / f"{job.request_id}.mp4"
+    target.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="unsafe final output"):
+        await provider.submit(job, job.request_id, lambda **data: None)
+
+    assert [call[0] for call in transport.calls] == ["POST", "GET"]
+    assert outside.read_bytes() == b"outside"
+
+
+@pytest.mark.asyncio
 async def test_download_rejects_result_host_outside_explicit_allowlist(tmp_path):
     response = completed()
     response["output"]["url"] = "https://attacker.example/video.mp4"
