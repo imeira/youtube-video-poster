@@ -7,15 +7,12 @@ only the next hash-bound work eligible in the durable ``Executor`` ledger.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import shutil
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
-
-from PIL import Image
 
 from src.hybrid.artifacts import (
     FrozenAsset,
@@ -26,6 +23,8 @@ from src.hybrid.artifacts import (
     sha256,
 )
 from src.hybrid.execution import Executor, Job, Provider
+from src.hybrid.technical_qa import inspect_image
+from src.hybrid.throughput import DurableQueue, run_bounded_wave
 
 
 @dataclass(frozen=True)
@@ -163,7 +162,14 @@ class ProductionRun:
             if frame.scene_id not in self.blocked_scenes
         }
         self._heroes: dict[str, Job] = {}
+        self._corrections: dict[str, Job] = {}
         self._active_images = dict(self._baselines)
+        self.baseline_queue_path = self.executor.database.with_name(
+            f"{self.executor.database.stem}-baselines.db"
+        )
+        self.correction_queue_path = self.executor.database.with_name(
+            f"{self.executor.database.stem}-corrections.db"
+        )
 
     def _job_for(self, frame: FrameSpec, category: str, cost: Decimal, *, predecessor="", prompt=None):
         payload = {
@@ -176,10 +182,13 @@ class ProductionRun:
         }
         if self.endpoint == "fal-ai/flux-2/klein/9b/edit":
             # Freeze the actual wire contract BEFORE request hashing/authorization.
-            payload.update(dict(
-                image_urls=[str(a.path) for a in self.source_manifest.assets],
-                image_size={"width": 1280, "height": 720}, num_images=1,
-                output_format="png", enable_safety_checker=True))
+            payload.update({
+                "image_urls": [str(a.path) for a in self.source_manifest.assets],
+                "image_size": {"width": 1280, "height": 720},
+                "num_images": 1,
+                "output_format": "png",
+                "enable_safety_checker": True,
+            })
         return Job(
             scene=frame.scene_id,
             category=category,
@@ -195,39 +204,52 @@ class ProductionRun:
         """Return the exact baseline jobs that need current LIVE authority."""
         return tuple(self._baselines.values())
 
-    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None, on_completed=None):
+    async def dispatch_baselines(
+        self,
+        provider: Provider,
+        *,
+        authorizations=None,
+        prices=None,
+        on_completed=None,
+        prefetch: int = 0,
+    ):
         if not self._baselines:
             return {}
         authorizations = authorizations or {}
         prices = prices or {}
         if not isinstance(authorizations, dict) or not isinstance(prices, dict):
             raise TypeError("compiled dispatch authority maps must be dictionaries")
-        completed = {}
-        pending = [
-            asyncio.create_task(
-                self.executor.run(
-                    job,
-                    provider,
-                    authorization=authorizations.get(job.request_id),
-                    price=prices.get(job.request_id),
-                )
+        queue = DurableQueue(
+            self.baseline_queue_path,
+            workers=self.executor.config.concurrency,
+            prefetch=prefetch,
+            events=self.executor.events,
+            event_context={
+                "episode": self.episode.episode_id,
+                "stage": "baseline_images",
+            },
+        )
+
+        async def execute(job):
+            return await self.executor.run(
+                job,
+                provider,
+                authorization=authorizations.get(job.request_id),
+                price=prices.get(job.request_id),
             )
-            for job in self._baselines.values()
-        ]
-        try:
-            for task in asyncio.as_completed(pending):
-                receipt = await task
-                completed[receipt["request"]["scene"]] = receipt
-                if on_completed is not None:
-                    await on_completed(receipt)
-        finally:
-            # Do not leave workers writing after the workspace owner releases its lock.
-            # Cancellation leaves durable Executor intents for recover-only resume.
-            for task in pending:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-        return completed
+
+        jobs = tuple(self._baselines.values())
+        by_request = await run_bounded_wave(
+            queue,
+            ((job.request_id, job) for job in jobs),
+            execute,
+            recover_failed=True,
+        )
+        if on_completed is not None:
+            for job in jobs:
+                if self._active_images.get(job.scene) == job:
+                    await on_completed(self.executor.inspect(job.request_id) or by_request[job.request_id])
+        return {job.scene: by_request[job.request_id] for job in jobs}
 
     def _completed_job_for_result(self, scene_id: str, result_sha256: str):
         jobs = [self._active_images.get(scene_id), self._heroes.get(scene_id)]
@@ -273,6 +295,11 @@ class ProductionRun:
         return tuple(eligible)
 
     def remediation_job(self, scene_id: str, correction_prompt: str):
+        existing = self._corrections.get(scene_id)
+        if existing is not None:
+            if existing.payload["prompt"] != correction_prompt:
+                raise ValueError("correction successor is immutable")
+            return existing
         baseline = self._active_images.get(scene_id)
         receipt = self.executor.inspect(baseline.request_id) if baseline else None
         if not receipt or receipt.get("qa") is not False:
@@ -285,8 +312,63 @@ class ProductionRun:
             predecessor=baseline.request_id,
             prompt=correction_prompt,
         )
+        self._corrections[scene_id] = correction
         self._active_images[scene_id] = correction
         return correction
+
+    async def dispatch_remediation_wave(
+        self,
+        corrections: dict[str, str],
+        provider: Provider,
+        *,
+        prefetch: int = 0,
+        authorizations=None,
+        prices=None,
+        on_completed=None,
+    ):
+        """Dispatch every rejected image correction as one bounded durable wave."""
+        if not isinstance(corrections, dict) or not corrections:
+            raise ValueError("correction wave must be a nonempty scene-to-prompt mapping")
+        unknown = set(corrections) - {frame.scene_id for frame in self.episode.frames}
+        if unknown or any(not str(prompt).strip() for prompt in corrections.values()):
+            raise ValueError("correction wave contains an unknown scene or empty prompt")
+        jobs = [
+            self.remediation_job(frame.scene_id, corrections[frame.scene_id])
+            for frame in self.episode.frames
+            if frame.scene_id in corrections
+        ]
+        queue = DurableQueue(
+            self.correction_queue_path,
+            workers=self.executor.config.concurrency,
+            prefetch=prefetch,
+            events=self.executor.events,
+            event_context={
+                "episode": self.episode.episode_id,
+                "stage": "correction_images",
+            },
+        )
+        authorizations = authorizations or {}
+        prices = prices or {}
+
+        async def execute(job):
+            return await self.executor.run(
+                job,
+                provider,
+                authorization=authorizations.get(job.request_id),
+                price=prices.get(job.request_id),
+            )
+
+        by_request = await run_bounded_wave(
+            queue,
+            ((job.request_id, job) for job in jobs),
+            execute,
+            recover_failed=True,
+        )
+        if on_completed is not None:
+            for job in jobs:
+                if self._active_images.get(job.scene) == job:
+                    await on_completed(self.executor.inspect(job.request_id) or by_request[job.request_id])
+        return {job.scene: by_request[job.request_id] for job in jobs}
 
     def render_ready(self):
         baselines = [self.executor.inspect(job.request_id) for job in self._active_images.values()]
@@ -341,9 +423,80 @@ class OperationalPipeline:
     def baseline_jobs(self) -> tuple[Job, ...]:
         return self.run.baseline_jobs()
 
-    async def dispatch_baselines(self, provider: Provider, *, authorizations=None, prices=None, on_completed=None):
+    def _record_technical_rejection(self, receipt: dict, packet: dict) -> None:
+        scene_id = receipt["request"]["scene"]
+        result_sha256 = receipt["result_sha256"]
+        job = self.run._completed_job_for_result(scene_id, result_sha256)
+        reviewer = "technical-qa"
+        self.run.record_visual_qa(scene_id, result_sha256, False, reviewer)
+        atomic_json(
+            self.workspace / "qa" / f"{job.request_id}.json",
+            {
+                "scene_id": scene_id,
+                "result_sha256": result_sha256,
+                "approved": False,
+                "reviewer": reviewer,
+                "qa_kind": "technical",
+                "errors": packet.get("errors", []),
+                "compilation": self.episode.checksum,
+                "request_id": job.request_id,
+                "category": job.category,
+                "predecessor": job.predecessor,
+            },
+        )
+
+    async def dispatch_baselines(
+        self,
+        provider: Provider,
+        *,
+        authorizations=None,
+        prices=None,
+        on_completed=None,
+        prefetch: int = 0,
+    ):
+        async def prepare_then_notify(receipt):
+            scene_id = receipt["request"]["scene"]
+            packet = self.prepare_qa_packets((scene_id,)).get(scene_id)
+            if not packet or packet.get("technical_pass") is not True:
+                self._record_technical_rejection(receipt, packet or {})
+                return
+            if on_completed is not None:
+                await on_completed(receipt)
+
         return await self.run.dispatch_baselines(
-            provider, authorizations=authorizations, prices=prices, on_completed=on_completed
+            provider,
+            authorizations=authorizations,
+            prices=prices,
+            on_completed=prepare_then_notify,
+            prefetch=prefetch,
+        )
+
+    async def dispatch_remediation_wave(
+        self,
+        corrections: dict[str, str],
+        provider: Provider,
+        *,
+        prefetch: int = 0,
+        authorizations=None,
+        prices=None,
+        on_completed=None,
+    ):
+        async def prepare_then_notify(receipt):
+            scene_id = receipt["request"]["scene"]
+            packet = self.prepare_qa_packets((scene_id,)).get(scene_id)
+            if not packet or packet.get("technical_pass") is not True:
+                self._record_technical_rejection(receipt, packet or {})
+                return
+            if on_completed is not None:
+                await on_completed(receipt)
+
+        return await self.run.dispatch_remediation_wave(
+            corrections,
+            provider,
+            prefetch=prefetch,
+            authorizations=authorizations,
+            prices=prices,
+            on_completed=prepare_then_notify,
         )
 
     def render_ready(self):
@@ -368,18 +521,8 @@ class OperationalPipeline:
             result_sha256 = receipt.get("result_sha256")
             if not source.is_file() or sha256(source) != result_sha256:
                 raise ValueError("candidate bytes changed after receipt")
-            with Image.open(source) as image:
-                image.load()
-                packet = {
-                    "scene_id": scene_id,
-                    "result_sha256": result_sha256,
-                    "format": image.format,
-                    "mode": image.mode,
-                    "dimensions": list(image.size),
-                    "compilation": self.episode.checksum,
-                    "technical_pass": True,
-                    "promotion_authorized": False,
-                }
+            packet = inspect_image(source)
+            packet.update(scene_id=scene_id, compilation=self.episode.checksum)
             atomic_json(self.workspace / "qa_packets" / f"{job.request_id}.json", packet)
             packets[scene_id] = packet
         return packets
@@ -404,6 +547,14 @@ class OperationalPipeline:
 
     def record_visual_qa(self, scene_id: str, result_sha256: str, approved: bool, reviewer: str):
         job = self.run._completed_job_for_result(scene_id, result_sha256)
+        if job.category not in {"hero", "hero_retry"}:
+            packet = self.prepare_qa_packets((scene_id,)).get(scene_id)
+            if (
+                not packet
+                or packet.get("result_sha256") != result_sha256
+                or packet.get("technical_pass") is not True
+            ):
+                raise ValueError("technical QA must pass before semantic reviewer")
         self.run.record_visual_qa(scene_id, result_sha256, approved, reviewer)
         qa = {
             "scene_id": scene_id,

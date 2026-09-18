@@ -25,7 +25,9 @@ from src.budget.guard import (
 )
 from src.config.loader import BudgetConfig
 from src.hybrid.artifacts import Manifest, digest, sha256
+from src.hybrid.cas import ContentAddressedStore, job_content_key
 from src.hybrid.locks import file_slot
+from src.hybrid.observability import StructuredEventLog
 from src.hybrid.planner import Config, money
 
 
@@ -92,11 +94,21 @@ class Provider(Protocol):
 
 
 class Executor:
-    def __init__(self, database: Path, config: Config, *, prior_spend=Decimal(0)):
+    def __init__(
+        self,
+        database: Path,
+        config: Config,
+        *,
+        prior_spend=Decimal(0),
+        cas: ContentAddressedStore | None = None,
+        events: StructuredEventLog | None = None,
+    ):
         self.database = Path(database)
         self.database.parent.mkdir(parents=True, exist_ok=True)
         self.config = config
         self.prior_spend = money(prior_spend)
+        self.cas = cas
+        self.events = events
         self.semaphore = asyncio.Semaphore(config.concurrency)
         self.locks = {}
         self.lock_dir = self.database.with_suffix(".locks")
@@ -180,7 +192,8 @@ class Executor:
             row.update(updates)
             self._put(db, row)
 
-    def _reserve(self, job):
+    def _reserve(self, job, *, reservation_cost=None, cache_key=""):
+        reservation_cost = job.cost if reservation_cost is None else money(reservation_cost)
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             rows = [json.loads(r[0]) for r in db.execute("SELECT data FROM jobs")]
@@ -252,10 +265,10 @@ class Executor:
             )
             ledger.spent = float(spent)
             check = BudgetGuard(ledger).approve_job(
-                CostEstimate(provider=job.endpoint, estimated_cost=float(job.cost))
+                CostEstimate(provider=job.endpoint, estimated_cost=float(reservation_cost))
             )
             if (
-                spent + job.cost > self.config.limit
+                spent + reservation_cost > self.config.limit
                 or check.action == BudgetAction.WAITING_BUDGET_APPROVAL
             ):
                 raise RuntimeError("budget reservation blocked")
@@ -270,9 +283,10 @@ class Executor:
                     "manifest": job.manifest.checksum,
                     "endpoint": job.endpoint,
                     "status": "INTENT",
-                    "charged": str(job.cost),
+                    "charged": str(reservation_cost),
                     "provider_id": "",
                     "partial": "",
+                    "cache_key": cache_key,
                     "request": json.loads(json.dumps(asdict(job), default=str)),
                 },
             )
@@ -344,9 +358,22 @@ class Executor:
                 job.manifest.verify(job.mode)
                 existing = self.inspect(job.request_id)
                 if existing is None:
-                    live_gate()
-                    fresh = self._reserve(job)
+                    cache_key = job_content_key(job) if self.cas is not None else ""
+                    cached = self.cas.get(cache_key) if self.cas is not None else None
+                    if cached is None:
+                        live_gate()
+                    fresh = self._reserve(
+                        job,
+                        reservation_cost=Decimal(0) if cached is not None else None,
+                        cache_key=cache_key,
+                    )
                 else:
+                    cache_key = existing.get("cache_key") or (
+                        job_content_key(job) if self.cas is not None else ""
+                    )
+                    if self.cas is not None and not existing.get("cache_key"):
+                        self._change(job.request_id, cache_key=cache_key)
+                    cached = None
                     fresh = False
                 row = self.inspect(job.request_id)
                 if row["status"] == "COMPLETE":
@@ -354,6 +381,19 @@ class Executor:
                     return row
                 if row["status"] == "OVERRUN":
                     raise RuntimeError("budget overrun requires reconciliation")
+                if fresh and cached is not None:
+                    zero = Decimal(".000")
+                    self._change(
+                        job.request_id,
+                        status="COMPLETE",
+                        result=str(cached.resolve()),
+                        result_sha256=sha256(cached),
+                        charged=str(zero),
+                        actual_cost=str(zero),
+                        cache_key=cache_key,
+                        cache_hit=True,
+                    )
+                    return self.inspect(job.request_id)
 
                 def checkpoint(*, provider_id=None, partial=None):
                     updates = {}
@@ -375,14 +415,20 @@ class Executor:
                         job, job.request_id, row["provider_id"], row["partial"], checkpoint
                     )
                 else:
-                    raise RuntimeError("unknown submission requires reconciliation; no resubmit")
+                    recover_local = getattr(provider, "recover_local", None)
+                    if not callable(recover_local):
+                        raise RuntimeError("unknown submission requires reconciliation; no resubmit")
+                    result = await recover_local(job, job.request_id, checkpoint)
                 actual = money(result.actual_cost)
                 result_path = Path(result.path).resolve()
                 if actual > job.cost:
                     self._change(job.request_id, status="OVERRUN", result=str(result_path), charged=str(actual), actual_cost=str(actual))
                     raise RuntimeError("budget provider overrun recorded; execution blocked")
+                if self.cas is not None:
+                    self.cas.put(cache_key, result_path)
                 self._change(
                     job.request_id, status="COMPLETE", result=str(result_path),
                     result_sha256=sha256(result_path), charged=str(actual), actual_cost=str(actual),
+                    cache_key=cache_key, cache_hit=False,
                 )
                 return self.inspect(job.request_id)

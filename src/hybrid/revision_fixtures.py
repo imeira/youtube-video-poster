@@ -18,10 +18,34 @@ from PIL import Image, ImageDraw
 
 from src.hybrid.artifacts import FrozenAsset, Manifest, atomic_json, contact_sheet, digest, sha256
 from src.hybrid.execution import ProviderResult
+from src.providers.base import PublishResult
+
+
+class LocalPublicationFake:
+    """Deterministic TEST-only publisher; performs no network or subprocess I/O."""
+
+    async def upload(self, video_path, metadata, thumbnail="", captions=""):
+        video_id = f"local-{sha256(video_path)[:24]}"
+        return PublishResult(True, video_id=video_id, video_url=f"local-fake://{video_id}")
+
+    async def readback(self, video_id):
+        if not isinstance(video_id, str) or not video_id.startswith("local-"):
+            return None
+        return {"video_id": video_id, "status": "LOCAL_FAKE_COMPLETE"}
+
+
+def publication_factory(*, config=None, mode="TEST"):
+    """Factory allowlisted by RevisionHarness for public offline TEST publishing."""
+    if mode != "TEST" or config not in (None, {}):
+        raise ValueError("local publication fake accepts TEST mode and empty config only")
+    return LocalPublicationFake()
 
 
 class TestDependencies:
     mode = "TEST"
+    # Factory admission capability: this fixture is deliberately local-only.
+    local_fake = True
+    test_fake_contract = "local-only-v1"
     endpoint = "local-fixture/image-edit-v1"
     image_cost = Decimal(".001")
 
@@ -31,6 +55,7 @@ class TestDependencies:
         self.options = options or {}
         self.active = self.maximum = 0
         self.images = self
+        self.hero = self
         self.tts = self
         self.messenger = self
 
@@ -98,10 +123,10 @@ class TestDependencies:
 
     def _draw(self, path, request_id):
         rng = random.Random(request_id)
-        image = Image.new("RGB", (640, 360), tuple(rng.randrange(20, 220) for _ in range(3)))
+        image = Image.new("RGB", (1280, 720), tuple(rng.randrange(20, 220) for _ in range(3)))
         draw = ImageDraw.Draw(image)
         for _ in range(25):
-            x, y = rng.randrange(550), rng.randrange(270)
+            x, y = rng.randrange(1190), rng.randrange(630)
             draw.ellipse((x, y, x + 80, y + 80), fill=tuple(rng.randrange(256) for _ in range(3)))
         draw.text((10, 10), "TEST ONLY - synthetic image", fill="white")
         image.save(path)

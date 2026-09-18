@@ -49,7 +49,7 @@ class TTSConfig:
 
 @dataclass(frozen=True)
 class GenerativeVideoConfig:
-    enabled: bool = True
+    enabled: bool = False
     provider: str = "runpod"
     only_for_high_value_scenes: bool = True
     max_clips_per_episode: int = 5
@@ -62,7 +62,7 @@ class GenerativeVideoConfig:
 
 @dataclass(frozen=True)
 class RunPodConfig:
-    enabled: bool = True
+    enabled: bool = False
     shutdown_after_job: bool = True
     max_retries_per_scene: int = 2
     preferred_cloud: str = "SECURE"
@@ -171,7 +171,7 @@ def load_config(config_path: str | Path | None = None) -> StudioConfig:
             azure_fallback=tts_raw.get("azure_fallback", True),
         ),
         generative_video=GenerativeVideoConfig(
-            enabled=gv_raw.get("enabled", True),
+            enabled=gv_raw.get("enabled", False),
             provider=gv_raw.get("provider", "runpod"),
             only_for_high_value_scenes=gv_raw.get("only_for_high_value_scenes", True),
             max_clips_per_episode=gv_raw.get("max_clips_per_episode", 5),
@@ -182,7 +182,7 @@ def load_config(config_path: str | Path | None = None) -> StudioConfig:
             prefer_i2v=gv_raw.get("prefer_i2v", True),
         ),
         runpod=RunPodConfig(
-            enabled=rp_raw.get("enabled", True),
+            enabled=rp_raw.get("enabled", False),
             shutdown_after_job=rp_raw.get("shutdown_after_job", True),
             max_retries_per_scene=rp_raw.get("retries", {}).get("max_per_scene", 2),
             preferred_cloud=rp_raw.get("preferred_cloud", "SECURE"),

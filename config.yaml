@@ -169,7 +169,7 @@ local_animation:
 
 # --- §53-60 RUNPOD ---
 runpod:
-  enabled: true
+  enabled: false
   provider: "runpod"
   shutdown_after_job: true  # §55
   retries:
@@ -211,7 +211,7 @@ budget_guard:
 
 # --- §70-71 VÍDEO GENERATIVO ---
 generative_video:
-  enabled: true
+  enabled: false
   provider: runpod
   only_for_high_value_scenes: true  # §68: HIGH or CRITICAL
   max_clips_per_episode: 5

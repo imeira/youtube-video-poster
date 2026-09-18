@@ -3,6 +3,7 @@ import asyncio
 from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
+import hashlib
 import importlib.machinery
 import json
 from pathlib import Path
@@ -18,12 +19,13 @@ from src.hybrid.compiled import compile_storyboard, ProductionRun
 from src.hybrid.execution import Executor
 from src.hybrid.planner import Config
 from src.hybrid.revision import RevisionHarness, read, semantic_timeline, validate_ep8_script
+from src.providers.video.runpod_serverless import RunPodHeroProvider
 
 
 @pytest.fixture
 def deployment(tmp_path, monkeypatch):
     monkeypatch.setattr(live.time, "time", lambda: 1000.0)
-    for name in ("FAL_KEY", "TELEGRAM_BOT_TOKEN", "EP8_OPENROUTER_REVIEW_KEY"):
+    for name in ("FAL_KEY", "TELEGRAM_BOT_TOKEN", "EP8_OPENROUTER_REVIEW_KEY", "RUNPOD_API_KEY"):
         monkeypatch.setenv(name, "synthetic-unit-test-placeholder")
     fal = ModuleType("fal_client")
     fal.__spec__ = importlib.machinery.ModuleSpec("fal_client", loader=None)
@@ -44,7 +46,7 @@ def deployment(tmp_path, monkeypatch):
     evidence = dict(authority="mock price reviewer", source_url="https://example.test/price-evidence",
                     observed_at=990, valid_until=2000)
     c = dict(schema_version=1, adapter=live.ADAPTER, endpoint=live.ENDPOINT, image_cost="0.022",
-        non_image_reserve="0.50", visual_license="mock licensed original artwork",
+        non_image_reserve="0.75", visual_license="mock licensed original artwork",
         script=dict(sha256=sha256(live.SCRIPT), authority="mock human editor"),
         image_price=dict(**evidence, endpoint=live.ENDPOINT, amount="0.022", manifest_checksum=manifest.checksum,
             width=1280, height=720, num_images=1, output_format="png", includes_reference_inputs=True),
@@ -82,8 +84,11 @@ def change_plan(deployment, change):
 
 def compiled(deps):
     script = asyncio.run(deps.author_script(deps.plan, {}))
-    words = [dict(word=w, start=i / 5, end=(i + 1) / 5) for i, w in enumerate(script["narration"].split())]
-    duration = len(words) / 5
+    script_path = deps.root / "EP8/script/script.json"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json(script_path, script)
+    words = [dict(word=w, start=i / 2, end=(i + 1) / 2) for i, w in enumerate(script["narration"].split())]
+    duration = len(words) / 2
     scenes, _ = semantic_timeline(script, words, duration)
     audio = deps.root / "EP8/audio/narration.wav"
     audio.parent.mkdir(parents=True)
@@ -116,7 +121,9 @@ def test_dynamic_factory_constructs_real_components_and_script(deployment):
     script = asyncio.run(deps.author_script(plan, {}))
     validate_ep8_script(script)
     assert live.ScriptQAAgent().review(script).approved
-    assert len(script["segments"]) == 25 and len(script["narration"].split()) >= 800
+    assert len(script["segments"]) == plan["editorial_plan"]["estimated_scene_count"]
+    assert len(script["narration"].split()) == plan["editorial_plan"]["estimated_word_count"]
+    assert script["thumbnail_concept"]["identity"]
     assert all(s["visual_action"] and s["characters"] for s in script["segments"])
     assert script == asyncio.run(deps.author_script(plan, {}))
 
@@ -172,7 +179,7 @@ def test_authorize_exact_fresh_budget_and_resume(deployment):
         assert 1000 < prices[job.request_id].valid_until <= 1300
     assert sum(a.maximum_cost for a in auth.values()) + deps.prior_spend <= Decimal(deps.plan["budget_usd"])
     assert deps.authorize(jobs, deps.plan) == (auth, prices)
-    assert len(read(deps.root / "live_authorizations.json")["jobs"]) == 25
+    assert len(read(deps.root / "live_authorizations.json")["jobs"]) == deps.plan["editorial_plan"]["estimated_scene_count"]
     for modified in (replace(jobs[0], cost=Decimal("0.001")), replace(jobs[0], endpoint="wrong"),
                      replace(jobs[0], payload={**jobs[0].payload, "prompt": "unapproved"}),
                      replace(jobs[0], mode="TEST")):
@@ -309,3 +316,93 @@ def test_telegram_does_not_substitute_message_or_change_destination(deployment, 
         asyncio.run(deps.messenger.send_video("-12345", str(video)))
     with pytest.raises(ValueError, match="destination"):
         asyncio.run(deps.messenger.send_photo("wrong-chat", "absent.png"))
+
+
+def test_live_factory_runs_audited_hero_once_and_resumes_without_resubmit(deployment, tmp_path):
+    """The public LIVE factory wires only a hash-bound audited RunPod contract."""
+    _, contract, _ = deployment
+    contract = deepcopy(contract)
+    contract["hero"] = {
+        "endpoint_id": "runpod-live-test", "submit_url": "https://api.runpod.ai/v2/runpod-live-test/run",
+        "status_url": "https://api.runpod.ai/v2/runpod-live-test/status/{job_id}",
+        "cancel_url": "https://api.runpod.ai/v2/runpod-live-test/cancel/{job_id}",
+        "unit_cost_usd": "0.25", "authority": "audited RunPod deployment",
+        "observed_at": 990, "valid_until": 2000, "key_env": "RUNPOD_API_KEY",
+        "result_hosts": ["video.runpod.ai"],
+    }
+    deployment_path = tmp_path / "deployment.json"
+    atomic_json(deployment_path, contract)
+    # Reuse the fixture's immutable, approved reference evidence.
+    refs_path = deployment[0].parent / "refs.json"
+    live_root = tmp_path / "live-run"
+    with RevisionHarness(live_root) as harness:
+        created = harness.create_plan(mode="LIVE", request="New source-bound EP8", deployment=deployment_path,
+            references=refs_path, chat_id="-12345", heroes=True,
+            hero_endpoint="runpod-live-test", hero_cost="0.25")
+        harness.approve_plan(created["plan_hash"], "human approver")
+        plan = harness.load()
+
+    class Clock:
+        def time(self): return 1000
+        async def sleep(self, seconds): return None
+
+    class Transport:
+        def __init__(self): self.posts = self.statuses = self.downloads = 0
+        async def submit(self, endpoint, payload):
+            self.posts += 1
+            return {"id": "remote-1", "status": "IN_QUEUE"}
+        async def status(self, endpoint, job_id):
+            self.statuses += 1
+            body = b"verified hero bytes"
+            return {"id": job_id, "status": "COMPLETED", "output": {
+                "url": "https://video.runpod.ai/result.mp4", "sha256": hashlib.sha256(body).hexdigest()},
+                "actual_cost": "0.25"}
+        async def cancel(self, endpoint, job_id): raise AssertionError("no cancellation")
+        async def download(self, url):
+            self.downloads += 1
+            return b"verified hero bytes"
+
+    transport = Transport()
+    deps = live.factory(live_root / "r001", plan, hero_transport_factory=lambda _: transport, hero_clock=Clock())
+    assert isinstance(deps.hero, RunPodHeroProvider)
+    assert deps.hero.endpoint_id == plan["hero_plan"]["endpoint"]
+    image = tmp_path / "still.png"
+    Image.new("RGB", (16, 16), "navy").save(image)
+    asset = FrozenAsset.approve(image, "human", "LIVE")
+    sheet = tmp_path / "sheet.png"
+    contact_sheet([asset], sheet)
+    manifest = Manifest.freeze([asset], FrozenAsset.approve(sheet, "human", "LIVE"), "human", "LIVE")
+    target = live_root / "r001/EP8/animation/hero-manifest.json"
+    scene = {"scene_id": "S001", "importance": "HIGH", "duration": 5, "motion_intent": "slow pan"}
+    # A deployment factory alone is not authority to POST: the revision route
+    # must supply its durable executor and per-request authorizer.
+    with pytest.raises(PermissionError, match="executor and exact authorizer"):
+        asyncio.run(RevisionHarness(live_root).execute_heroes(
+            plan, created["plan_hash"], manifest, {"S001": asset}, [scene], deps.hero, target))
+    assert transport.posts == transport.statuses == transport.downloads == 0
+
+
+@pytest.mark.parametrize("field", ["hero", "status_url"])
+def test_live_hero_contract_missing_or_mismatched_blocks_before_transport(deployment, tmp_path, field):
+    _, contract, _ = deployment
+    contract = deepcopy(contract)
+    hero = {"endpoint_id": "runpod-live-test", "submit_url": "https://api.runpod.ai/v2/runpod-live-test/run",
+        "status_url": "https://api.runpod.ai/v2/runpod-live-test/status/{job_id}",
+        "cancel_url": "https://api.runpod.ai/v2/runpod-live-test/cancel/{job_id}", "unit_cost_usd": "0.25",
+        "authority": "audited RunPod deployment", "observed_at": 990, "valid_until": 2000,
+        "key_env": "RUNPOD_API_KEY", "result_hosts": ["video.runpod.ai"]}
+    if field == "hero":
+        pass
+    else:
+        hero[field] = "https://wrong.example/status/{job_id}"
+    contract["hero"] = hero
+    path = tmp_path / "deployment.json"
+    atomic_json(path, contract)
+    with RevisionHarness(tmp_path / "run") as harness:
+        if field == "hero":
+            contract.pop("hero")
+            atomic_json(path, contract)
+        with pytest.raises(ValueError):
+            harness.create_plan(mode="LIVE", request="EP8", deployment=path,
+                references=deployment[0] / "refs.json", chat_id="-12345", heroes=True,
+                hero_endpoint="runpod-live-test", hero_cost="0.25")
