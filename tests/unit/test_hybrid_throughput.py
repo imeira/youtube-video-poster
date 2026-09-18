@@ -593,6 +593,9 @@ async def test_revision_stage_success_sanitizes_result_before_persisting(tmp_pat
                 "provider_token": "STAGE_RESULT_SECRET",
                 "nested": {
                     "cookie": "sessionid=COOKIE_SECRET",
+                    "accessToken": "ACCESS_SECRET",
+                    "oauthToken": "OAUTH_SECRET",
+                    "sessionData": "SESSION_SECRET",
                     "result_url": "https://provider.invalid/result?X-Amz-Signature=SIGNED_SECRET",
                 },
             }, [])
@@ -601,7 +604,8 @@ async def test_revision_stage_success_sanitizes_result_before_persisting(tmp_pat
 
     assert result["provider_token"] == "[REDACTED_CREDENTIAL]"
     raw = (tmp_path / "revision" / "revision.json").read_text(encoding="utf-8")
-    for secret in ("STAGE_RESULT_SECRET", "COOKIE_SECRET", "SIGNED_SECRET"):
+    for secret in ("STAGE_RESULT_SECRET", "COOKIE_SECRET", "ACCESS_SECRET", "OAUTH_SECRET",
+                   "SESSION_SECRET", "SIGNED_SECRET"):
         assert secret not in raw
     assert "[REDACTED_CREDENTIAL]" in raw
     assert "[REDACTED_URL]" in raw

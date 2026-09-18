@@ -53,7 +53,7 @@ _CREDENTIAL = re.compile(
     re.IGNORECASE,
 )
 _CREDENTIAL_KEY = re.compile(
-    r"^(?:.*[_ -])?(?:token|secret|api[_ -]?key|authorization|password|passwd|cookie|session(?:id|[_ -]?id)?)$",
+    r"^.*(?:token|secret|credential|authorization|auth|password|passwd|cookie|session|signature|private[_ -]?key|api[_ -]?key).*$",
     re.IGNORECASE,
 )
 _COOKIE = re.compile(

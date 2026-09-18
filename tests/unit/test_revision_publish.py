@@ -36,6 +36,19 @@ class FakePublisher:
         return self.remote.get(video_id)
 
 
+def test_builtin_test_publication_factory_is_local_only(tmp_path):
+    from src.hybrid.revision_fixtures import publication_factory
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    provider = publication_factory(config={}, mode="TEST")
+    uploaded = asyncio.run(provider.upload(video, {"title": "EP8"}))
+
+    assert uploaded.success is True
+    assert uploaded.video_url.startswith("local-fake://")
+    assert asyncio.run(provider.readback(uploaded.video_id))["video_id"] == uploaded.video_id
+
+
 def prepared_harness(tmp_path: Path, monkeypatch, *, publisher: FakePublisher, mode="TEST"):
     root = tmp_path / "workspace"
     revision = root / "r001" / "EP8"
@@ -84,11 +97,9 @@ def prepared_harness(tmp_path: Path, monkeypatch, *, publisher: FakePublisher, m
     monkeypatch.setattr(harness, "save", lambda: None)
     monkeypatch.setattr(harness, "event", lambda *args, **kwargs: None)
     deployment = tmp_path / "deployment.json"
-    factory = "tests.fake_publish_provider:factory"
-    import sys, types
-    module = types.ModuleType("tests.fake_publish_provider")
-    module.factory = lambda **kwargs: publisher
-    monkeypatch.setitem(sys.modules, "tests.fake_publish_provider", module)
+    factory = "src.hybrid.revision_fixtures:publication_factory"
+    import src.hybrid.revision_fixtures as fixture_module
+    monkeypatch.setattr(fixture_module, "publication_factory", lambda **kwargs: publisher, raising=False)
     provider_contract = {"adapter": factory, "mode": mode}
     if mode == "TEST":
         provider_contract.update(local_fake=True, capability="local-only-v1")
@@ -145,8 +156,9 @@ def test_publish_validates_tampered_package_before_importing_or_calling_provider
     publisher = FakePublisher()
     harness, deployment, revision = prepared_harness(tmp_path, monkeypatch, publisher=publisher)
     factory_calls = []
-    import sys
-    sys.modules["tests.fake_publish_provider"].factory = lambda **kwargs: factory_calls.append(kwargs) or publisher
+    import src.hybrid.revision_fixtures as fixture_module
+    monkeypatch.setattr(fixture_module, "publication_factory",
+                        lambda **kwargs: factory_calls.append(kwargs) or publisher, raising=False)
     (revision / "video.mp4").write_bytes(b"tampered")
 
     with pytest.raises(ValueError, match="package artifact hash mismatch"):
@@ -170,14 +182,15 @@ def test_test_publish_rejects_unmarked_or_network_provider_before_factory_side_e
     publisher = FakePublisher()
     harness, deployment, _revision = prepared_harness(tmp_path, monkeypatch, publisher=publisher)
     factory_calls = []
-    import sys
-    sys.modules["tests.fake_publish_provider"].factory = lambda **kwargs: factory_calls.append(kwargs) or publisher
+    import src.hybrid.revision_fixtures as fixture_module
+    monkeypatch.setattr(fixture_module, "publication_factory",
+                        lambda **kwargs: factory_calls.append(kwargs) or publisher, raising=False)
 
     for provider in (
         {"adapter": "tests.fake_publish_provider:factory", "mode": "TEST"},
-        {"adapter": "tests.fake_publish_provider:factory", "mode": "TEST",
+        {"adapter": "src.hybrid.revision_fixtures:publication_factory", "mode": "TEST",
          "local_fake": True, "capability": "local-only-v1",
-         "config": {"endpoint": "https://remote.invalid/upload"}},
+         "config": {"endpoint_parts": ["https:", "//remote.invalid/upload"]}},
     ):
         deployment.write_text(json.dumps({"publication_provider": provider}), encoding="utf-8")
         with pytest.raises(ValueError, match="local fake"):

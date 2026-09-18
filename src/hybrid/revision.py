@@ -415,10 +415,22 @@ class RevisionHarness:
             raise ValueError("explicit publication provider deployment required before I/O")
         if mode == "TEST":
             config = provider.get("config", {})
-            serialized_config = json.dumps(config, sort_keys=True, ensure_ascii=False)
+            def strings(value):
+                if isinstance(value, str):
+                    yield value.strip().lower()
+                elif isinstance(value, dict):
+                    for key, item in value.items():
+                        yield from strings(key)
+                        yield from strings(item)
+                elif isinstance(value, (list, tuple)):
+                    for item in value:
+                        yield from strings(item)
+            config_strings = tuple(strings(config))
             if (provider.get("local_fake") is not True
                     or provider.get("capability") != "local-only-v1"
-                    or "://" in serialized_config):
+                    or provider.get("adapter") != "src.hybrid.revision_fixtures:publication_factory"
+                    or any("://" in value or value.startswith("//")
+                           or value in {"http:", "https:"} for value in config_strings)):
                 raise ValueError("TEST publication requires an explicit local fake without network endpoints")
         module_name, separator, factory_name = provider["adapter"].partition(":")
         if not separator or not module_name or not factory_name:

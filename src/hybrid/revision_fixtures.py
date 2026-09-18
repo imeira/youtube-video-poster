@@ -18,6 +18,27 @@ from PIL import Image, ImageDraw
 
 from src.hybrid.artifacts import FrozenAsset, Manifest, atomic_json, contact_sheet, digest, sha256
 from src.hybrid.execution import ProviderResult
+from src.providers.base import PublishResult
+
+
+class LocalPublicationFake:
+    """Deterministic TEST-only publisher; performs no network or subprocess I/O."""
+
+    async def upload(self, video_path, metadata, thumbnail="", captions=""):
+        video_id = f"local-{sha256(video_path)[:24]}"
+        return PublishResult(True, video_id=video_id, video_url=f"local-fake://{video_id}")
+
+    async def readback(self, video_id):
+        if not isinstance(video_id, str) or not video_id.startswith("local-"):
+            return None
+        return {"video_id": video_id, "status": "LOCAL_FAKE_COMPLETE"}
+
+
+def publication_factory(*, config=None, mode="TEST"):
+    """Factory allowlisted by RevisionHarness for public offline TEST publishing."""
+    if mode != "TEST" or config not in (None, {}):
+        raise ValueError("local publication fake accepts TEST mode and empty config only")
+    return LocalPublicationFake()
 
 
 class TestDependencies:
