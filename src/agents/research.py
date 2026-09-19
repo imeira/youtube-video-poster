@@ -172,6 +172,83 @@ class ResearchAgent(BaseAgent):
                 ),
             },
         },
+        "nascimento de isaque": {
+            "references": [
+                {"book": "Gênesis", "chapter": 21, "verses": "1-8"},
+            ],
+            "source_urls": [
+                "https://www.bibliaonline.com.br/acf/gn/21/1-8",
+                "https://www.bibliaonline.com.br/nvi/gn/21/1-8",
+            ],
+            "source_authority": {
+                "language": "pt-BR",
+                "kind": "paráfrase editorial original baseada na passagem",
+                "quotation_policy": "Não reproduzir trechos longos de traduções protegidas.",
+            },
+            "summary": (
+                "Deus cumpriu a promessa feita a Sara e Abraão: Isaque nasceu no tempo determinado. "
+                "A família recebeu o menino com alegria, e depois celebrou seu crescimento com um grande banquete."
+            ),
+            "key_facts": [
+                "Deus cumpriu o que havia prometido a Sara",
+                "Sara deu a Abraão um filho na velhice, no tempo determinado por Deus",
+                "Abraão deu ao filho de Sara o nome de Isaque",
+                "Quando Isaque tinha oito dias, Abraão cumpriu o sinal da aliança conforme Deus havia ordenado",
+                "Abraão tinha cem anos quando Isaque nasceu",
+                "Sara recebeu o cumprimento da promessa com riso e alegria compartilhada",
+                "Sara reconheceu com admiração que amamentaria um filho na velhice",
+                "Isaque cresceu, foi desmamado e Abraão preparou um grande banquete para celebrar",
+            ],
+            "chapter_context": {
+                "read_scope": "Gênesis 21:1-21",
+                "episode_scope": "Gênesis 21:1-8",
+                "excluded_from_episode": "Gênesis 21:9-21 — Hagar e Ismael deixam o acampamento",
+            },
+            "accuracy_report": {
+                "facts": "Fatos narrativos limitados a Gênesis 21:1-8 e apresentados em ordem.",
+                "dramatizations": "Expressões, enquadramentos e transições são recursos visuais, não novos fatos.",
+                "omissions": [
+                    "Gênesis 21:9-21 fica fora deste episódio para manter o arco no nascimento e na celebração de Isaque.",
+                    "O sinal da aliança é citado de modo não gráfico e não será mostrado visualmente.",
+                ],
+                "simplifications": "A passagem é parafraseada com frases curtas para crianças de 6–10 anos.",
+                "human_review": [
+                    "Confirmar continuidade visual de Abraão e Sara com as referências canônicas do EP8.",
+                    "A representação divina nunca será humana nem localizada visualmente.",
+                ],
+            },
+            "visual_constraints": {
+                "god_visual_representation": (
+                    "Presença divina somente por luz ambiente, vento, som ou mudança natural; "
+                    "nunca rosto, corpo, mãos ou silhueta humana."
+                ),
+                "parent_identity_continuity": (
+                    "Reutilizar exatamente as identidades canônicas aprovadas do EP8: Abraão "
+                    "sha256 aecb6ef14f51a65f5f1d6c16118630b9643f20d26a42159618caac2cf92fdf2f; "
+                    "Sara sha256 406008921ec9978e6fec5ab7196e9c4bfb0d1fac5588e82fc31bcf58ffb5be61."
+                ),
+                "isaac_identity_continuity": (
+                    "Criar e congelar uma única identidade infantil para Isaque; manter rosto, cabelo, manta, "
+                    "idade aparente e proporções coerentes entre bebê recém-nascido e criança pequena."
+                ),
+                "birth_safety": (
+                    "Mostrar Isaque somente depois de nascer, limpo, vestido e amparado com segurança; "
+                    "sem parto explícito, nudez, sangue, dor médica ou anatomia íntima."
+                ),
+                "covenant_sign_safety": (
+                    "O texto pode dizer que Abraão cumpriu o sinal da aliança aos oito dias, mas não representar circuncisão, "
+                    "instrumentos, ferimento ou procedimento médico."
+                ),
+                "anachronism_guard": (
+                    "Sem hospital moderno, berço moderno, mamadeira, fotografia, balões, bolo de aniversário, "
+                    "texto dentro da imagem ou objetos contemporâneos."
+                ),
+                "unsupported_details": (
+                    "Não incluir Hagar, Ismael, expulsão, deserto, poço, arco, flechas ou os acontecimentos de "
+                    "Gênesis 21:9-21; não inventar idade de Sara, parteira, visitantes, animais ou falas adicionais."
+                ),
+            },
+        },
         "promessa de um filho para abraão e sara": {
             "references": [
                 {"book": "Gênesis", "chapter": 15, "verses": "1-6"},
