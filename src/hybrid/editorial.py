@@ -450,8 +450,8 @@ def validate_storyboard(
     if storyboard.get("burned_captions") is not False:
         raise EditorialContractError("burned captions are forbidden")
     closing = storyboard.get("closing_hold_seconds")
-    if type(closing) not in {int, float} or not 3 <= closing <= 5:
-        raise EditorialContractError("closing hold must be 3 to 5 seconds")
+    if type(closing) not in {int, float} or not 3 <= closing <= 10:
+        raise EditorialContractError("closing hold must be 3 to 10 seconds")
     segments = bound_script.get("segments", []) if isinstance(bound_script, dict) else []
     if not segments:
         raise EditorialContractError("claim-bound script segments are required")

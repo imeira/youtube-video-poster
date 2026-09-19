@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 from src.agents.script_qa import ScriptQAAgent
+from src.content.narrator import LORENA, closing_fields
 
 
 def packet(*segments):
-    segment_list = list(segments)
+    segment_list = [dict(segment) for segment in segments]
+    if not segment_list or segment_list[-1].get("kind") != "family_reflection":
+        segment_list.append({
+            "id": "CLOSING",
+            "kind": "family_reflection",
+            "narration": "Podemos conversar em família sobre a lição desta história.",
+            "source_refs": [],
+            **closing_fields(),
+        })
+    else:
+        segment_list[-1].update(closing_fields())
     return {
         "audience": {"min_age": 6, "max_age": 10},
         "segments": segment_list,
         "narration": "\n\n".join(segment["narration"] for segment in segment_list),
         "closing_duration_s": 4,
+        "recurring_narrator": dict(LORENA),
     }
 
 

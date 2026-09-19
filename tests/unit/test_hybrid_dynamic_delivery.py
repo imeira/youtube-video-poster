@@ -48,11 +48,11 @@ def test_plan_exposes_dynamic_episode_delivery_with_child_safe_closing():
 
 def test_plan_does_not_impose_a_fixed_duration_and_rejects_invalid_closing():
     short = plan(Config(), recommended_duration_seconds=180, closing_seconds=3)
-    long = plan(Config(), recommended_duration_seconds=900, closing_seconds=5)
+    long = plan(Config(), recommended_duration_seconds=900, closing_seconds=10)
     assert short["delivery"]["duration_seconds"] == 180
     assert long["delivery"]["duration_seconds"] == 900
 
-    with pytest.raises(ValueError, match="3 to 5"):
+    with pytest.raises(ValueError, match="3 to 10"):
         plan(Config(), recommended_duration_seconds=480, closing_seconds=2)
 
     with pytest.raises(ValueError, match="180 to 900"):

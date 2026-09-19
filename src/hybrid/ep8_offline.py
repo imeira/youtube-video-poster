@@ -84,7 +84,7 @@ class Ep8OfflineAdapter:
                 or contract.book_subtitle != "\u2014 G\u00eanesis 15\u201318"):
             raise ValueError("EP8 requires its exact title and biblical subtitle")
         hold = board["video_plan"]["ending_tail_s"]
-        if not math.isfinite(hold) or not 3 <= hold <= 5:
+        if not math.isfinite(hold) or not 3 <= hold <= 10:
             raise ValueError("invalid approved closing hold")
         self.verify_files(bindings)
         source = {"root": str(self.root), "bindings": bindings, "revision": digest(bindings)}

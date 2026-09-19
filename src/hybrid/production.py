@@ -216,7 +216,8 @@ class ProductionHarness:
         if " ".join(approved_script.split()) != " ".join(narration.split()):
             raise ValueError("semantic narration differs from approved script")
         packet = dict(audience={"min_age": 6, "max_age": 10}, closing_duration_s=hold,
-                      segments=segments, narration=narration)
+                      segments=segments, narration=narration,
+                      legacy_published_episode_revoice=True)
         qa = ScriptQAAgent().review(packet)
         if any(not finding.endswith(':SENTENCE_TOO_LONG') for finding in qa.findings):
             raise ValueError("script QA failed: " + ", ".join(qa.findings))

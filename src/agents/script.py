@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from src.agents.base import AgentResult, BaseAgent
+from src.content.narrator import LORENA, closing_fields
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class ScriptAgent(BaseAgent):
             "narration": "Essa história nos lembra que podemos confiar em Deus e conversar sobre isso com nossa família.",
             "source_refs": [],
             "editorial_risk": "LOW",
+            **closing_fields(),
         })
         return segments
 
@@ -91,7 +93,7 @@ class ScriptAgent(BaseAgent):
         directory = Path(script_dir)
         directory.mkdir(parents=True, exist_ok=True)
         labels = [self._reference_label(reference) for reference in references]
-        packet = {"schema_version": 1, "episode_id": episode_id, "audience": {"min_age": 6, "max_age": 10}, "narration": narration, "references": labels, "segments": segments, "target_duration_s": target_duration_s, "closing_duration_s": 4, "burn_subtitles": False}
+        packet = {"schema_version": 1, "episode_id": episode_id, "audience": {"min_age": 6, "max_age": 10}, "narration": narration, "references": labels, "segments": segments, "target_duration_s": target_duration_s, "closing_duration_s": 4, "recurring_narrator": dict(LORENA), "burn_subtitles": False}
         (directory / "narration.txt").write_text(narration, encoding="utf-8")
         packet_path = directory / "script.json"
         packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")

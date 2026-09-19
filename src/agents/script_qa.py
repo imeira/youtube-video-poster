@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import re
 import unicodedata
 
+from src.content.narrator import LORENA
+
 
 @dataclass(frozen=True)
 class ScriptQAResult:
@@ -33,8 +35,12 @@ class ScriptQAAgent:
         findings: list[str] = []
         if packet.get("audience") != {"min_age": 6, "max_age": 10}:
             findings.append("AUDIENCE_MUST_BE_6_TO_10")
-        if packet.get("closing_duration_s") not in (3, 4, 5):
-            findings.append("CLOSING_MUST_BE_3_TO_5_SECONDS")
+        closing_duration = packet.get("closing_duration_s")
+        if not isinstance(closing_duration, int) or not 3 <= closing_duration <= 10:
+            findings.append("CLOSING_MUST_BE_3_TO_10_SECONDS")
+        legacy_revoice = packet.get("legacy_published_episode_revoice") is True
+        if not legacy_revoice and packet.get("recurring_narrator") != LORENA:
+            findings.append("CANONICAL_LORENA_NARRATOR_REQUIRED")
         segments = packet.get("segments")
         if not isinstance(segments, list) or not segments:
             findings.append("SEGMENTS_REQUIRED")
@@ -42,6 +48,17 @@ class ScriptQAAgent:
         canonical = "\n\n".join(str(segment.get("narration", "")) for segment in segments)
         if packet.get("narration") != canonical:
             findings.append("NARRATION_MUST_EQUAL_APPROVED_SEGMENTS")
+        closing = segments[-1]
+        if not legacy_revoice and not (
+            closing.get("kind") == "family_reflection"
+            and closing.get("presenter") == LORENA["name"]
+            and closing.get("visual_mode") == "generated_video"
+            and isinstance(closing.get("duration_s"), int)
+            and 3 <= closing.get("duration_s") <= 10
+            and closing.get("duration_s") == packet.get("closing_duration_s")
+            and closing.get("lesson_role") == "episode_central_message"
+        ):
+            findings.append("FINAL_LORENA_VIDEO_LESSON_REQUIRED")
         for segment in segments:
             segment_id = str(segment.get("id", "UNKNOWN"))
             narration = str(segment.get("narration", ""))

@@ -7,6 +7,7 @@ from dataclasses import replace
 from src.agents.script_qa import ScriptQAAgent
 
 
+
 def words(text):
     return re.findall(r'\b\w+\b', unicodedata.normalize('NFC', text).casefold())
 
@@ -32,11 +33,17 @@ def split_script(script):
         segments.extend({**segment, 'id': f"{segment['id']}.{i+1}",
                          'parent_frame': segment['id'], 'narration': part}
                         for i, part in enumerate(parts))
+    for segment in segments:
+        for field in ('presenter', 'visual_mode', 'duration_s', 'lesson_role'):
+            segment.pop(field, None)
     result = {**script, 'segments': segments,
               'narration': '\n\n'.join(s['narration'] for s in segments)}
     if words(result['narration']) != words(script['narration']):
         raise ValueError('source word order changed')
-    qa = ScriptQAAgent().review(result)
+    qa_packet = result if result.get('recurring_narrator') else {
+        **result, 'legacy_published_episode_revoice': True,
+    }
+    qa = ScriptQAAgent().review(qa_packet)
     if not qa.approved:
         raise ValueError('script QA failed: ' + ', '.join(qa.findings))
     return result

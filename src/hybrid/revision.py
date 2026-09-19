@@ -916,6 +916,8 @@ class RevisionHarness:
             if not research.success:
                 raise ValueError("research failed")
             script = await deps.author_script(plan, research.data)
+            from src.content.narrator import bind_lorena_closing
+            script = bind_lorena_closing(script)
             if mode == "LIVE" and script.get("evidence_mode") == "TEST":
                 raise ValueError("TEST script evidence cannot enter LIVE")
             from src.hybrid.editorial import bind_research_claims, build_editorial_reports

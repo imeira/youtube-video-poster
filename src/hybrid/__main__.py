@@ -32,7 +32,7 @@ def main():
         "--closing-seconds",
         type=int,
         default=4,
-        help="Required emotional/theological closing beat (3--5; default 4)",
+        help="Required Lorena closing lesson video (3--10; default 4)",
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

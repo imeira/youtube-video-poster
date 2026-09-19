@@ -73,13 +73,28 @@ async def test_thumbnail_failure_marks_episode_failed_and_stops_finishing(tmp_pa
             {
                 "audience": {"min_age": 6, "max_age": 10},
                 "closing_duration_s": 4,
+                "recurring_narrator": {
+                    "name": "Lorena",
+                    "age": 8,
+                    "canonical_model_sheet": "assets/characters/narrator/lorena/model_sheet_v1.png",
+                    "canonical_model_sheet_sha256": "a7da7c7aee3e780efc7265834d515316a199596889f9119b795a30f0b92696e7",
+                    "canonical_voice": "assets/characters/narrator/lorena/voice_v9.mp3",
+                    "canonical_voice_sha256": "cbd1bfe7e4de31f838a1068c21c2441bd1cb7541ec2581abc7ef0b5594c10e0f",
+                    "canonical_voice_duration_s": 7.68,
+                    "canonical_voice_language": "pt-BR",
+                    "canonical_voice_scope": "closing_messages_only",
+                },
                 "narration": "Narração de teste.",
                 "segments": [
                     {
                         "id": "S001",
-                        "kind": "biblical_paraphrase",
+                        "kind": "family_reflection",
                         "narration": "Narração de teste.",
                         "source_refs": ["Gênesis 6–9"],
+                        "presenter": "Lorena",
+                        "visual_mode": "generated_video",
+                        "duration_s": 4,
+                        "lesson_role": "episode_central_message",
                     }
                 ],
             }

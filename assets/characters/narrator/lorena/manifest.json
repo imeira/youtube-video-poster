@@ -1,0 +1,47 @@
+{
+  "schema": "canonical-character/2",
+  "name": "Lorena",
+  "age": 8,
+  "status": "HUMAN_APPROVED",
+  "approved_option": "C",
+  "approval_message_exact": "APROVAR LORENA C",
+  "approved_at": "2026-09-19T12:06:31-03:00",
+  "files": {
+    "model_sheet_v1.png": "a7da7c7aee3e780efc7265834d515316a199596889f9119b795a30f0b92696e7",
+    "front_reference_v1.png": "27cd78e8f690cda57e33f98be742981ec071eaea8d497550f7ada0732949984a",
+    "face_reference_v1.png": "a57860413bd9fb45ad20f535c79d6c37233658da06a39f31eb91d4df334ef88f",
+    "voice_v9.mp3": "cbd1bfe7e4de31f838a1068c21c2441bd1cb7541ec2581abc7ef0b5594c10e0f"
+  },
+  "identity": {
+    "hair": "dark tightly curly, center part, two high space buns",
+    "glasses": "clear translucent rounded-rectangular",
+    "right_bun_accessory": "sky blue",
+    "left_bun_accessory": "pink",
+    "eye_contract": "smaller centered equal pupils; coherent binocular gaze; no strabismus",
+    "outfit": "navy and soft-gray jacket, lavender shirt, dark trousers, purple sneakers"
+  },
+  "voice": {
+    "status": "HUMAN_APPROVED",
+    "version": "V9",
+    "approval_message_exact": "APROVAR VOZ LORENA V9",
+    "approved_at": "2026-09-19T15:17:36-03:00",
+    "file": "voice_v9.mp3",
+    "sha256": "cbd1bfe7e4de31f838a1068c21c2441bd1cb7541ec2581abc7ef0b5594c10e0f",
+    "duration_seconds": 7.68,
+    "codec": "mp3",
+    "sample_rate_hz": 24000,
+    "channels": 1,
+    "language": "pt-BR",
+    "scope": "closing_messages_only",
+    "official_story_narration_unchanged": true
+  },
+  "usage": {
+    "role": "recurring closing narrator",
+    "duration_seconds": [
+      3,
+      10
+    ],
+    "lesson": "episode central message",
+    "requires_human_video_gate": true
+  }
+}
