@@ -81,8 +81,8 @@ class OfflineCoordinator:
             if frame.hero or abs(frame.start - end) > 1e-6:
                 raise ValueError("offline still timeline must be contiguous and contain no hero jobs")
             end = frame.end
-        if not 3 <= hold <= 5:
-            raise ValueError("closing hold must be 3 to 5 seconds")
+        if not 3 <= hold <= 10:
+            raise ValueError("closing hold must be 3 to 10 seconds")
         if episode.episode_id == "EP8" and (
             contract.title != "A promessa de um filho para Abraão e Sara"
             or contract.book_subtitle != "— Gênesis 15–18"

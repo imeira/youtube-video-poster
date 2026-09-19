@@ -146,12 +146,12 @@ def plan(
 
     The caller supplies the duration determined by biblical/story analysis. When
     present it must stay within the approved 3--15 minute range and reserves a
-    3--5 second final teaching/comfort beat instead of ending on an action cut.
+    3--10 second Lorena teaching/comfort video instead of ending on an action cut.
     No provider call is made here.
     """
     committed, images = money(committed), money(images)
-    if closing_seconds not in (3, 4, 5):
-        raise ValueError("closing_seconds must be 3 to 5 seconds")
+    if not 3 <= closing_seconds <= 10:
+        raise ValueError("closing_seconds must be 3 to 10 seconds")
     for name, value in {
         "essential_events": essential_events,
         "narration_words": narration_words,

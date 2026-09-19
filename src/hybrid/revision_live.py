@@ -121,6 +121,8 @@ def _script(contract):
         raise ValueError("script authority hash mismatch")
     script = read(SCRIPT)
     validate_ep8_script(script)
+    from src.content.narrator import bind_lorena_closing
+    script = bind_lorena_closing(script)
     qa = ScriptQAAgent().review(script)
     if not qa.approved or script.get("evidence_mode") != "LIVE":
         raise ValueError("script authority validation failed")
@@ -303,6 +305,8 @@ class LiveDependencies:
     async def author_script(self, plan, research):
         self.preflight(plan)
         script = DeterministicLiveScriptAuthor().author(plan, research)
+        from src.content.narrator import bind_lorena_closing
+        script = bind_lorena_closing(script)
         report = BiblicalFactVerifier().verify(script)
         if report["status"] != "PASS":
             raise ValueError("independent biblical verification blocked script")
