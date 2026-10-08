@@ -1,7 +1,7 @@
 # Memória de produção aprovada
 
-**Versão:** 2.1
-**Episódios de referência:** Episódio 1 — A Criação e Episódio 4 — Noé e a Grande Arca
+**Versão:** 3.0
+**Episódios de referência:** Episódios 1 e 4; EP11 — Jacó e Esaú fazem as pazes
 **Status:** padrão obrigatório para episódios futuros
 
 ## 1. Idioma e público
@@ -187,3 +187,39 @@ Score mínimo: 0,85 e `approved=true`. Regenerar somente cenas reprovadas e reau
 - Vídeo original: `C:/HermesStudio/episodes/EP1_CREATION_REMAKE/renders/final_approval.mp4`.
 
 O Episódio 4 demonstrou que uma narrativa mais complexa pode exigir cerca de 6 min 37 s, 64 cenas narradas e zero clipe generativo, mantendo clareza e custo sob controle. Esses números provam a duração adaptativa e o pipeline híbrido; não devem ser copiados como metas para outros episódios.
+
+## 13. Padrão reforçado pelo EP11 — identidade, cronologia e vídeo final
+
+Estas regras são obrigatórias para qualquer novo episódio que gere imagens ou vídeo.
+
+### Planejamento e presença histórica
+
+- Antes de escrever prompts, construir uma matriz por cena com: referência bíblica, evento, personagens obrigatórios, personagens proibidos, estado do ambiente e fato visualmente observável. Uma ausência narrativa é uma restrição positiva de QA, não apenas uma nota no roteiro.
+- Usar apenas nomes e estados temporais apropriados ao trecho. Se houver título editorial diferente do nome usado na passagem, registrar que ele é editorial; roteiro, prompts, storyboard e QA usam o nome canônico da passagem.
+- Todo fato verbal que dependa de imagem deve ter requisito verificável no frame e no master: por exemplo, uma peça de roupa, uma direção de luz, a posição do sol, a condição de uma mão ou a ausência de uma pessoa.
+- Não inserir motivo, morte, viagem, parentesco, reação ou presença não estabelecidos no texto. Classificar adaptação infantil separadamente de fato bíblico.
+
+### Linha canônica e geração de imagens
+
+- Criar e obter aprovação humana de uma linha canônica antes de gerar as cenas quando o episódio tiver personagens nomeados recorrentes. A linha deve diferenciar cada pessoa por rosto, idade, cabelo, barba, corpo, vestimenta, cor, véu/acessório e papel narrativo.
+- Toda cena usa um cartão de elenco positivo derivado dessa linha: descrever somente os personagens permitidos, suas características distintivas e os coadjuvantes autorizados. Não citar nos prompts nomes de personagens proibidos, nem em negações.
+- A identidade deve ser comparada entre frames adjacentes: rosto, cabelo, barba, idade, roupa, manto, acessório e atribuição de papel. Personagens com arquétipos parecidos — patriarcas idosos, mulheres veladas ou irmãos — exigem distinções reforçadas.
+- Toda geração final é imutável. Um candidato reprovado, aprovado ou entregue nunca é sobrescrito; correções criam candidato, receipt, manifesto e diretório sucessores vinculados por hash.
+- Antes de uma chamada paga, persistir autorização de operação única vinculada ao episódio, cena, rota, referências, hashes, preço atual, limite de chamadas, ledger e caminho de receipt. Toda resposta de provedor é saneada antes de ser persistida ou retornada.
+
+### QA visual e congelamento
+
+- Inspecionar individualmente, em resolução integral, todos os frames com personagem nomeado, restrição de presença, interação física, objeto narrativo ou condição temporal. Contact sheet reduzida complementa, mas não substitui, essa inspeção.
+- Para poses de contato entre duas pessoas, auditar separadamente braços, mãos, ombros e cotovelos de ambas. Reprovar membro ausente, fundido ou desconectado; oclusão natural só pode ser promovida após decisão humana explícita, registrada contra o hash exato.
+- Validar por cena: elenco obrigatório, ausência de figuras indevidas, ação, anatomia, segurança infantil, cronologia, continuidade, texto/marcas-d'água e o fato visual exigido pela narração.
+- Congelar somente um conjunto completo de revisão: manifestos individuais, linhagem dos sucessores, manifesto total, contact sheet rotulada e hashes de todos eles. Revisar o conjunto completo e obter aprovação humana no Telegram antes de animação, renderização ou I2V.
+- Uma alteração de frame, narração, storyboard, composição ou personagem invalida os dependentes. Construir um sucessor completo em ordem narrativa e repetir QA do conjunto, inclusive dos frames retidos.
+
+### Composição, Lorena e aprovação final
+
+- Derivar a duração e as fronteiras de cena dos timestamps reais da narração. Não usar distribuição uniforme nem encurtar uma cena para caber em clipe curto.
+- Para cada frame transformado ou reutilizado, revisar no master os extremos de movimento e amostras de início, meio e fim. Para clipe generativo e fala da Lorena, verificar no master mudança real de pixels, boca em estados aberto/fechado, sincronismo, ausência de ghosting, seams, freeze, blur e deformação.
+- Lorena aparece somente no encerramento, até 10 segundos, com a voz canônica `LORENA_V9`; sua fala não altera a narração oficial. A aprovação da imagem estática não substitui QA de lipsync no master.
+- Antes do gate de vídeo, executar QA fail-closed do master: `ffprobe` (1080p H.264/yuv420p, AAC 48 kHz), duração, decodificação completa, loudness, intervalos pretos, transcript/SRT, frame freezes e contact sheet de composição. Vincular hashes de roteiro, áudio, storyboard, manifesto de frames, plano de composição, master, revisão e evidências de QA.
+- Thumbnail, vídeo e publicação têm gates humanos independentes e sequenciais: primeiro thumbnail, depois vídeo, e publicação somente mediante comando explícito posterior. Enviar cada gate com anexo, hash, receipt e readback de entrega Telegram; silêncio não aprova.
+- Não versionar credenciais, `.env`, tokens, cookies, chaves, caches, saídas provisórias ou mídia pesada sem política explícita de LFS/artefatos. Receipts compartilháveis usam somente valores saneados ou `[REDACTED]`.
