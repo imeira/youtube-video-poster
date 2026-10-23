@@ -32,21 +32,20 @@ class CoreModelRouter:
     @classmethod
     def profile_d(cls) -> CoreModelRouter:
         sol_high = ModelRoute("openai-codex", "gpt-5.6-sol", "high")
-        sol_xhigh = ModelRoute("openai-codex", "gpt-5.6-sol", "xhigh")
         terra_medium = ModelRoute("openai-codex", "gpt-5.6-terra", "medium")
         luna_low = ModelRoute("openai-codex", "gpt-5.6-luna", "low")
         return cls(
             {
-                "research": sol_high,
-                "planning": sol_high,
-                "script": sol_high,
-                "biblical_review": sol_xhigh,
+                "research": terra_medium,
+                "planning": terra_medium,
+                "script": terra_medium,
+                "biblical_review": terra_medium,
                 "child_review": terra_medium,
-                "storyboard": sol_high,
-                "character_bible": sol_high,
-                "visual_strategy": sol_high,
+                "storyboard": terra_medium,
+                "character_bible": terra_medium,
+                "visual_strategy": terra_medium,
                 "coding": sol_high,
-                "architecture": sol_xhigh,
+                "architecture": sol_high,
                 "metadata": luna_low,
             }
         )
@@ -59,3 +58,8 @@ class CoreModelRouter:
 
     def provider_for(self, task: str, timeout: int = 180) -> CodexLLMProvider:
         return self.route(task).create_provider(timeout=timeout)
+
+    def escalate(self, task: str) -> ModelRoute:
+        """Explicit escalation only; routine routing never silently spends more."""
+        self.route(task)  # retain the closed task vocabulary
+        return ModelRoute("openai-codex", "gpt-5.6-sol", "high")

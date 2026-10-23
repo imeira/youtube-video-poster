@@ -74,10 +74,10 @@ def test_codex_provider_resolves_windows_cmd_wrapper(monkeypatch, tmp_path) -> N
 def test_profile_d_routes_core_and_auxiliary_tasks() -> None:
     router = CoreModelRouter.profile_d()
 
-    assert router.route("script").model == "gpt-5.6-sol"
-    assert router.route("script").reasoning_effort == "high"
-    assert router.route("storyboard").model == "gpt-5.6-sol"
-    assert router.route("storyboard").reasoning_effort == "high"
+    assert router.route("script").model == "gpt-5.6-terra"
+    assert router.route("script").reasoning_effort == "medium"
+    assert router.route("storyboard").model == "gpt-5.6-terra"
+    assert router.route("storyboard").reasoning_effort == "medium"
     assert router.route("metadata").model == "gpt-5.6-luna"
     assert router.route("metadata").reasoning_effort == "low"
 
@@ -95,10 +95,10 @@ def test_director_uses_profile_d_codex_routes() -> None:
     director = DirectorAgent(model_router=CoreModelRouter.profile_d())
 
     assert isinstance(director.script._llm, CodexLLMProvider)
-    assert director.script._llm.model == "gpt-5.6-sol"
-    assert director.script._llm.reasoning_effort == "high"
+    assert director.script._llm.model == "gpt-5.6-terra"
+    assert director.script._llm.reasoning_effort == "medium"
     assert isinstance(director.storyboard._llm, CodexLLMProvider)
-    assert director.storyboard._llm.model == "gpt-5.6-sol"
+    assert director.storyboard._llm.model == "gpt-5.6-terra"
     assert director.metadata._llm.model == "gpt-5.6-luna"
     assert director.metadata._llm.reasoning_effort == "low"
 

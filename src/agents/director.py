@@ -201,6 +201,36 @@ class DirectorAgent:
             blocked_scenes=blocked_scenes,
         )
 
+    def create_autonomous_two_gate_runner(
+        self,
+        episode_id: str,
+        workspace: Path,
+        policy_document: dict,
+        database: Path,
+        *,
+        limit: Decimal,
+        concurrency: int = 1,
+    ):
+        """Create the durable two-human-gate control plane.
+
+        This factory does not dispatch anything.  Callers must provide the
+        transactional executor jobs at start/resume, preserving the executor as
+        the only provider submission path.
+        """
+        from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+        from src.hybrid.execution import Executor
+        from src.hybrid.planner import Config
+
+        policy = AutonomousPolicy.from_dict(policy_document)
+        if policy.episode_cap_usd != Decimal(limit):
+            raise ValueError("executor limit must equal the permanent episode policy ceiling")
+        return AutonomousTwoGateRunner(
+            workspace,
+            episode_id,
+            policy,
+            Executor(database, Config(limit=Decimal(limit), concurrency=concurrency)),
+        )
+
     def activate_compiled_production(
         self,
         episode_id: str,
@@ -278,7 +308,7 @@ class DirectorAgent:
                 or set(prices) != request_ids
             ):
                 raise ValueError("every compiled LIVE job requires exact authority and fresh price")
-        dispatch_options = dict(authorizations=authorizations, prices=prices)
+        dispatch_options = {"authorizations": authorizations, "prices": prices}
         if on_completed is not None:
             dispatch_options["on_completed"] = on_completed
         receipts = await pipeline.dispatch_baselines(provider, **dispatch_options)
