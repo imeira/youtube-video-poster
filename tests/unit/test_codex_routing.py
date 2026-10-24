@@ -19,8 +19,10 @@ def test_codex_provider_builds_ephemeral_read_only_command() -> None:
     assert "--ephemeral" in command
     assert "--ignore-user-config" in command
     assert "--ignore-rules" in command
-    assert ["-s", "read-only"] == command[command.index("-s"):command.index("-s") + 2]
-    assert ["-m", "gpt-5.6-sol"] == command[command.index("-m"):command.index("-m") + 2]
+    assert ["-s", "read-only"] == command[command.index("-s") : command.index("-s") + 2]
+    assert ["-m", "gpt-5.6-sol"] == command[
+        command.index("-m") : command.index("-m") + 2
+    ]
     assert 'model_reasoning_effort="high"' in command
     assert "--json" in command
 
@@ -120,3 +122,13 @@ def test_director_defers_legacy_agent_and_model_initialization() -> None:
     assert router.tasks == []
     assert director.script is not None
     assert router.tasks == ["script"]
+
+
+def test_unclassified_constructor_and_normal_core_do_not_default_to_high_effort():
+    provider = CodexLLMProvider()
+    assert (provider.model, provider.reasoning_effort) == ("gpt-5.6-terra", "medium")
+    router = CoreModelRouter.profile_d()
+    for task in ("coding", "architecture"):
+        assert router.route(task).model == "gpt-5.6-terra"
+        assert router.route(task).reasoning_effort == "medium"
+    assert router.escalate("architecture").model == "gpt-5.6-sol"

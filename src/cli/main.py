@@ -29,6 +29,9 @@ def main():
     if sys.argv[1:2] == ["offline"]:
         from src.hybrid.offline import main as offline_main
         return offline_main(sys.argv[2:])
+    if sys.argv[1:2] == ["autonomous"]:
+        from src.hybrid.autonomous_cli import main as autonomous_main
+        return autonomous_main(sys.argv[2:])
     parser = argparse.ArgumentParser(
         description="Hybrid AI Animation Studio — produce a children's Bible YouTube video",
     )

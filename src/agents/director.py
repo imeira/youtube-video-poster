@@ -31,26 +31,89 @@ from src.agents.thumbnail import ThumbnailAgent
 from src.budget.guard import BudgetGuard, CostLedger
 from src.config.loader import StudioConfig, get_config
 from src.providers.llm.core_model_router import CoreModelRouter
+from src.providers.llm.usage import track_episode_usage
 from src.state.machine import EpisodeState, EpisodeStateStore
 from src.storage.episode_fs import EpisodeFS
 from src.telegram.approval_gate import TelegramApprovalGate, format_decision_message
 
 logger = logging.getLogger(__name__)
 
-_BIBLICAL_BOOKS = tuple(sorted({
-    "Gênesis", "Êxodo", "Levítico", "Números", "Deuteronômio", "Josué",
-    "Juízes", "Rute", "1 Samuel", "2 Samuel", "1 Reis", "2 Reis",
-    "1 Crônicas", "2 Crônicas", "Esdras", "Neemias", "Ester", "Jó",
-    "Salmos", "Salmo", "Provérbios", "Eclesiastes", "Cântico dos Cânticos",
-    "Cantares", "Isaías", "Jeremias", "Lamentações", "Ezequiel", "Daniel",
-    "Oseias", "Joel", "Amós", "Obadias", "Jonas", "Miqueias", "Naum",
-    "Habacuque", "Sofonias", "Ageu", "Zacarias", "Malaquias", "Mateus",
-    "Marcos", "Lucas", "João", "Atos", "Romanos", "1 Coríntios",
-    "2 Coríntios", "Gálatas", "Efésios", "Filipenses", "Colossenses",
-    "1 Tessalonicenses", "2 Tessalonicenses", "1 Timóteo", "2 Timóteo",
-    "Tito", "Filemom", "Hebreus", "Tiago", "1 Pedro", "2 Pedro",
-    "1 João", "2 João", "3 João", "Judas", "Apocalipse",
-}, key=len, reverse=True))
+_BIBLICAL_BOOKS = tuple(
+    sorted(
+        {
+            "Gênesis",
+            "Êxodo",
+            "Levítico",
+            "Números",
+            "Deuteronômio",
+            "Josué",
+            "Juízes",
+            "Rute",
+            "1 Samuel",
+            "2 Samuel",
+            "1 Reis",
+            "2 Reis",
+            "1 Crônicas",
+            "2 Crônicas",
+            "Esdras",
+            "Neemias",
+            "Ester",
+            "Jó",
+            "Salmos",
+            "Salmo",
+            "Provérbios",
+            "Eclesiastes",
+            "Cântico dos Cânticos",
+            "Cantares",
+            "Isaías",
+            "Jeremias",
+            "Lamentações",
+            "Ezequiel",
+            "Daniel",
+            "Oseias",
+            "Joel",
+            "Amós",
+            "Obadias",
+            "Jonas",
+            "Miqueias",
+            "Naum",
+            "Habacuque",
+            "Sofonias",
+            "Ageu",
+            "Zacarias",
+            "Malaquias",
+            "Mateus",
+            "Marcos",
+            "Lucas",
+            "João",
+            "Atos",
+            "Romanos",
+            "1 Coríntios",
+            "2 Coríntios",
+            "Gálatas",
+            "Efésios",
+            "Filipenses",
+            "Colossenses",
+            "1 Tessalonicenses",
+            "2 Tessalonicenses",
+            "1 Timóteo",
+            "2 Timóteo",
+            "Tito",
+            "Filemom",
+            "Hebreus",
+            "Tiago",
+            "1 Pedro",
+            "2 Pedro",
+            "1 João",
+            "2 João",
+            "3 João",
+            "Judas",
+            "Apocalipse",
+        },
+        key=len,
+        reverse=True,
+    )
+)
 _BIBLICAL_LOCATOR = re.compile(
     r"^\d+(?::\d+)?"
     r"(?:(?:\s*[–—-]\s*|\s+(?:e|a)\s+|,\s*)\d+(?::\d+)?)*$",
@@ -65,12 +128,15 @@ def _is_valid_biblical_reference(passage: str) -> bool:
         part = raw_part.strip()
         folded = part.casefold()
         book = next(
-            (candidate for candidate in _BIBLICAL_BOOKS
-             if folded.startswith(f"{candidate.casefold()} ")),
+            (
+                candidate
+                for candidate in _BIBLICAL_BOOKS
+                if folded.startswith(f"{candidate.casefold()} ")
+            ),
             None,
         )
         if book:
-            numbers = part[len(book):].strip()
+            numbers = part[len(book) :].strip()
             seen_book = True
         elif seen_book and part[:1].isdigit():
             numbers = part
@@ -124,7 +190,9 @@ class DirectorAgent:
         approval_gate: TelegramApprovalGate | None = None,
     ):
         self.config = config or get_config()
-        self.model_router = model_router or CoreModelRouter.profile_d()
+        self.model_router = model_router or CoreModelRouter.profile_d(
+            usage_path=self.config.episodes_dir.parent / "usage.sqlite3"
+        )
         self.approval_gate = approval_gate or TelegramApprovalGate()
         self._agents: dict[str, Any] = {}
         self._episodes: dict[str, dict] = {}  # in-memory cache
@@ -186,13 +254,21 @@ class DirectorAgent:
         fs = EpisodeFS(episode_id, self.config)
         if not fs.exists():
             raise FileNotFoundError(f"episode does not exist: {episode_id}")
-        storyboard_file = Path(storyboard_path) if storyboard_path else fs.paths.storyboard_dir / "scenes.json"
+        storyboard_file = (
+            Path(storyboard_path)
+            if storyboard_path
+            else fs.paths.storyboard_dir / "scenes.json"
+        )
         storyboard = _read_json_file(storyboard_file)
         scenes = storyboard.get("scenes", storyboard.get("frames", []))
         episode = compile_storyboard(episode_id, approved_audio, scenes)
         return OperationalPipeline(
             episode,
-            Executor(database, executor_config or Config.load(), prior_spend=Decimal(prior_spend)),
+            Executor(
+                database,
+                executor_config or Config.load(),
+                prior_spend=Decimal(prior_spend),
+            ),
             source_manifest,
             workspace=fs.paths.compiled_dir,
             endpoint=endpoint,
@@ -220,16 +296,69 @@ class DirectorAgent:
         from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
         from src.hybrid.execution import Executor
         from src.hybrid.planner import Config
+        from src.hybrid.standing_budget import StandingBudgetLedger
 
         policy = AutonomousPolicy.from_dict(policy_document)
         if policy.episode_cap_usd != Decimal(limit):
-            raise ValueError("executor limit must equal the permanent episode policy ceiling")
+            raise ValueError(
+                "executor limit must equal the permanent episode policy ceiling"
+            )
+        ledger = StandingBudgetLedger(
+            Path(database).with_name("standing-budget.sqlite3"),
+            policy_sha256=policy.digest,
+            episode_limit_usd=policy.episode_cap_usd,
+            month_limit_usd=policy.month_cap_usd,
+            experiment_limit_usd=policy.experiment_cap_usd,
+            mode="TEST",
+        )
         return AutonomousTwoGateRunner(
             workspace,
             episode_id,
             policy,
             Executor(database, Config(limit=Decimal(limit), concurrency=concurrency)),
+            ledger,
         )
+
+    def create_autonomous_compiled_test_adapter(
+        self, pipeline, workspace: Path, policy_document: dict
+    ):
+        """Attach an existing TEST compiled pipeline to the durable runner.
+
+        The compiled pipeline keeps its original Executor; creating a second
+        executor would split the idempotency and cost ledgers.  This factory is
+        intentionally unavailable to LIVE pipelines and dispatches nothing.
+        """
+        from src.hybrid.autonomous import (
+            AutonomousCompiledTestAdapter,
+            AutonomousPolicy,
+            AutonomousTwoGateRunner,
+        )
+        from src.hybrid.standing_budget import StandingBudgetLedger
+
+        if pipeline.episode.audio.mode != "TEST":
+            raise ValueError("autonomous compiled adapter is TEST-only")
+        policy = AutonomousPolicy.from_dict(policy_document)
+        executor = pipeline.run.executor
+        if executor.config.limit != policy.episode_cap_usd:
+            raise ValueError(
+                "compiled executor limit must equal the permanent episode policy ceiling"
+            )
+        ledger = StandingBudgetLedger(
+            executor.database.with_name("standing-budget.sqlite3"),
+            policy_sha256=policy.digest,
+            episode_limit_usd=policy.episode_cap_usd,
+            month_limit_usd=policy.month_cap_usd,
+            experiment_limit_usd=policy.experiment_cap_usd,
+            mode="TEST",
+        )
+        runner = AutonomousTwoGateRunner(
+            workspace,
+            pipeline.episode.episode_id,
+            policy,
+            executor,
+            ledger,
+        )
+        return AutonomousCompiledTestAdapter(runner, pipeline)
 
     def activate_compiled_production(
         self,
@@ -255,7 +384,9 @@ class DirectorAgent:
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state != EpisodeState.GENERATING_IMAGES:
-            raise ValueError("compiled production activates only from GENERATING_IMAGES")
+            raise ValueError(
+                "compiled production activates only from GENERATING_IMAGES"
+            )
         return self.create_operational_pipeline(
             episode_id,
             approved_audio=approved_audio,
@@ -270,7 +401,9 @@ class DirectorAgent:
             executor_config=executor_config,
         )
 
-    def issue_compiled_live_preflight(self, episode_id: str, pipeline, price_resolver, *, reviewer: str):
+    def issue_compiled_live_preflight(
+        self, episode_id: str, pipeline, price_resolver, *, reviewer: str
+    ):
         """Issue one short-lived, budget-bound LIVE authority per compiled baseline."""
         from src.hybrid.preflight import LivePreflightIssuer
 
@@ -291,13 +424,22 @@ class DirectorAgent:
         )
 
     async def dispatch_compiled_baselines(
-        self, episode_id: str, pipeline, provider, *, authorizations=None, prices=None, on_completed=None
+        self,
+        episode_id: str,
+        pipeline,
+        provider,
+        *,
+        authorizations=None,
+        prices=None,
+        on_completed=None,
     ) -> dict[str, Any]:
         """Dispatch compiled work once, then stop at independent visual QA."""
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state is not EpisodeState.GENERATING_IMAGES:
-            raise ValueError("compiled baseline dispatch requires GENERATING_IMAGES state")
+            raise ValueError(
+                "compiled baseline dispatch requires GENERATING_IMAGES state"
+            )
         if pipeline.episode.audio.mode == "LIVE":
             jobs = pipeline.baseline_jobs()
             request_ids = {job.request_id for job in jobs}
@@ -307,7 +449,9 @@ class DirectorAgent:
                 or set(authorizations) != request_ids
                 or set(prices) != request_ids
             ):
-                raise ValueError("every compiled LIVE job requires exact authority and fresh price")
+                raise ValueError(
+                    "every compiled LIVE job requires exact authority and fresh price"
+                )
         dispatch_options = {"authorizations": authorizations, "prices": prices}
         if on_completed is not None:
             dispatch_options["on_completed"] = on_completed
@@ -324,9 +468,15 @@ class DirectorAgent:
             note="compiled candidates await independent visual QA",
         )
         state.save(fs.paths.state_json)
-        return {"receipts": receipts, "qa_packets": qa_packets, "state": state.current_state.value}
+        return {
+            "receipts": receipts,
+            "qa_packets": qa_packets,
+            "state": state.current_state.value,
+        }
 
-    def record_compiled_visual_qa(self, episode_id: str, pipeline, decisions) -> dict[str, Any]:
+    def record_compiled_visual_qa(
+        self, episode_id: str, pipeline, decisions
+    ) -> dict[str, Any]:
         """Persist independent hash-bound visual verdicts and open animation only on PASS."""
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
@@ -336,27 +486,44 @@ class DirectorAgent:
         by_scene = {}
         for decision in decisions:
             if not isinstance(decision, dict) or set(decision) != {
-                "scene_id", "result_sha256", "approved", "reviewer"
+                "scene_id",
+                "result_sha256",
+                "approved",
+                "reviewer",
             }:
                 raise ValueError("visual QA decision schema is invalid")
             scene_id = decision["scene_id"]
             if scene_id in by_scene:
                 raise ValueError("visual QA decision duplicated a scene")
-            if not isinstance(decision["approved"], bool) or not isinstance(decision["reviewer"], str) or not decision["reviewer"].strip():
-                raise ValueError("visual QA decision requires boolean verdict and reviewer")
+            if (
+                not isinstance(decision["approved"], bool)
+                or not isinstance(decision["reviewer"], str)
+                or not decision["reviewer"].strip()
+            ):
+                raise ValueError(
+                    "visual QA decision requires boolean verdict and reviewer"
+                )
             packet = packets.get(scene_id)
             if packet is None or packet["result_sha256"] != decision["result_sha256"]:
                 raise ValueError("visual QA decision does not bind a current candidate")
             by_scene[scene_id] = decision
         if set(by_scene) != set(packets):
-            raise ValueError("independent visual QA must decide every current candidate")
+            raise ValueError(
+                "independent visual QA must decide every current candidate"
+            )
         approved = {}
         for scene_id, decision in by_scene.items():
             asset = pipeline.record_visual_qa(
-                scene_id, decision["result_sha256"], decision["approved"], decision["reviewer"]
+                scene_id,
+                decision["result_sha256"],
+                decision["approved"],
+                decision["reviewer"],
             )
             approved[scene_id] = str(asset.path) if asset else ""
-        if all(decision["approved"] for decision in by_scene.values()) and pipeline.render_ready():
+        if (
+            all(decision["approved"] for decision in by_scene.values())
+            and pipeline.render_ready()
+        ):
             state.transition_to(
                 EpisodeState.PLANNING_ANIMATION,
                 agent="CompiledProduction",
@@ -365,17 +532,29 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
         return {"approved": approved, "state": state.current_state.value}
 
-    def render_compiled_video(self, episode_id: str, pipeline, renderer, *, hold: int = 4) -> dict[str, Any]:
+    def render_compiled_video(
+        self, episode_id: str, pipeline, renderer, *, hold: int = 4
+    ) -> dict[str, Any]:
         """Compose a subtitle-free local delivery master from the approved manifest only."""
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
         receipt_path = fs.paths.qa_dir / "compiled_render_receipt.json"
-        if state.current_state in {EpisodeState.ASSEMBLING, EpisodeState.LOCAL_ANIMATION, EpisodeState.FINAL_QA} and fs.paths.final_video.is_file() and receipt_path.is_file():
+        if (
+            state.current_state
+            in {
+                EpisodeState.ASSEMBLING,
+                EpisodeState.LOCAL_ANIMATION,
+                EpisodeState.FINAL_QA,
+            }
+            and fs.paths.final_video.is_file()
+            and receipt_path.is_file()
+        ):
             receipt = _read_json_file(receipt_path)
             if receipt.get("hold_seconds") not in (3, 4, 5):
                 raise ValueError("compiled render recovery receipt is invalid")
             if receipt.get("output_sha256"):
                 from src.hybrid.artifacts import sha256
+
                 if receipt["output_sha256"] != sha256(fs.paths.final_video):
                     raise ValueError("compiled render recovery hash mismatch")
             if state.current_state is EpisodeState.LOCAL_ANIMATION:
@@ -390,9 +569,17 @@ class DirectorAgent:
             raise ValueError("compiled render closing hold must be 3 to 5 seconds")
         manifest = pipeline.approved_manifest()
         scenes = pipeline.render_scenes(manifest)
-        state.transition_to(EpisodeState.LOCAL_ANIMATION, agent="CompiledProduction", note="local render started")
+        state.transition_to(
+            EpisodeState.LOCAL_ANIMATION,
+            agent="CompiledProduction",
+            note="local render started",
+        )
         state.save(fs.paths.state_json)
-        state.transition_to(EpisodeState.ASSEMBLING, agent="CompiledProduction", note="assembling compiled master")
+        state.transition_to(
+            EpisodeState.ASSEMBLING,
+            agent="CompiledProduction",
+            note="assembling compiled master",
+        )
         state.save(fs.paths.state_json)
         receipt = renderer.render_compiled(
             pipeline,
@@ -408,11 +595,17 @@ class DirectorAgent:
         if not fs.paths.final_video.is_file():
             raise ValueError("compiled renderer did not create final video")
         _write_json_file(fs.paths.qa_dir / "compiled_render_receipt.json", receipt)
-        state.transition_to(EpisodeState.FINAL_QA, agent="CompiledProduction", note="compiled master ready for final QA")
+        state.transition_to(
+            EpisodeState.FINAL_QA,
+            agent="CompiledProduction",
+            note="compiled master ready for final QA",
+        )
         state.save(fs.paths.state_json)
         return receipt
 
-    async def finalize_compiled_delivery(self, episode_id: str, pipeline, renderer, *, hold: int = 4) -> dict[str, Any]:
+    async def finalize_compiled_delivery(
+        self, episode_id: str, pipeline, renderer, *, hold: int = 4
+    ) -> dict[str, Any]:
         """Render a compiled master and materialize all evidence required by final QA."""
         receipt = self.render_compiled_video(episode_id, pipeline, renderer, hold=hold)
         sidecars = await self.prepare_delivery_sidecars(episode_id, pipeline)
@@ -429,15 +622,27 @@ class DirectorAgent:
         hold: int = 4,
     ) -> dict[str, Any]:
         """Run the compiled render, evidence and independent final-media gates in order."""
-        delivery = await self.finalize_compiled_delivery(episode_id, pipeline, renderer, hold=hold)
+        delivery = await self.finalize_compiled_delivery(
+            episode_id, pipeline, renderer, hold=hold
+        )
         evidence = self.record_production_evidence_qa(
             episode_id, published_script_hashes=published_script_hashes
         )
         if evidence.get("approved") is not True:
-            return {"delivery": delivery, "production_evidence_qa": evidence, "post_production_narrative_qa": None, "final_render_qa": None}
+            return {
+                "delivery": delivery,
+                "production_evidence_qa": evidence,
+                "post_production_narrative_qa": None,
+                "final_render_qa": None,
+            }
         narrative = self.record_post_production_narrative_qa(episode_id)
         if narrative.get("approved") is not True:
-            return {"delivery": delivery, "production_evidence_qa": evidence, "post_production_narrative_qa": narrative, "final_render_qa": None}
+            return {
+                "delivery": delivery,
+                "production_evidence_qa": evidence,
+                "post_production_narrative_qa": narrative,
+                "final_render_qa": None,
+            }
         fs = EpisodeFS(episode_id, self.config)
         final_qa = await self.record_final_render_qa(
             episode_id,
@@ -465,11 +670,14 @@ class DirectorAgent:
         §5: User provides only theme, language, channel.
         §98: Full pipeline from REQUEST_RECEIVED to PUBLISHED.
         """
-        self.thumbnail_copy(theme)  # Fail before filesystem/model work if the passage is missing.
+        self.thumbnail_copy(
+            theme
+        )  # Fail before filesystem/model work if the passage is missing.
 
         # Generate episode ID if not provided
         if not episode_id:
             import time
+
             episode_id = f"EP{int(time.time())}"
 
         # Set up episode filesystem (§15)
@@ -492,7 +700,11 @@ class DirectorAgent:
 
         # Run pre-production pipeline (up to WAITING_PLAN_APPROVAL)
         result = await self._run_preproduction(
-            episode_id, theme, fs, state, guard,
+            episode_id,
+            theme,
+            fs,
+            state,
+            guard,
             require_telegram_approval=require_telegram_approval,
         )
 
@@ -504,6 +716,7 @@ class DirectorAgent:
             "budget_remaining": ledger.remaining,
         }
 
+    @track_episode_usage
     async def _run_preproduction(
         self,
         episode_id: str,
@@ -532,7 +745,11 @@ class DirectorAgent:
         )
 
         if not research_result.success:
-            state.transition_to(EpisodeState.FAILED, agent=self.research.name, note=research_result.error)
+            state.transition_to(
+                EpisodeState.FAILED,
+                agent=self.research.name,
+                note=research_result.error,
+            )
             state.save(fs.paths.state_json)
             return {"error": research_result.error}
 
@@ -561,7 +778,11 @@ class DirectorAgent:
         plan["budget_check"] = budget_check
 
         # Transition to WAITING_PLAN_APPROVAL (§95)
-        state.transition_to(EpisodeState.WAITING_PLAN_APPROVAL, agent=self.name, note="Pre-production plan ready")
+        state.transition_to(
+            EpisodeState.WAITING_PLAN_APPROVAL,
+            agent=self.name,
+            note="Pre-production plan ready",
+        )
         state.save(fs.paths.state_json)
 
         # Save costs
@@ -576,21 +797,24 @@ class DirectorAgent:
 
         if not budget_check["within_budget"]:
             options = {
-                alt["option"]: f"{alt['title']} — {alt['description']} (~${alt['estimated_cost']:.2f})"
+                alt[
+                    "option"
+                ]: f"{alt['title']} — {alt['description']} (~${alt['estimated_cost']:.2f})"
                 for alt in budget_check["alternatives"]
             }
             message = format_decision_message(
                 episode_title=theme,
                 stage="Pré-produção — orçamento",
                 situation=f"Custo máximo estimado (${duration_plan.cost_max_usd:.2f}) excede "
-                          f"o limite configurado (${self.config.budget.hard_limit_usd:.2f}).",
+                f"o limite configurado (${self.config.budget.hard_limit_usd:.2f}).",
                 analysis=duration_plan.justification,
                 options=options,
                 recommendation=f"Opção {next(iter(options))} recomendada.",
             )
             if require_telegram_approval:
                 approval = await self.approval_gate.request_approval(
-                    message, valid_responses=list(options.keys()) + ["CANCELAR"],
+                    message,
+                    valid_responses=list(options.keys()) + ["CANCELAR"],
                 )
                 plan["budget_approval"] = {
                     "approved": approval.approved,
@@ -598,8 +822,11 @@ class DirectorAgent:
                     "timed_out": approval.timed_out,
                 }
                 if not approval.approved:
-                    state.transition_to(EpisodeState.PAUSED, agent=self.name,
-                                         note=f"Budget approval not granted: {approval.reason}")
+                    state.transition_to(
+                        EpisodeState.PAUSED,
+                        agent=self.name,
+                        note=f"Budget approval not granted: {approval.reason}",
+                    )
                     state.save(fs.paths.state_json)
                     await asyncio.to_thread(_write_json_file, fs.paths.plan_json, plan)
                     return plan
@@ -608,12 +835,13 @@ class DirectorAgent:
         elif require_telegram_approval:
             # Even within budget, send the plan for visibility (§20) but
             # don't block unless explicitly configured to require sign-off.
-            self.approval_gate.send_message(f"📋 Plano de produção pronto:\n\n{report_text}")
+            self.approval_gate.send_message(
+                f"📋 Plano de produção pronto:\n\n{report_text}"
+            )
 
         await asyncio.to_thread(_write_json_file, fs.paths.plan_json, plan)
 
         return plan
-
 
     async def continue_after_approval(
         self,
@@ -637,7 +865,10 @@ class DirectorAgent:
                 budget_approval.get("approved") is True
                 and budget_approval.get("response") == "D"
             )
-            if not budget_check.get("within_budget", False) and not explicit_over_budget_approval:
+            if (
+                not budget_check.get("within_budget", False)
+                and not explicit_over_budget_approval
+            ):
                 state.transition_to(
                     EpisodeState.WAITING_BUDGET_APPROVAL,
                     agent=self.name,
@@ -650,11 +881,16 @@ class DirectorAgent:
                     "alternatives": budget_check.get("alternatives", []),
                 }
             from src.approval.receipts import require_plan_approval
+
             require_plan_approval(fs.paths.plan_json)
             return await self._run_production(episode_id, fs, state)
         elif approval_type == "budget":
             # Budget override approved — continue cloud generation
-            state.transition_to(EpisodeState.CLOUD_VIDEO_GENERATION, agent=self.name, note="budget approved")
+            state.transition_to(
+                EpisodeState.CLOUD_VIDEO_GENERATION,
+                agent=self.name,
+                note="budget approved",
+            )
             state.save(fs.paths.state_json)
             return {"status": "budget approved", "state": state.current_state.value}
         elif approval_type == "final":
@@ -696,7 +932,10 @@ class DirectorAgent:
         )
 
     def record_production_evidence_qa(
-        self, episode_id: str, *, published_script_hashes: set[str] | frozenset[str] = frozenset()
+        self,
+        episode_id: str,
+        *,
+        published_script_hashes: set[str] | frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         """Persist independent originality, caption, source and manifest evidence before final QA."""
         from src.qa.production_evidence import ProductionEvidenceQA
@@ -706,16 +945,23 @@ class DirectorAgent:
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state is not EpisodeState.FINAL_QA:
             raise ValueError("production evidence QA requires FINAL_QA state")
-        inventory = PublishedInventory.scan(self.config.episodes_dir, exclude_episode_id=episode_id)
+        inventory = PublishedInventory.scan(
+            self.config.episodes_dir, exclude_episode_id=episode_id
+        )
         result = ProductionEvidenceQA().review(
             script_path=fs.paths.script_dir / "script.json",
             manifest_path=fs.paths.compiled_dir / "manifest.json",
             captions_path=fs.paths.captions_vtt,
             metadata_path=fs.paths.metadata_dir / "metadata.json",
-            published_script_hashes=set(published_script_hashes) | inventory.script_hashes,
+            published_script_hashes=set(published_script_hashes)
+            | inventory.script_hashes,
             published_artifact_hashes=inventory.artifact_hashes,
         )
-        report = {"approved": result.approved, "findings": list(result.findings), "report": result.report}
+        report = {
+            "approved": result.approved,
+            "findings": list(result.findings),
+            "report": result.report,
+        }
         _write_json_file(fs.paths.qa_dir / "production_evidence_qa.json", report)
         return report
 
@@ -732,11 +978,17 @@ class DirectorAgent:
             captions_path=fs.paths.captions_vtt,
             metadata_path=fs.paths.metadata_dir / "metadata.json",
         )
-        report = {"approved": result.approved, "findings": list(result.findings), "report": result.report}
+        report = {
+            "approved": result.approved,
+            "findings": list(result.findings),
+            "report": result.report,
+        }
         _write_json_file(fs.paths.qa_dir / "post_production_narrative_qa.json", report)
         return report
 
-    async def prepare_delivery_sidecars(self, episode_id: str, pipeline) -> dict[str, Any]:
+    async def prepare_delivery_sidecars(
+        self, episode_id: str, pipeline
+    ) -> dict[str, Any]:
         """Create required sidecar captions, thumbnail and metadata from frozen compiled media."""
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
@@ -748,13 +1000,20 @@ class DirectorAgent:
         storyboard = _read_json_file(fs.paths.storyboard_dir / "scenes.json")
         scenes = storyboard.get("scenes")
         narration = script.get("narration")
-        if not isinstance(scenes, list) or not scenes or not isinstance(narration, str) or not narration.strip():
-            raise ValueError("compiled sidecars require persisted narration and storyboard")
+        if (
+            not isinstance(scenes, list)
+            or not scenes
+            or not isinstance(narration, str)
+            or not narration.strip()
+        ):
+            raise ValueError(
+                "compiled sidecars require persisted narration and storyboard"
+            )
         manifest = pipeline.approved_manifest()
         frames = tuple(pipeline.episode.frames)
-        if len(frames) != len(manifest.assets) or [scene.get("scene_id") for scene in scenes] != [
-            frame.scene_id for frame in frames
-        ]:
+        if len(frames) != len(manifest.assets) or [
+            scene.get("scene_id") for scene in scenes
+        ] != [frame.scene_id for frame in frames]:
             raise ValueError("sidecars require the active compiled scene order")
         images = []
         for frame, asset in zip(frames, manifest.assets, strict=True):
@@ -762,7 +1021,11 @@ class DirectorAgent:
                 raise ValueError("compiled thumbnail asset is missing")
             images.append({"scene_id": frame.scene_id, "image_path": str(asset.path)})
         timestamps = [
-            {"start": scene.get("start"), "end": scene.get("end"), "text": scene.get("narration", "")}
+            {
+                "start": scene.get("start"),
+                "end": scene.get("end"),
+                "text": scene.get("narration", ""),
+            }
             for scene in scenes
         ]
         if any(
@@ -782,7 +1045,9 @@ class DirectorAgent:
         )
         if not captions.success or not fs.paths.captions_vtt.is_file():
             raise RuntimeError("caption sidecar generation failed")
-        headline, subtitle, book_subtitle = self.thumbnail_copy(str(request.get("theme", "")))
+        headline, subtitle, book_subtitle = self.thumbnail_copy(
+            str(request.get("theme", ""))
+        )
         thumbnail = await self.thumbnail.run(
             episode_id=episode_id,
             images=images,
@@ -792,7 +1057,11 @@ class DirectorAgent:
             book_subtitle=book_subtitle,
             thumbnails_dir=str(fs.paths.thumbnails_dir),
         )
-        thumbnail_path = Path(thumbnail.data.get("thumbnail_path", "")) if thumbnail.success else None
+        thumbnail_path = (
+            Path(thumbnail.data.get("thumbnail_path", ""))
+            if thumbnail.success
+            else None
+        )
         if thumbnail_path is None or not thumbnail_path.is_file():
             raise RuntimeError("thumbnail generation failed")
         metadata = await self.metadata.run(
@@ -805,7 +1074,10 @@ class DirectorAgent:
             captions_files=captions.data.get("files", {}),
             thumbnail_path=str(thumbnail_path),
         )
-        if not metadata.success or not (fs.paths.metadata_dir / "metadata.json").is_file():
+        if (
+            not metadata.success
+            or not (fs.paths.metadata_dir / "metadata.json").is_file()
+        ):
             raise RuntimeError("metadata generation failed")
         return {
             "captions": captions.data["files"],
@@ -828,7 +1100,10 @@ class DirectorAgent:
         fs = EpisodeFS(episode_id, self.config)
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state is not EpisodeState.WAITING_THUMBNAIL_APPROVAL:
-            raise ValueError("approval delivery requires WAITING_THUMBNAIL_APPROVAL state")
+            raise ValueError(
+                "approval delivery requires WAITING_THUMBNAIL_APPROVAL state"
+            )
+
         def delivery_identity(kind, path):
             receipt_path = fs.paths.qa_dir / "delivery" / f"{kind}.json"
             if receipt_path.is_file():
@@ -838,6 +1113,7 @@ class DirectorAgent:
                     raise ValueError("delivery path changed")
                 return receipt
             return ApprovalReceipt.approve(kind, path, "delivery-preflight")
+
         thumbnail = delivery_identity("thumbnail", thumbnail_path)
         video = delivery_identity("video", fs.paths.final_video)
         return await DeliveryController(messenger).deliver_for_approval(
@@ -867,23 +1143,33 @@ class DirectorAgent:
         try:
             evidence = _read_json_file(evidence_path)
         except (OSError, ValueError, json.JSONDecodeError) as error:
-            raise ValueError("passing production evidence QA is required before final render QA") from error
+            raise ValueError(
+                "passing production evidence QA is required before final render QA"
+            ) from error
         if evidence.get("approved") is not True:
-            raise ValueError("passing production evidence QA is required before final render QA")
+            raise ValueError(
+                "passing production evidence QA is required before final render QA"
+            )
         narrative_path = fs.paths.qa_dir / "post_production_narrative_qa.json"
         try:
             narrative = _read_json_file(narrative_path)
         except (OSError, ValueError, json.JSONDecodeError) as error:
-            raise ValueError("passing post-production narrative QA is required before final render QA") from error
+            raise ValueError(
+                "passing post-production narrative QA is required before final render QA"
+            ) from error
         if narrative.get("approved") is not True:
-            raise ValueError("passing post-production narrative QA is required before final render QA")
+            raise ValueError(
+                "passing post-production narrative QA is required before final render QA"
+            )
         result = (checker or FinalRenderQA()).review(video_path, render_receipt)
         report = {
             "approved": result.approved,
             "findings": list(result.findings),
             "report": result.report,
         }
-        await asyncio.to_thread(_write_json_file, fs.paths.qa_dir / "final_render_qa.json", report)
+        await asyncio.to_thread(
+            _write_json_file, fs.paths.qa_dir / "final_render_qa.json", report
+        )
         if result.approved:
             state.transition_to(
                 EpisodeState.WAITING_THUMBNAIL_APPROVAL,
@@ -920,7 +1206,9 @@ class DirectorAgent:
             raise ValueError("artifact_kind must be thumbnail or video")
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state is not expected_state:
-            raise ValueError(f"{artifact_kind} approval requires {expected_state.value} state")
+            raise ValueError(
+                f"{artifact_kind} approval requires {expected_state.value} state"
+            )
         receipt = ApprovalController().confirm_delivery(
             episode_id=episode_id,
             artifact_kind=artifact_kind,
@@ -931,11 +1219,17 @@ class DirectorAgent:
             delivery_receipt_path=delivery_receipt_path,
             approval_receipt_path=fs.paths.qa_dir / f"approval-{artifact_kind}.json",
         )
-        state.transition_to(next_state, agent="ApprovalController", note=f"{artifact_kind} delivery approved")
+        state.transition_to(
+            next_state,
+            agent="ApprovalController",
+            note=f"{artifact_kind} delivery approved",
+        )
         state.save(fs.paths.state_json)
         return receipt
 
-    def reject_delivered_artifact(self, episode_id: str, *, artifact_id: str, reason: str) -> dict[str, Any]:
+    def reject_delivered_artifact(
+        self, episode_id: str, *, artifact_id: str, reason: str
+    ) -> dict[str, Any]:
         """Supersede rejected approval media and every dependent artifact before rebuilding."""
         from src.pipeline.revision import RevisionRegistry
 
@@ -975,6 +1269,7 @@ class DirectorAgent:
         )
         return VisualStrategyEngine(engine_config, local_provider, cloud_provider)
 
+    @track_episode_usage
     async def _run_production(
         self,
         episode_id: str,
@@ -998,7 +1293,9 @@ class DirectorAgent:
         script_result = await self.script.run(
             episode_id=episode_id,
             research_data=research_data,
-            target_duration_s=plan.get("duration_plan", {}).get("recommended_duration_s", 180),
+            target_duration_s=plan.get("duration_plan", {}).get(
+                "recommended_duration_s", 180
+            ),
             script_dir=str(fs.paths.script_dir),
         )
 
@@ -1015,14 +1312,27 @@ class DirectorAgent:
         state.save(fs.paths.state_json)
         packet_path = Path(script_result.data.get("script_packet_path", ""))
         if not packet_path.is_file():
-            state.transition_to(EpisodeState.FAILED, agent="ScriptQA", note="script packet missing")
+            state.transition_to(
+                EpisodeState.FAILED, agent="ScriptQA", note="script packet missing"
+            )
             state.save(fs.paths.state_json)
             return {"error": "script packet missing"}
-        qa_result = ScriptQAAgent().review(await asyncio.to_thread(_read_json_file, packet_path))
-        qa_record = {"approved": qa_result.approved, "findings": list(qa_result.findings)}
-        await asyncio.to_thread(_write_json_file, fs.paths.script_dir / "script_qa.json", qa_record)
+        qa_result = ScriptQAAgent().review(
+            await asyncio.to_thread(_read_json_file, packet_path)
+        )
+        qa_record = {
+            "approved": qa_result.approved,
+            "findings": list(qa_result.findings),
+        }
+        await asyncio.to_thread(
+            _write_json_file, fs.paths.script_dir / "script_qa.json", qa_record
+        )
         if not qa_result.approved:
-            state.transition_to(EpisodeState.FAILED, agent="ScriptQA", note="; ".join(qa_result.findings))
+            state.transition_to(
+                EpisodeState.FAILED,
+                agent="ScriptQA",
+                note="; ".join(qa_result.findings),
+            )
             state.save(fs.paths.state_json)
             return {"error": "script QA failed", "findings": list(qa_result.findings)}
 
@@ -1058,7 +1368,11 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
             return {"error": storyboard_result.error}
 
-        state.transition_to(EpisodeState.GENERATING_IMAGES, agent=self.name, note="production ready for image gen")
+        state.transition_to(
+            EpisodeState.GENERATING_IMAGES,
+            agent=self.name,
+            note="production ready for image gen",
+        )
         state.save(fs.paths.state_json)
 
         # The Director stops at the compiled hand-off. A caller must provide the
@@ -1075,7 +1389,12 @@ class DirectorAgent:
             "compiled_activation": {
                 "storyboard": str(fs.paths.storyboard_dir / "scenes.json"),
                 "audio": audio_result.data["audio_path"],
-                "requires": ["approved_audio", "source_manifest", "executor", "provider"],
+                "requires": [
+                    "approved_audio",
+                    "source_manifest",
+                    "executor",
+                    "provider",
+                ],
             },
         }
 
@@ -1116,8 +1435,10 @@ class DirectorAgent:
             scene["visual_strategy_reason"] = strategy.reason
 
         gen_summary = strategy_engine.get_usage_summary()
-        logger.info(f"Visual strategy: {gen_summary['generative_clips_used']} generative clips, "
-                     f"{gen_summary['generative_seconds_used']}s of {gen_summary['max_seconds']}s max")
+        logger.info(
+            f"Visual strategy: {gen_summary['generative_clips_used']} generative clips, "
+            f"{gen_summary['generative_seconds_used']}s of {gen_summary['max_seconds']}s max"
+        )
 
         # Step 12: Animate locally (§49-52, §67: local animation is PRIMARY)
         state.transition_to(EpisodeState.LOCAL_ANIMATION, agent=self.animation.name)
@@ -1165,7 +1486,9 @@ class DirectorAgent:
             narration=narration,
             subtitles_dir=str(fs.paths.subtitles_dir),
         )
-        captions_files = captions_result.data.get("files", {}) if captions_result.success else {}
+        captions_files = (
+            captions_result.data.get("files", {}) if captions_result.success else {}
+        )
 
         # Thumbnail (§91)
         headline, subtitle, book_subtitle = self.thumbnail_copy(theme_str)
@@ -1202,11 +1525,17 @@ class DirectorAgent:
         metadata = meta_result.data.get("metadata", {}) if meta_result.success else {}
 
         # Step 13: Final QA (§97)
-        state.transition_to(EpisodeState.FINAL_QA, agent=self.name, note="video assembled")
+        state.transition_to(
+            EpisodeState.FINAL_QA, agent=self.name, note="video assembled"
+        )
         state.save(fs.paths.state_json)
 
         # Transition to WAITING_FINAL_APPROVAL
-        state.transition_to(EpisodeState.WAITING_FINAL_APPROVAL, agent=self.name, note="ready for approval")
+        state.transition_to(
+            EpisodeState.WAITING_FINAL_APPROVAL,
+            agent=self.name,
+            note="ready for approval",
+        )
         state.save(fs.paths.state_json)
 
         return {
@@ -1247,7 +1576,9 @@ class DirectorAgent:
 
     def cleanup_orphans(self) -> list[str]:
         """Legacy pod cleanup is disabled; LIVE recovery owns remote operations."""
-        logger.info("Legacy RunPod cleanup disabled; use transactional request recovery")
+        logger.info(
+            "Legacy RunPod cleanup disabled; use transactional request recovery"
+        )
         return []
 
     @property

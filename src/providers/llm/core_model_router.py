@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.providers.llm.codex_provider import CodexLLMProvider
+from src.providers.llm.usage import UsageStore
 
 
 @dataclass(frozen=True)
@@ -26,12 +27,12 @@ class ModelRoute:
 class CoreModelRouter:
     """Route tasks by capability and risk instead of a single global model."""
 
-    def __init__(self, routes: dict[str, ModelRoute]) -> None:
+    def __init__(self, routes: dict[str, ModelRoute], usage_path=None) -> None:
         self._routes = dict(routes)
+        self.usage_path = usage_path
 
     @classmethod
-    def profile_d(cls) -> CoreModelRouter:
-        sol_high = ModelRoute("openai-codex", "gpt-5.6-sol", "high")
+    def profile_d(cls, usage_path=None) -> CoreModelRouter:
         terra_medium = ModelRoute("openai-codex", "gpt-5.6-terra", "medium")
         luna_low = ModelRoute("openai-codex", "gpt-5.6-luna", "low")
         return cls(
@@ -44,10 +45,11 @@ class CoreModelRouter:
                 "storyboard": terra_medium,
                 "character_bible": terra_medium,
                 "visual_strategy": terra_medium,
-                "coding": sol_high,
-                "architecture": sol_high,
+                "coding": terra_medium,
+                "architecture": terra_medium,
                 "metadata": luna_low,
-            }
+            },
+            usage_path=usage_path,
         )
 
     def route(self, task: str) -> ModelRoute:
@@ -57,7 +59,11 @@ class CoreModelRouter:
             raise ValueError(f"Unknown model-routing task: {task}") from None
 
     def provider_for(self, task: str, timeout: int = 180) -> CodexLLMProvider:
-        return self.route(task).create_provider(timeout=timeout)
+        provider = self.route(task).create_provider(timeout=timeout)
+        provider.task = task
+        if self.usage_path is not None:
+            provider.usage_store = UsageStore(self.usage_path)
+        return provider
 
     def escalate(self, task: str) -> ModelRoute:
         """Explicit escalation only; routine routing never silently spends more."""

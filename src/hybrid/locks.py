@@ -3,10 +3,39 @@
 import asyncio
 import errno
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Treat Windows reparse points and POSIX symlinks as unsafe indirection."""
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    attributes = getattr(status, "st_file_attributes", 0)
+    return path.is_symlink() or bool(attributes & 0x400)
+
+
+def reject_reparse_path(path: Path) -> Path:
+    """Reject a lexical path or existing ancestor before it is resolved or read."""
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    for candidate in (lexical, *lexical.parents):
+        if _is_reparse_point(candidate):
+            raise ValueError("local input rejects symlink or reparse-point paths")
+    return lexical
 
 
 def try_lock(path):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    if os.name == "nt":
+        path = os.path.abspath(path)
+        if not path.startswith("\\\\?\\"):
+            path = (
+                ("\\\\?\\UNC\\" + path[2:])
+                if path.startswith("\\\\")
+                else ("\\\\?\\" + path)
+            )
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         if os.fstat(fd).st_size == 0:
@@ -26,6 +55,23 @@ def try_lock(path):
         if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
             raise
         return None
+
+
+@contextmanager
+def file_lock(path):
+    """Acquire one crash-released interprocess lock without re-entering it."""
+    fd = None
+    try:
+        while fd is None:
+            fd = try_lock(path)
+            if fd is None:
+                import time
+
+                time.sleep(0.02)
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 @asynccontextmanager
