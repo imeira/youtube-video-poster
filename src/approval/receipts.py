@@ -60,13 +60,28 @@ class ApprovalReceipt:
     artifact_sha256: str
     approver: str
     approved_at: str
+    inbound_receipt: dict[str, object] | None = None
 
     @classmethod
-    def approve(cls, artifact_kind: str, artifact_path: Path | str, approver: str) -> ApprovalReceipt:
+    def approve(
+        cls,
+        artifact_kind: str,
+        artifact_path: Path | str,
+        approver: str,
+        *,
+        inbound_receipt: dict[str, object] | None = None,
+    ) -> ApprovalReceipt:
         path = Path(artifact_path)
         if artifact_kind not in {"thumbnail", "video"} or not path.is_file() or not approver.strip():
             raise ValueError("A real video/thumbnail file and approver are required")
-        return cls(artifact_kind, str(path.resolve()), _sha256(path), approver, datetime.now(UTC).isoformat())
+        return cls(
+            artifact_kind,
+            str(path.resolve()),
+            _sha256(path),
+            approver,
+            datetime.now(UTC).isoformat(),
+            inbound_receipt,
+        )
 
     def verify(self) -> None:
         path = Path(self.artifact_path)
@@ -92,8 +107,9 @@ def save_approval_receipt(path: Path | str, receipt: ApprovalReceipt) -> Approva
 def load_approval_receipt(path: Path | str) -> ApprovalReceipt:
     """Load only the closed schema used for a durable human artifact approval."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    expected = {"artifact_kind", "artifact_path", "artifact_sha256", "approver", "approved_at"}
-    if set(data) != expected:
+    legacy = {"artifact_kind", "artifact_path", "artifact_sha256", "approver", "approved_at"}
+    expected = legacy | {"inbound_receipt"}
+    if set(data) != legacy and set(data) != expected:
         raise PublicationAuthorizationError("approval receipt schema mismatch")
     try:
         return ApprovalReceipt(**data)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -10,7 +11,9 @@ import pytest
 
 from src.agents.base import AgentResult
 from src.agents.director import DirectorAgent
+from src.approval.inbound import AuthenticatedApprovalReply
 from src.approval.receipts import ApprovalReceipt, save_approval_receipt
+from src.config.loader import get_config
 from src.pipeline.revision import RevisionRegistry
 from src.providers.base import PublishResult
 from src.qa.final_render import FinalRenderQAResult
@@ -18,9 +21,36 @@ from src.state.machine import EpisodeState, EpisodeStateStore
 from src.storage.episode_fs import EpisodeFS
 
 
+def delivery_director() -> DirectorAgent:
+    class TestInboundSource:
+        def _reply(self, chat_id, message_id):
+            return AuthenticatedApprovalReply(
+                transport="TEST", chat_id=chat_id, sender_id="trusted-user",
+                message_id=message_id + 100, reply_to_message_id=message_id,
+                text="APROVAR THUMBNAIL EP8",
+            )
+
+        def claim_verified_reply(self, *, chat_id, message_id):
+            return self._reply(chat_id, message_id)
+
+        def recover_verified_reply(self, *, chat_id, message_id):
+            return self._reply(chat_id, message_id)
+
+        def revalidate_reply(self, document):
+            return None
+
+    return DirectorAgent(
+        config=replace(
+            get_config(), approval_delivery_chat_id="test-chat",
+            approval_delivery_trusted_sender_ids=frozenset({"trusted-user"}),
+        ),
+        inbound_approval_source=TestInboundSource(),
+    )
+
+
 def test_compiled_render_recovery_returns_existing_receipt_without_rerender(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
@@ -33,7 +63,7 @@ def test_compiled_render_recovery_returns_existing_receipt_without_rerender(tmp_
 @pytest.mark.asyncio
 async def test_final_approval_waits_for_separate_publication_command(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     state = EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.WAITING_FINAL_APPROVAL)
@@ -56,7 +86,7 @@ class Publisher:
 @pytest.mark.asyncio
 async def test_director_uses_explicit_publication_command_with_persisted_approvals(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.WAITING_FINAL_APPROVAL).save(fs.paths.state_json)
@@ -91,7 +121,7 @@ async def test_director_enters_thumbnail_approval_only_after_independent_final_r
             return FinalRenderQAResult(True, (), {"video_codec": "h264", "audio_codec": "aac"})
 
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
@@ -120,7 +150,7 @@ async def test_final_render_qa_requires_persisted_production_evidence(tmp_path, 
             return FinalRenderQAResult(True, (), {})
 
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
@@ -139,7 +169,7 @@ async def test_final_render_qa_requires_post_production_narrative_verdict(tmp_pa
             return FinalRenderQAResult(True, (), {})
 
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
@@ -152,7 +182,7 @@ async def test_final_render_qa_requires_post_production_narrative_verdict(tmp_pa
 
 def test_director_records_independent_production_evidence_qa(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
@@ -184,7 +214,7 @@ def test_director_records_independent_production_evidence_qa(tmp_path, monkeypat
 
 def test_director_records_independent_post_production_narrative_qa(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
@@ -199,16 +229,21 @@ def test_director_records_independent_post_production_narrative_qa(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_director_delivers_thumbnail_and_video_with_separate_receipts(tmp_path, monkeypatch):
+async def test_director_delivers_frozen_video_only_after_thumbnail_approval(tmp_path, monkeypatch):
     class Messenger:
+        def __init__(self):
+            self.calls = []
+
         async def send_photo(self, chat_id, photo_path, caption=""):
+            self.calls.append("thumbnail")
             return 101
 
         async def send_video(self, chat_id, video_path, caption=""):
+            self.calls.append("video")
             return 202
 
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(
@@ -217,12 +252,63 @@ async def test_director_delivers_thumbnail_and_video_with_separate_receipts(tmp_
     fs.paths.final_video.write_bytes(b"video")
     thumbnail = fs.paths.thumbnails_dir / "thumbnail.png"
     thumbnail.write_bytes(b"thumbnail")
+    messenger = Messenger()
 
-    receipts = await director.deliver_for_approval("EP8", messenger=Messenger(), chat_id="test-chat", thumbnail_path=thumbnail)
+    thumbnail_delivery = await director.deliver_for_approval(
+        "EP8", messenger=messenger, chat_id="test-chat", thumbnail_path=thumbnail
+    )
 
-    assert {receipt["artifact_kind"] for receipt in receipts} == {"thumbnail", "video"}
+    assert thumbnail_delivery["artifact_kind"] == "thumbnail"
+    assert messenger.calls == ["thumbnail"]
+    director.confirm_delivered_artifact(
+        "EP8", artifact_kind="thumbnail", artifact_path=thumbnail,
+        delivery_receipt_path=fs.paths.qa_dir / "delivery" / "thumbnail.json",
+    )
+
+    video_delivery = await director.deliver_for_approval(
+        "EP8", messenger=messenger, chat_id="test-chat", thumbnail_path=thumbnail
+    )
+
+    assert video_delivery["artifact_kind"] == "video"
+    assert messenger.calls == ["thumbnail", "video"]
     assert (fs.paths.qa_dir / "delivery" / "thumbnail.json").is_file()
     assert (fs.paths.qa_dir / "delivery" / "video.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_director_blocks_video_delivery_when_thumbnail_is_mutated_or_rejected(tmp_path, monkeypatch):
+    class Messenger:
+        def __init__(self):
+            self.calls = []
+
+        async def send_photo(self, *args, **kwargs):
+            self.calls.append("thumbnail")
+            return 101
+
+        async def send_video(self, *args, **kwargs):
+            self.calls.append("video")
+            return 202
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = delivery_director()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.WAITING_THUMBNAIL_APPROVAL).save(fs.paths.state_json)
+    fs.paths.final_video.write_bytes(b"video")
+    thumbnail = fs.paths.thumbnails_dir / "thumbnail.png"
+    thumbnail.write_bytes(b"thumbnail")
+    messenger = Messenger()
+    await director.deliver_for_approval("EP8", messenger=messenger, chat_id="test-chat", thumbnail_path=thumbnail)
+    director.confirm_delivered_artifact(
+        "EP8", artifact_kind="thumbnail", artifact_path=thumbnail,
+        delivery_receipt_path=fs.paths.qa_dir / "delivery" / "thumbnail.json",
+    )
+    thumbnail.write_bytes(b"mutated")
+
+    with pytest.raises(Exception, match="no longer binds|delivery path changed"):
+        await director.deliver_for_approval("EP8", messenger=messenger, chat_id="test-chat", thumbnail_path=thumbnail)
+
+    assert messenger.calls == ["thumbnail"]
 
 
 @pytest.mark.asyncio
@@ -314,7 +400,7 @@ async def test_compiled_finalizer_runs_evidence_and_final_media_qa_after_sidecar
 
 def test_director_rejection_supersedes_delivery_lineage_and_reopens_assembly(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(
@@ -336,9 +422,41 @@ def test_director_rejection_supersedes_delivery_lineage_and_reopens_assembly(tmp
     assert EpisodeStateStore.load(fs.paths.state_json).current_state is EpisodeState.ASSEMBLING
 
 
+@pytest.mark.asyncio
+async def test_director_rejection_closes_delivery_gate_without_sending_video(tmp_path, monkeypatch):
+    class Messenger:
+        def __init__(self):
+            self.calls = []
+
+        async def send_photo(self, *args, **kwargs):
+            self.calls.append("thumbnail")
+            return 101
+
+        async def send_video(self, *args, **kwargs):
+            self.calls.append("video")
+            return 202
+
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = delivery_director()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.WAITING_THUMBNAIL_APPROVAL).save(fs.paths.state_json)
+    thumbnail = fs.paths.thumbnails_dir / "thumbnail.png"
+    thumbnail.write_bytes(b"thumbnail")
+    fs.paths.final_video.write_bytes(b"video")
+    RevisionRegistry(fs.paths.qa_dir).register("thumbnail-v1", thumbnail, revision=1)
+    director.reject_delivered_artifact("EP8", artifact_id="thumbnail-v1", reason="rejected")
+    messenger = Messenger()
+
+    with pytest.raises(ValueError, match="active thumbnail or video gate"):
+        await director.deliver_for_approval("EP8", messenger=messenger, chat_id="test-chat", thumbnail_path=thumbnail)
+
+    assert messenger.calls == []
+
+
 def test_director_records_only_exact_approval_of_delivered_media(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(
@@ -349,13 +467,12 @@ def test_director_records_only_exact_approval_of_delivered_media(tmp_path, monke
     delivered = ApprovalReceipt.approve("thumbnail", thumbnail, "delivery")
     delivery_path = fs.paths.qa_dir / "delivery-thumbnail.json"
     delivery_path.write_text(
-        json.dumps({"episode_id": "EP8", "artifact_kind": "thumbnail", "approval": delivered.__dict__, "message_id": 1}),
+        json.dumps({"episode_id": "EP8", "artifact_kind": "thumbnail", "approval": delivered.__dict__, "chat_id": "test-chat", "message_id": 1}),
         encoding="utf-8",
     )
 
     receipt = director.confirm_delivered_artifact(
-        "EP8", artifact_kind="thumbnail", command="APROVAR THUMBNAIL EP8",
-        expected_command="APROVAR THUMBNAIL EP8", approver="human", artifact_path=thumbnail,
+        "EP8", artifact_kind="thumbnail", artifact_path=thumbnail,
         delivery_receipt_path=delivery_path,
     )
 
@@ -366,7 +483,7 @@ def test_director_records_only_exact_approval_of_delivered_media(tmp_path, monke
 
 def test_director_rejects_thumbnail_approval_outside_its_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    director = DirectorAgent()
+    director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.WAITING_VIDEO_APPROVAL).save(fs.paths.state_json)
@@ -375,15 +492,49 @@ def test_director_rejects_thumbnail_approval_outside_its_gate(tmp_path, monkeypa
     delivered = ApprovalReceipt.approve("thumbnail", thumbnail, "delivery")
     delivery_path = fs.paths.qa_dir / "delivery-thumbnail.json"
     delivery_path.write_text(
-        json.dumps({"episode_id": "EP8", "artifact_kind": "thumbnail", "approval": delivered.__dict__, "message_id": 1}),
+        json.dumps({"episode_id": "EP8", "artifact_kind": "thumbnail", "approval": delivered.__dict__, "chat_id": "test-chat", "message_id": 1}),
         encoding="utf-8",
     )
 
     with pytest.raises(ValueError, match="WAITING_THUMBNAIL_APPROVAL"):
         director.confirm_delivered_artifact(
-            "EP8", artifact_kind="thumbnail", command="APROVAR THUMBNAIL EP8",
-            expected_command="APROVAR THUMBNAIL EP8", approver="human", artifact_path=thumbnail,
+            "EP8", artifact_kind="thumbnail", artifact_path=thumbnail,
             delivery_receipt_path=delivery_path,
         )
 
     assert not (fs.paths.qa_dir / "approval-thumbnail.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("kind", "state_name"),
+    [("thumbnail", EpisodeState.WAITING_THUMBNAIL_APPROVAL), ("video", EpisodeState.WAITING_VIDEO_APPROVAL)],
+)
+def test_director_legacy_persisted_receipt_without_source_never_advances_gate(tmp_path, monkeypatch, kind, state_name):
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    config = replace(
+        get_config(), approval_delivery_chat_id="test-chat",
+        approval_delivery_trusted_sender_ids=frozenset({"trusted-user"}),
+    )
+    director = DirectorAgent(config=config, inbound_approval_source=None)
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=state_name).save(fs.paths.state_json)
+    artifact = fs.paths.thumbnails_dir / "legacy.png" if kind == "thumbnail" else fs.paths.final_video
+    artifact.write_bytes(kind.encode())
+    delivery = fs.paths.qa_dir / f"delivery-{kind}.json"
+    delivered = ApprovalReceipt.approve(kind, artifact, "delivery")
+    delivery.write_text(json.dumps({
+        "episode_id": "EP8", "artifact_kind": kind, "approval": delivered.__dict__,
+        "chat_id": "test-chat", "message_id": 42,
+    }), encoding="utf-8")
+    legacy = ApprovalReceipt.approve(kind, artifact, "local-user")
+    (fs.paths.qa_dir / f"approval-{kind}.json").write_text(
+        json.dumps(legacy.__dict__), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="authenticated"):
+        director.confirm_delivered_artifact(
+            "EP8", artifact_kind=kind, artifact_path=artifact, delivery_receipt_path=delivery
+        )
+
+    assert EpisodeStateStore.load(fs.paths.state_json).current_state is state_name

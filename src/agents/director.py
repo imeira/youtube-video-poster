@@ -188,12 +188,14 @@ class DirectorAgent:
         config: StudioConfig | None = None,
         model_router: CoreModelRouter | None = None,
         approval_gate: TelegramApprovalGate | None = None,
+        inbound_approval_source=None,
     ):
         self.config = config or get_config()
         self.model_router = model_router or CoreModelRouter.profile_d(
             usage_path=self.config.episodes_dir.parent / "usage.sqlite3"
         )
         self.approval_gate = approval_gate or TelegramApprovalGate()
+        self.inbound_approval_source = inbound_approval_source
         self._agents: dict[str, Any] = {}
         self._episodes: dict[str, dict] = {}  # in-memory cache
 
@@ -1092,35 +1094,65 @@ class DirectorAgent:
         messenger,
         chat_id: str,
         thumbnail_path: Path,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Deliver final thumbnail and video once, as separate hash-bound review media."""
-        from src.approval.receipts import ApprovalReceipt
+    ) -> dict[str, Any]:
+        """Send one frozen review artifact for the currently-open human gate.
+
+        The thumbnail is always sent first. A later call in the video state
+        requires the persisted exact thumbnail approval; no path sends both.
+        """
+        from src.approval.receipts import ApprovalReceipt, load_approval_receipt
         from src.delivery.controller import DeliveryController
 
         fs = EpisodeFS(episode_id, self.config)
+        if (
+            not self.config.approval_delivery_chat_id.strip()
+            or chat_id != self.config.approval_delivery_chat_id
+        ):
+            raise ValueError("approval delivery requires the configured destination")
         state = EpisodeStateStore.load(fs.paths.state_json)
-        if state.current_state is not EpisodeState.WAITING_THUMBNAIL_APPROVAL:
-            raise ValueError(
-                "approval delivery requires WAITING_THUMBNAIL_APPROVAL state"
-            )
+        if state.current_state not in {
+            EpisodeState.WAITING_THUMBNAIL_APPROVAL,
+            EpisodeState.WAITING_VIDEO_APPROVAL,
+        }:
+            raise ValueError("approval delivery requires an active thumbnail or video gate")
 
         def delivery_identity(kind, path):
             receipt_path = fs.paths.qa_dir / "delivery" / f"{kind}.json"
             if receipt_path.is_file():
-                receipt = ApprovalReceipt(**_read_json_file(receipt_path)["approval"])
-                receipt.verify()
+                try:
+                    receipt = ApprovalReceipt(**_read_json_file(receipt_path)["approval"])
+                    receipt.verify()
+                except (KeyError, TypeError, ValueError) as error:
+                    raise ValueError("delivery receipt no longer binds current media") from error
                 if Path(receipt.artifact_path).resolve() != Path(path).resolve():
                     raise ValueError("delivery path changed")
                 return receipt
             return ApprovalReceipt.approve(kind, path, "delivery-preflight")
 
         thumbnail = delivery_identity("thumbnail", thumbnail_path)
+        controller = DeliveryController(messenger)
+        if state.current_state is EpisodeState.WAITING_THUMBNAIL_APPROVAL:
+            return await controller.deliver_for_approval(
+                chat_id=chat_id,
+                episode_id=episode_id,
+                thumbnail=thumbnail,
+                receipt_dir=fs.paths.qa_dir / "delivery",
+            )
+        thumbnail_approval = load_approval_receipt(fs.paths.qa_dir / "approval-thumbnail.json")
+        thumbnail_approval.verify()
+        if (
+            thumbnail_approval.artifact_kind != "thumbnail"
+            or thumbnail_approval.artifact_path != thumbnail.artifact_path
+            or thumbnail_approval.artifact_sha256 != thumbnail.artifact_sha256
+        ):
+            raise ValueError("persisted thumbnail approval does not bind delivered thumbnail")
         video = delivery_identity("video", fs.paths.final_video)
-        return await DeliveryController(messenger).deliver_for_approval(
+        return await controller.deliver_for_approval(
             chat_id=chat_id,
             episode_id=episode_id,
             thumbnail=thumbnail,
             video=video,
+            thumbnail_approval=thumbnail_approval,
             receipt_dir=fs.paths.qa_dir / "delivery",
         )
 
@@ -1184,9 +1216,6 @@ class DirectorAgent:
         episode_id: str,
         *,
         artifact_kind: str,
-        command: str,
-        expected_command: str,
-        approver: str,
         artifact_path: Path,
         delivery_receipt_path: Path,
     ):
@@ -1204,20 +1233,22 @@ class DirectorAgent:
         }.get(artifact_kind)
         if expected_state is None or next_state is None:
             raise ValueError("artifact_kind must be thumbnail or video")
+
         state = EpisodeStateStore.load(fs.paths.state_json)
         if state.current_state is not expected_state:
             raise ValueError(
                 f"{artifact_kind} approval requires {expected_state.value} state"
             )
+        approval_path = fs.paths.qa_dir / f"approval-{artifact_kind}.json"
         receipt = ApprovalController().confirm_delivery(
             episode_id=episode_id,
             artifact_kind=artifact_kind,
-            command=command,
-            expected_command=expected_command,
-            approver=approver,
             artifact_path=artifact_path,
             delivery_receipt_path=delivery_receipt_path,
-            approval_receipt_path=fs.paths.qa_dir / f"approval-{artifact_kind}.json",
+            approval_receipt_path=approval_path,
+            expected_chat_id=self.config.approval_delivery_chat_id,
+            trusted_sender_ids=self.config.approval_delivery_trusted_sender_ids,
+            inbound_source=self.inbound_approval_source,
         )
         state.transition_to(
             next_state,
