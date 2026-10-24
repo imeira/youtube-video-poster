@@ -9,9 +9,9 @@ Telegram messages.
 
 Telegram's webhook mechanism supports a configured shared-secret header
 (`X-Telegram-Bot-Api-Secret-Token`). It is **not** a Telegram cryptographic
-signature over the request payload. An HTTP integration, which is deliberately
-not included here, must obtain that header and pass the raw request body plus
-header value to `ingest_webhook`.
+signature over the request payload. `TelegramDirectorService` and
+`create_telegram_inbound_app` provide an in-process `/telegram/inbound` route;
+the caller must obtain that header and pass the unmodified body/header values.
 
 The adapter compares the header to `webhook_secret` with `hmac.compare_digest`.
 The secret must come from trusted external configuration and must be non-empty;
@@ -73,9 +73,17 @@ returns.
 
 ## Activation status and limitations
 
-No webhook route, TLS endpoint, Telegram Bot API configuration, `setWebhook`,
-`getUpdates`, polling, bot token, or live service was added. Consequently this
-adapter is not active in production by itself. A future integration must keep
-its HTTP endpoint outside the approval controller, obtain secrets from its
-trusted secret provider, pass unmodified body/header values to this adapter,
-and preserve the existing fail-closed behavior if configuration is absent.
+The in-process route does not start a server or activate a webhook. No TLS
+endpoint, Telegram Bot API configuration, `setWebhook`, `getUpdates`, polling,
+bot token, or live service was added. Deployment remains inactive until an
+outer host explicitly constructs the service from trusted configuration and
+chooses to serve that app. It must preserve the fail-closed behavior if
+configuration is absent.
+
+For one authenticated delivery gate, the route serializes across processes with
+an OS-released lock. Inside that lock it revalidates the authenticated journal,
+delivery binding, current artifact bytes, persisted approval receipt, and state.
+Exactly-applied updates receive an idempotent `acknowledged` result rather than
+a new approval. A receipt persisted before a crash but not yet transitioned is
+recovered only by the same revalidation and is reported as `recovered`; a
+tampered receipt, journal, artifact, or incompatible state never receives 200.

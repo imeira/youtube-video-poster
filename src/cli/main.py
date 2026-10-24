@@ -29,6 +29,9 @@ def main():
     if sys.argv[1:2] == ["offline"]:
         from src.hybrid.offline import main as offline_main
         return offline_main(sys.argv[2:])
+    if sys.argv[1:2] == ["telegram-inbound-preflight"]:
+        from src.approval.telegram_cli import main as telegram_preflight_main
+        return telegram_preflight_main(sys.argv[2:])
     if sys.argv[1:2] == ["autonomous"]:
         from src.hybrid.autonomous_cli import main as autonomous_main
         return autonomous_main(sys.argv[2:])
