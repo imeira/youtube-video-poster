@@ -242,6 +242,8 @@ class DirectorAgent:
         blocked_scenes=(),
         prior_spend: Decimal = Decimal(0),
         executor_config=None,
+        motion_routes=None,
+        motion_policy=None,
     ):
         """Open the sole compiled writer after audio/reference approval.
 
@@ -263,7 +265,13 @@ class DirectorAgent:
         )
         storyboard = _read_json_file(storyboard_file)
         scenes = storyboard.get("scenes", storyboard.get("frames", []))
-        episode = compile_storyboard(episode_id, approved_audio, scenes)
+        episode = compile_storyboard(
+            episode_id,
+            approved_audio,
+            scenes,
+            motion_routes=motion_routes,
+            motion_policy=motion_policy,
+        )
         return OperationalPipeline(
             episode,
             Executor(
@@ -376,6 +384,8 @@ class DirectorAgent:
         blocked_scenes=(),
         prior_spend: Decimal = Decimal(0),
         executor_config=None,
+        motion_routes=None,
+        motion_policy=None,
     ):
         """Activate the sole compiled writer only at the image-generation hand-off.
 
@@ -401,6 +411,8 @@ class DirectorAgent:
             blocked_scenes=blocked_scenes,
             prior_spend=prior_spend,
             executor_config=executor_config,
+            motion_routes=motion_routes,
+            motion_policy=motion_policy,
         )
 
     def issue_compiled_live_preflight(
