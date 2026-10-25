@@ -81,6 +81,20 @@ class ProductionTelegramGateComposition:
     director: Any
     config: ProductionTelegramGateConfig
 
+    def delivery_session_runner(self):
+        """Return the explicit outbox consumer; constructing it does not deliver."""
+        from src.approval.delivery_session import DeliverySessionRunner
+
+        return DeliverySessionRunner(registry_path=self.config.registry_path, composition=self)
+
+    def revalidate_thumbnail_approval(
+        self, *, episode_id: str, thumbnail_path: Path, thumbnail_sha256: str
+    ) -> None:
+        """Delegate second-gate authority checks to the configured authenticated source."""
+        self.service.revalidate_thumbnail_approval(
+            episode_id=episode_id, thumbnail_path=thumbnail_path, thumbnail_sha256=thumbnail_sha256
+        )
+
     async def deliver_for_approval(self, episode_id: str, *, thumbnail_path: Path) -> dict[str, Any]:
         """Use Director's existing sequential state/DeliveryController path, then bind receipt inbound."""
         async def register_after_persist(receipt_path: Path) -> None:

@@ -102,6 +102,82 @@ async def test_http_authenticated_request_journals_then_advances_only_registered
     assert approval["inbound_receipt"]["text"] == "APROVAR THUMBNAIL EP8"
 
 
+def test_thumbnail_approval_creates_hash_bound_video_outbox_without_delivery_callback(tmp_path: Path):
+    service, _episode, artifact, _ = _service(tmp_path)
+
+    result = service.handle_webhook(_update(), SECRET)
+
+    assert result.body["status"] == "approved"
+    with sqlite3.connect(tmp_path / "external" / "deliveries.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT episode_id, thumbnail_path, thumbnail_sha256, status FROM video_delivery_outbox"
+        ).fetchone()
+    assert row == ("EP8", str(artifact.resolve()), hashlib.sha256(artifact.read_bytes()).hexdigest(), "PENDING")
+
+
+@pytest.mark.parametrize("corruption", ["bad-outcome-mac", "wrong-source", "mutated-binding"])
+def test_legacy_outcome_repair_rejects_corruption_before_outbox_enqueue(tmp_path: Path, corruption: str):
+    service, episode, artifact, _ = _service(tmp_path)
+    assert service.handle_webhook(_update(), SECRET).body["status"] == "approved"
+    registry = tmp_path / "external" / "deliveries.sqlite3"
+    with sqlite3.connect(registry) as connection:
+        connection.execute("DELETE FROM video_delivery_outbox")
+        if corruption == "bad-outcome-mac":
+            connection.execute("UPDATE outcomes SET mac = '0' * 64")
+        elif corruption == "mutated-binding":
+            record = service._lookup(chat_id=CHAT_ID, message_id=42)
+            assert record is not None
+            record["artifact_sha256"] = "f" * 64
+            mac = service._registry_mac({"chat_id": CHAT_ID, "message_id": 42, **record})
+            connection.execute(
+                "UPDATE deliveries SET artifact_sha256 = ?, mac = ? WHERE chat_id = ? AND message_id = ?",
+                (record["artifact_sha256"], mac, CHAT_ID, 42),
+            )
+    if corruption == "wrong-source":
+        approval_path = episode / "qa" / "approval-thumbnail.json"
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+        approval["inbound_receipt"]["sender_id"] = "99999"
+        approval_path.write_text(json.dumps(approval), encoding="utf-8")
+
+    TelegramDirectorService(director=service._director, settings=service._settings)
+
+    with sqlite3.connect(registry) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM video_delivery_outbox").fetchone() == (0,)
+    assert artifact.read_bytes() == b"frozen-thumbnail"
+
+
+def test_legacy_outcome_repair_revalidates_then_enqueues_exactly_once_after_restart(tmp_path: Path):
+    service, _episode, artifact, _ = _service(tmp_path)
+    assert service.handle_webhook(_update(), SECRET).body["status"] == "approved"
+    registry = tmp_path / "external" / "deliveries.sqlite3"
+    with sqlite3.connect(registry) as connection:
+        connection.execute("DELETE FROM video_delivery_outbox")
+
+    TelegramDirectorService(director=service._director, settings=service._settings)
+    TelegramDirectorService(director=service._director, settings=service._settings)
+
+    with sqlite3.connect(registry) as connection:
+        rows = connection.execute(
+            "SELECT episode_id, thumbnail_path, thumbnail_sha256, status FROM video_delivery_outbox"
+        ).fetchall()
+    assert rows == [("EP8", str(artifact.resolve()), hashlib.sha256(artifact.read_bytes()).hexdigest(), "PENDING")]
+
+
+def test_outcome_and_video_outbox_share_one_transaction_after_authenticated_approval(tmp_path: Path, monkeypatch):
+    service, _episode, _artifact, _ = _service(tmp_path)
+
+    monkeypatch.setattr(
+        service, "_enqueue_video_delivery_in_transaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("crash after outcome before outbox")),
+    )
+
+    with pytest.raises(RuntimeError, match="crash after outcome"):
+        service.handle_webhook(_update(), SECRET)
+    with sqlite3.connect(tmp_path / "external" / "deliveries.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM outcomes").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM video_delivery_outbox").fetchone() == (0,)
+
+
 @pytest.mark.asyncio
 async def test_http_concurrent_duplicate_is_one_transition_then_idempotent_ack(tmp_path: Path):
     service, episode, _, _ = _service(tmp_path)

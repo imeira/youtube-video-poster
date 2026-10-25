@@ -66,6 +66,7 @@ class TelegramDirectorService:
         if self._enabled:
             self._initialize_registry()
             self._reconcile_configured_deliveries()
+            self._reconcile_authenticated_outcomes()
             # Director receives transport authority only from this configured adapter.
             self._director.inbound_approval_source = self._adapter
 
@@ -103,6 +104,11 @@ class TelegramDirectorService:
                 "chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, episode_id TEXT NOT NULL, "
                 "artifact_kind TEXT NOT NULL, artifact_sha256 TEXT NOT NULL, receipt_sha256 TEXT NOT NULL, "
                 "state TEXT NOT NULL, mac TEXT NOT NULL, PRIMARY KEY(chat_id, message_id))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS video_delivery_outbox ("
+                "episode_id TEXT PRIMARY KEY, thumbnail_path TEXT NOT NULL, thumbnail_sha256 TEXT NOT NULL, "
+                "status TEXT NOT NULL CHECK(status IN ('PENDING', 'DELIVERED')))"
             )
             row = connection.execute("SELECT value FROM metadata WHERE key = 'binding'").fetchone()
             digest = self._registry_mac(binding)
@@ -271,15 +277,69 @@ class TelegramDirectorService:
                 stored = dict(zip(("episode_id", "artifact_kind", "artifact_sha256", "receipt_sha256", "state", "mac"), existing, strict=True))
                 if stored.pop("mac") != mac or stored != {key: outcome[key] for key in stored}:
                     raise ValueError("Telegram approval outcome is inconsistent")
+                self._enqueue_video_delivery_in_transaction(connection, record)
                 return stored
             connection.execute(
                 "INSERT INTO outcomes(chat_id, message_id, episode_id, artifact_kind, artifact_sha256, receipt_sha256, state, mac) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (*outcome.values(), mac),
             )
+            self._enqueue_video_delivery_in_transaction(connection, record)
         return {key: outcome[key] for key in ("episode_id", "artifact_kind", "artifact_sha256", "receipt_sha256", "state")}
 
     def _approval_path(self, record: dict[str, object]) -> Path:
         return Path(self._director.config.episodes_dir) / str(record["episode_id"]) / "qa" / f"approval-{record['artifact_kind']}.json"
+
+    def _enqueue_video_delivery_in_transaction(self, connection: sqlite3.Connection, record: dict[str, object]) -> None:
+        """Bind thumbnail outcome and second-gate eligibility in one SQLite transaction."""
+        if record["artifact_kind"] != "thumbnail":
+            return
+        episode_id = str(record["episode_id"])
+        binding = (str(Path(str(record["artifact_path"])).resolve()), str(record["artifact_sha256"]))
+        existing = connection.execute(
+            "SELECT thumbnail_path, thumbnail_sha256 FROM video_delivery_outbox WHERE episode_id = ?", (episode_id,)
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                "INSERT INTO video_delivery_outbox(episode_id, thumbnail_path, thumbnail_sha256, status) "
+                "VALUES (?, ?, ?, 'PENDING')", (episode_id, *binding),
+            )
+        elif existing != binding:
+            raise ValueError("video delivery eligibility is already bound to different thumbnail bytes")
+
+    def _reconcile_authenticated_outcomes(self) -> None:
+        """Repair only legacy interrupted rows after live receipt revalidation; never resend media."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT chat_id, message_id FROM outcomes WHERE artifact_kind = 'thumbnail'"
+            ).fetchall()
+        for chat_id, message_id in rows:
+            outcome = self._read_outcome(chat_id=chat_id, message_id=message_id)
+            record = self._lookup(chat_id=chat_id, message_id=message_id)
+            if outcome is None or record is None or outcome["episode_id"] != record["episode_id"]:
+                continue
+            if self._revalidate_completed(record=record) is None:
+                continue
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._enqueue_video_delivery_in_transaction(connection, record)
+
+    def revalidate_thumbnail_approval(
+        self, *, episode_id: str, thumbnail_path: Path, thumbnail_sha256: str
+    ) -> None:
+        """Revalidate the consumed trusted reply immediately before any video delivery."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT chat_id, message_id FROM deliveries WHERE episode_id = ? AND artifact_kind = 'thumbnail'",
+                (episode_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("thumbnail delivery binding is unavailable")
+        chat_id, message_id = row
+        record = self._lookup(chat_id=chat_id, message_id=message_id)
+        if record is None or record["artifact_path"] != str(thumbnail_path.resolve()) or record["artifact_sha256"] != thumbnail_sha256:
+            raise ValueError("thumbnail delivery binding changed")
+        if self._revalidate_completed(record=record) is None:
+            raise ValueError("thumbnail approval is not currently authenticated")
 
     def _revalidate_completed(self, *, record: dict[str, object]) -> EpisodeState | None:
         """Prove an existing result still binds current authority and state."""
