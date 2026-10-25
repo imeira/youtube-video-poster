@@ -444,12 +444,14 @@ def start_compiled(workspace: Path, packet: Path, reject_scene: str | None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("start", "preproduce", "advance", "compile-preproduction", "status", "resume", "remediate", "heroes", "approve", "publish"))
+    p.add_argument("action", choices=("start", "preproduce", "advance", "audio-preflight", "compile-preproduction", "status", "resume", "remediate", "heroes", "approve", "publish"))
     p.add_argument("--workspace", required=True, type=Path)
     p.add_argument("--prompt-file", type=Path)
     p.add_argument("--source-file", type=Path)
     p.add_argument("--timeline-file", type=Path)
     p.add_argument("--audio-file", type=Path)
+    p.add_argument("--review-file", type=Path)
+    p.add_argument("--audio-authorization-file", type=Path)
     p.add_argument("--manifest-file", type=Path)
     p.add_argument("--mode", choices=("TEST", "PREPRODUCTION"))
     p.add_argument("--compiled-input", type=Path)
@@ -476,6 +478,14 @@ def main(argv=None):
 
             result = advance_preproduction(a.workspace, a.request_id, a.source_file, mode=a.mode,
                                            timeline_path=a.timeline_file, audio_path=a.audio_file)
+        elif a.action == "audio-preflight":
+            if not a.request_id or a.review_file is None or a.audio_authorization_file is None:
+                p.error("audio-preflight requires --request-id --review-file and --audio-authorization-file")
+            if any(value is not None for value in (a.prompt_file, a.source_file, a.timeline_file, a.audio_file, a.manifest_file, a.compiled_input)):
+                p.error("audio-preflight accepts only existing local review and authorization evidence")
+            from src.hybrid.audio_preproduction import preflight_audio_execution
+
+            result = preflight_audio_execution(a.workspace, a.request_id, a.review_file, a.audio_authorization_file)
         elif a.action == "compile-preproduction":
             if not a.request_id or a.manifest_file is None:
                 p.error("compile-preproduction requires --request-id and --manifest-file")

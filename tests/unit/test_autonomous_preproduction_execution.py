@@ -387,6 +387,87 @@ def test_preproduction_imports_hash_bound_audio_and_never_materializes_compiled_
         advance_preproduction(tmp_path, created["request_id"], source, mode="TEST", timeline_path=timeline, audio_path=audio)
 
 
+def test_preproduction_pending_qa_artifact_blocks_timeline_and_audio_before_reads(tmp_path, monkeypatch):
+    """A forged stage PASS cannot override a pending immutable QA artifact."""
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    source_document = json.loads(_source(tmp_path / "source.json").read_text(encoding="utf-8"))
+    source_document["research"]["narrative_segments"] = [
+        {
+            "id": "S001", "kind": "biblical_paraphrase", "verses": "Gênesis 15:1-6",
+            "facts": ["promessa"], "narration": "Deus fez uma promessa a Abrão.",
+            "motion_need": "composição local",
+        },
+        {
+            "id": "S002", "kind": "family_reflection", "facts": ["reflexão"],
+            "narration": "A promessa foi para Abrão. Conversem em família sobre confiar em Deus.",
+            "motion_need": "fechamento editorial",
+        },
+    ]
+    source = tmp_path / "source-bound.TEST.json"
+    source.write_text(json.dumps(source_document, ensure_ascii=False), encoding="utf-8")
+    created = start_preproduction(tmp_path, b"Pending QA boundary\n")
+    initial = advance_preproduction(tmp_path, created["request_id"], source, mode="TEST")
+    revision = Path(initial["active_revision_path"])
+    stages_path = revision / "stages.json"
+    stages = json.loads(stages_path.read_text(encoding="utf-8"))
+    assert stages["script_qa"]["status"] == "PENDING_INDEPENDENT_EDITORIAL_REVIEW"
+    stages["script_qa"]["status"] = "PASS"
+    stages_path.write_text(json.dumps(stages), encoding="utf-8")
+
+    timeline = tmp_path / "unread-timeline.json"
+    audio = tmp_path / "unread-audio.wav"
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+
+    def forbid_timeline_or_audio_bytes(self, *args, **kwargs):
+        if self in {timeline, audio}:
+            raise AssertionError("timeline or audio was read before QA rejection")
+        return original_read_bytes(self, *args, **kwargs)
+
+    def forbid_timeline_or_audio_text(self, *args, **kwargs):
+        if self in {timeline, audio}:
+            raise AssertionError("timeline or audio was read before QA rejection")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", forbid_timeline_or_audio_bytes)
+    monkeypatch.setattr(Path, "read_text", forbid_timeline_or_audio_text)
+    with pytest.raises(ValueError, match="independent editorial review is pending"):
+        advance_preproduction(tmp_path, created["request_id"], source, mode="TEST", timeline_path=timeline, audio_path=audio)
+
+
+def test_preproduction_qa_hash_mismatch_blocks_timeline_and_audio_before_reads(tmp_path, monkeypatch):
+    """Tampered QA bytes are rejected before timeline or audio evidence is consumed."""
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    created = start_preproduction(tmp_path, b"QA hash boundary\n")
+    source = _source(tmp_path / "source.json")
+    initial = advance_preproduction(tmp_path, created["request_id"], source, mode="TEST")
+    revision = Path(initial["active_revision_path"])
+    qa_path = revision / "qa" / "script-qa.json"
+    qa_path.write_text("{}", encoding="utf-8")
+
+    timeline = tmp_path / "unread-timeline.json"
+    audio = tmp_path / "unread-audio.wav"
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+
+    def forbid_timeline_or_audio_bytes(self, *args, **kwargs):
+        if self in {timeline, audio}:
+            raise AssertionError("timeline or audio was read before QA rejection")
+        return original_read_bytes(self, *args, **kwargs)
+
+    def forbid_timeline_or_audio_text(self, *args, **kwargs):
+        if self in {timeline, audio}:
+            raise AssertionError("timeline or audio was read before QA rejection")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", forbid_timeline_or_audio_bytes)
+    monkeypatch.setattr(Path, "read_text", forbid_timeline_or_audio_text)
+    with pytest.raises(ValueError, match="script_qa artifact was altered"):
+        advance_preproduction(tmp_path, created["request_id"], source, mode="TEST", timeline_path=timeline, audio_path=audio)
+
+
 def test_preproduction_resume_preserves_validated_storyboard_without_requiring_tts_again(tmp_path):
     from src.hybrid.preproduction import advance_preproduction, start_preproduction
 
@@ -417,6 +498,82 @@ def test_preproduction_resume_preserves_validated_storyboard_without_requiring_t
     storyboard_qa.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="storyboard_qa artifact was altered"):
         advance_preproduction(tmp_path, created["request_id"], source, mode="TEST")
+
+
+def test_audio_preflight_requires_trusted_hash_bound_review_and_authorization_before_provider(tmp_path):
+    """A local self-emitted report never authorizes TTS or even provider construction."""
+    from src.hybrid.audio_preproduction import preflight_audio_execution
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    created = start_preproduction(tmp_path, b"Audio boundary\n")
+    source = _source(tmp_path / "source.json")
+    initial = advance_preproduction(tmp_path, created["request_id"], source, mode="TEST")
+    revision = Path(initial["active_revision_path"])
+    original_qa = json.loads((revision / "qa" / "script-qa.json").read_text(encoding="utf-8"))
+    script_sha = sha256((revision / "script" / "script.json").read_bytes()).hexdigest()
+    source_sha = sha256(source.read_bytes()).hexdigest()
+    local_report = tmp_path / "local-report.json"
+    local_report.write_text(json.dumps({"schema": "independent-editorial-review-record-v1", "editorial_verdict": "NO_NARRATIVE_BLOCKER"}), encoding="utf-8")
+    authorization = tmp_path / "authorization.json"
+    authorization.write_text(json.dumps({"schema": "audio-execution-authorization-v1", "mode": "TEST", "authorized": True, "provider": "edge-tts", "source_sha256": source_sha, "script_sha256": script_sha}), encoding="utf-8")
+    constructed = False
+    blocked = preflight_audio_execution(tmp_path, created["request_id"], local_report, authorization, provider_factory=lambda: (_ for _ in ()).throw(AssertionError("provider constructed")))
+    assert blocked["status"] == "EXTERNAL_AUDIO_SYNTHESIS_BLOCKED"
+    assert constructed is False
+
+    review = tmp_path / "review.json"
+    review.write_text(json.dumps({
+        "schema": "source-bound-independent-editorial-review-v1", "mode": "TEST",
+        "reviewer": "test-independent-editorial-reviewer-v1", "verdict": "PASS",
+        "source_sha256": source_sha, "script_sha256": script_sha,
+    }), encoding="utf-8")
+    blocked_auth = tmp_path / "blocked-auth.json"
+    blocked_auth.write_text(json.dumps({"schema": "audio-execution-authorization-v1", "mode": "TEST", "authorized": False, "provider": "edge-tts", "source_sha256": source_sha, "script_sha256": script_sha}), encoding="utf-8")
+    blocked_bad_auth = preflight_audio_execution(tmp_path, created["request_id"], review, blocked_auth, provider_factory=lambda: (_ for _ in ()).throw(AssertionError("provider constructed")))
+    assert blocked_bad_auth["status"] == "EXTERNAL_AUDIO_SYNTHESIS_BLOCKED"
+
+    ready = preflight_audio_execution(tmp_path, created["request_id"], review, authorization, provider_factory=lambda: (_ for _ in ()).throw(AssertionError("preflight must not construct provider")))
+    assert ready["status"] == "EXTERNAL_AUDIO_SYNTHESIS_BLOCKED"
+    stages = json.loads((revision / "stages.json").read_text(encoding="utf-8"))
+    assert stages["script_qa"]["status"] == "PASS"
+    assert "machine_audio_qa" not in stages
+    assert json.loads((revision / "qa" / "script-qa.json").read_text(encoding="utf-8")) == original_qa
+
+    from tests.unit.test_autonomous_cli import run_cli
+    code, cli_ready = run_cli("audio-preflight", "--workspace", str(tmp_path), "--request-id", created["request_id"], "--review-file", str(review), "--audio-authorization-file", str(authorization))
+    assert code == 0 and cli_ready["status"] == "EXTERNAL_AUDIO_SYNTHESIS_BLOCKED"
+
+
+def test_authorized_audio_execution_caches_segments_and_advances_with_measured_wav_and_wordboundaries(tmp_path):
+    from types import SimpleNamespace
+
+    from src.hybrid.audio_preproduction import execute_authorized_audio
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    created = start_preproduction(tmp_path, b"Audio execution\n")
+    source = _source(tmp_path / "source.json")
+    initial = advance_preproduction(tmp_path, created["request_id"], source, mode="TEST")
+    revision = Path(initial["active_revision_path"])
+    source_sha = sha256(source.read_bytes()).hexdigest()
+    script_sha = sha256((revision / "script" / "script.json").read_bytes()).hexdigest()
+    review = tmp_path / "review.json"
+    review.write_text(json.dumps({"schema": "source-bound-independent-editorial-review-v1", "mode": "TEST", "reviewer": "test-independent-editorial-reviewer-v1", "verdict": "PASS", "source_sha256": source_sha, "script_sha256": script_sha}), encoding="utf-8")
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"schema": "audio-execution-authorization-v1", "mode": "TEST", "authorized": True, "provider": "edge-tts", "source_sha256": source_sha, "script_sha256": script_sha}), encoding="utf-8")
+
+    class FixtureTransport:
+        calls = 0
+        async def synthesize(self, text, *, output_path, **_kwargs):
+            type(self).calls += 1
+            duration = len(text.replace(".", "").split()) * 0.1 + 0.1
+            _audio(Path(output_path), duration)
+            words = [{"word": word, "start": index * 0.1, "end": (index + 1) * 0.1} for index, word in enumerate(text.replace(".", "").split())]
+            return SimpleNamespace(success=True, audio_path=str(output_path), duration_seconds=duration, word_timestamps=words, metadata={"boundary_source": "TEST_WordBoundary"})
+
+    with pytest.raises(RuntimeError, match="EXTERNAL_AUDIO_SYNTHESIS_BLOCKED"):
+        execute_authorized_audio(tmp_path, created["request_id"], review, auth, provider_factory=FixtureTransport)
+    assert FixtureTransport.calls == 0
+    assert not (revision / "audio").exists()
 
 
 def test_preproduction_load_and_advance_reject_reparse_inputs_before_any_read(tmp_path, monkeypatch):

@@ -26,9 +26,47 @@ Offline pre-production converts immutable local biblical-source bytes into a non
 - Candidate provider records must be `UNQUALIFIED` and commercially `UNKNOWN`. Any `price`, `cost`, `usd`, or `quote` key at any nesting level rejects the source.
 - Measured audio duration is the only duration evidence for a storyboard. A word-rate value is explicitly only an estimate.
 
+## Audio boundary (currently fail-closed)
+
+`audio-preflight` is a read-only capability report. It does not read caller
+review/authorization JSON, write a QA/stage file, or return `AUDIO_AUTHORIZED`.
+`execute_authorized_audio` unconditionally **raises**
+`EXTERNAL_AUDIO_SYNTHESIS_BLOCKED` before resolving paths, constructing a
+provider, reserving state, or writing an intent. External synthesis remains
+unqualified until a separately reviewed trust root, canonical transport
+contract, WAL/reconciliation recovery protocol, and independently verifiable
+voice/evidence chain are implemented and accepted.
+
+The only useful audio operation in this slice is `import_test_audio_segment`. It accepts only an immutable `bytes` snapshot with
+the closed `audio/wav` type; it has no `source_path`/`source_file` fallback and
+no CLI route. It decodes, measures, checks PCM silence, and verifies explicit
+TEST fixture WordBoundary events against that same snapshot before caching it
+under exclusive immutable names. The API receives its existing cache root from
+trusted application composition only: payloads, remote receipts, and CLI input
+cannot select it. A receipt binds the configured root hash, namespace, exact
+derived name, audio/input hashes, measured boundaries/provenance, and literal
+`NOT_QUALIFIED` voice state; replay recomputes and compares every field and
+rejects tampering, recomputed metadata, wrong-root copies, and incomplete
+cache pairs. This is not a claim of protection from an attacker who controls
+the configured local cache root.
+
+The importer rejects silence, invalid or oversized WAV data, false/invented
+boundary receipts, and every reflection closing. It cannot advance an
+independent review/audio gate, qualify a provider, or qualify a voice.
+
+A TEST fixture never qualifies Lorena or any narrator. In particular, the
+adult `pt-BR-ThalitaNeural` default must not be routed to a child/reflection
+closing. A real closing requires separately canonical child-voice evidence,
+actual event receipts, and measured duration at most 10 seconds; none exists
+in this entrypoint.
+
 ## State transitions and recovery
 
 `SOURCE_REQUIRED → SCRIPT_CANDIDATE → TTS_REQUIRED → PREPRODUCTION_VALIDATED → ASSETS_REQUIRED`.
+
+There is no `AUDIO_AUTHORIZED` transition in the current audio slice. A source-bound
+request stays blocked at `TTS_REQUIRED` until a separate, independently reviewed
+real-audio integration exists.
 
 Each source SHA-256 creates a distinct revision directory. Existing scripts, QA receipts, and revisions are never overwritten. A changed source creates a successor revision. A failed or interrupted revision is retained for audit and may only be resumed if all persisted hashes still match.
 
@@ -44,3 +82,5 @@ Each source SHA-256 creates a distinct revision directory. Existing scripts, QA 
 4. Nested candidate `price`, `cost`, `usd`, and `quote` keys are rejected.
 5. Missing or multiple family reflections, Unicode truncation, and a closing estimate over 10 seconds are rejected.
 6. A previous rejected revision remains unchanged when a successor source is advanced.
+7. A self-emitted or stale review, or absent/rejected authorization, cannot construct a TTS provider.
+8. A TEST non-silent WAV fixture with WordBoundary data reaches the existing storyboard path; a resume reuses every hash-valid segment without synthesis.

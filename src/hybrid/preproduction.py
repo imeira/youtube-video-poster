@@ -473,8 +473,22 @@ def _advance_preproduction_locked(
             stages.setdefault("storyboard", {"status": "TTS_REQUIRED", "attempts": 0})
             status = "TTS_REQUIRED"
     else:
-        if stages.get("script_qa", {}).get("status") == "PENDING_INDEPENDENT_EDITORIAL_REVIEW":
+        # Stages are mutable progress bookkeeping, never review authority. Re-read
+        # the immutable QA artifact and bind it to the recorded hash before any
+        # audio/timeline bytes are consumed.
+        qa_path = reject_reparse_path(revision / "qa" / "script-qa.json")
+        qa_raw = qa_path.read_bytes()
+        if sha256(qa_raw).hexdigest() != stages.get("script_qa", {}).get("sha256"):
+            raise ValueError("script QA evidence hash does not match recorded stage")
+        try:
+            script_qa_evidence = json.loads(qa_raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("script QA evidence is invalid") from error
+        if script_qa_evidence.get("verdict") == "PENDING_INDEPENDENT_EDITORIAL_REVIEW":
             raise ValueError("independent editorial review is pending; audio and storyboard remain blocked")
+        # No self-authored stage string can stand in for independently rooted evidence.
+        if stages.get("script_qa", {}).get("status") != "PASS":
+            raise ValueError("independent editorial evidence has not been revalidated")
         if audio_path is None:
             raise ValueError("timeline evidence requires a local measured audio file")
         timeline, timeline_sha, timeline_raw = _read_local_json(timeline_path, "timeline evidence")
