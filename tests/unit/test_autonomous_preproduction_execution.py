@@ -120,6 +120,211 @@ def test_preproduction_executes_fixed_research_plan_script_qa_and_resumes_storyb
     assert (revision / "storyboard" / "scenes.json").is_file()
 
 
+def test_preproduction_plan_measures_generated_words_and_keeps_provider_prices_unknown(tmp_path):
+    """Offline editorial evidence must not turn a legacy estimate into a quote."""
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    created = start_preproduction(tmp_path, "Jacó em Gênesis 28\n".encode())
+    source = _source(tmp_path / "source.json", mode="PREPRODUCTION")
+    result = advance_preproduction(tmp_path, created["request_id"], source, mode="PREPRODUCTION")
+
+    plan_path = Path(result["active_revision_path"]) / "plan" / "editorial-plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    recommendation = plan["recommendation"]
+    assert recommendation["word_count_measured"] > 0
+    assert recommendation["estimated_narration_seconds"] == pytest.approx(
+        recommendation["word_count_measured"] / 130 * 60
+    )
+    assert recommendation["scene_count"] == recommendation["semantic_segment_count"]
+    assert recommendation["timing_policy"] == "semantic_segments_only"
+    assert recommendation["provider_candidates"] == []
+    assert "cost_min_usd" not in recommendation
+    assert "cost_likely_usd" not in recommendation
+    assert "cost_max_usd" not in recommendation
+    assert plan["prices_usd"] is None
+    script = json.loads((Path(result["active_revision_path"]) / "script" / "script.json").read_text(encoding="utf-8"))
+    assert "target_duration_s" not in script
+    assert script["estimated_narration_seconds"] == pytest.approx(
+        recommendation["estimated_narration_seconds"]
+    )
+
+
+def test_preproduction_preserves_source_bound_narrative_and_full_candidate_contract(tmp_path):
+    """A source-authorized narrative is complete prose, never duration-shaped facts."""
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    source = json.loads(_source(tmp_path / "jaco-source.json", mode="PREPRODUCTION").read_text(encoding="utf-8"))
+    research = source["research"]
+    research["narrative_classification"]["BIBLICAL_FACT"] = [
+        "Isaque enviou Jacó a Padã-Arã e recordou a bênção dada a Abraão.",
+        "Jacó saiu de Berseba para Harã, dormiu com uma pedra como apoio e sonhou.",
+        "No sonho, Deus prometeu presença, cuidado e retorno; Jacó chamou o lugar de Betel e fez um voto.",
+    ]
+    research["narrative_segments"] = [
+        {
+            "id": "S001", "kind": "biblical_paraphrase", "verses": "Gênesis 28:1-5",
+            "facts": ["envio a Padã-Arã", "bênção de Abraão"],
+            "narration": "Isaque abençoou Jacó e o enviou a Padã-Arã. Ele recordou a bênção que Deus tinha dado a Abraão.",
+            "motion_need": "despedida serena, composição local",
+        },
+        {
+            "id": "S002", "kind": "biblical_paraphrase", "verses": "Gênesis 28:10-15",
+            "facts": ["partida de Berseba", "sono", "visão", "promessa de presença, cuidado e retorno"],
+            "narration": "Jacó saiu de Berseba para Harã. Ao anoitecer, descansou com uma pedra como apoio para a cabeça e dormiu. No sonho, viu a escada e os anjos; Deus lhe prometeu presença, cuidado e retorno.",
+            "motion_need": "transição de descanso para sonho; anjos em movimento no sonho",
+        },
+        {
+            "id": "S003", "kind": "biblical_paraphrase", "verses": "Gênesis 28:16-22",
+            "facts": ["despertar reverente", "Betel", "voto"],
+            "narration": "Ao despertar, Jacó ficou admirado e reverente. Pela manhã, ergueu a pedra, derramou óleo sobre ela e chamou aquele lugar de Betel. Seu voto falou de reconhecer o cuidado de Deus; não era uma barganha.",
+            "motion_need": "manhã, pedra erguida e óleo; contemplação",
+        },
+        {
+            "id": "S004", "kind": "family_reflection", "facts": ["reflexão separada"],
+            "narration": "O voto de Jacó não controlou Deus. A promessa foi para Jacó. Conversem em família sobre confiar em Deus.",
+            "motion_need": "fechamento separado, sem apresentar como fala bíblica",
+        },
+    ]
+    research["provider_candidates"] = [
+        {"route": "route-a", "capability": "imagem", "qualification_status": "UNQUALIFIED", "commercial_status": "UNKNOWN"},
+        {"route": "route-b", "capability": "vídeo", "qualification_status": "UNQUALIFIED", "commercial_status": "UNKNOWN"},
+        {"route": "route-c", "capability": "vídeo", "qualification_status": "UNQUALIFIED", "commercial_status": "UNKNOWN"},
+    ]
+    path = tmp_path / "jaco-source.json"
+    path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+    created = start_preproduction(tmp_path, "Jacó\n".encode())
+
+    result = advance_preproduction(tmp_path, created["request_id"], path, mode="PREPRODUCTION")
+
+    revision = Path(result["active_revision_path"])
+    script = json.loads((revision / "script" / "script.json").read_text(encoding="utf-8"))
+    plan = json.loads((revision / "plan" / "editorial-plan.json").read_text(encoding="utf-8"))
+    assert result["status"] == "TTS_REQUIRED"
+    assert script["narration"] == "\n\n".join(item["narration"] for item in research["narrative_segments"])
+    assert "..." not in script["narration"]
+    assert "target_duration_s" not in script
+    assert script["estimated_narration_seconds"] > 0
+    assert plan["prices_usd"] is None
+    assert len(plan["recommendation"]["provider_candidates"]) == 3
+    assert all(candidate["qualification_status"] == "UNQUALIFIED" for candidate in plan["recommendation"]["provider_candidates"])
+    assert [entry["segment_id"] for entry in plan["recommendation"]["segment_fact_matrix"]] == ["S001", "S002", "S003", "S004"]
+    assert plan["recommendation"]["duration_status"] == "ESTIMATE_PENDING_MEASURED_AUDIO"
+    qa = json.loads((revision / "qa" / "script-qa.json").read_text(encoding="utf-8"))
+    assert qa["verdict"] == "PENDING_INDEPENDENT_EDITORIAL_REVIEW"
+    assert result["stages"]["script_qa"]["status"] == "PENDING_INDEPENDENT_EDITORIAL_REVIEW"
+
+
+def test_source_bound_closing_requires_one_final_reflection_and_never_invents_media_duration(tmp_path):
+    """A pre-audio closing has an estimate only, not a fictional audio/video fact."""
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    source = json.loads(_source(tmp_path / "source.json", mode="PREPRODUCTION").read_text(encoding="utf-8"))
+    source["research"]["narrative_segments"] = [
+        {
+            "id": "S001", "kind": "biblical_paraphrase", "verses": "Gênesis 28:1",
+            "facts": ["bênção"], "narration": "Isaque abençoou Jacó.", "motion_need": "imagem local",
+        },
+        {
+            "id": "S002", "kind": "family_reflection", "facts": ["reflexão"],
+            "narration": "O voto de Jacó não controlou Deus. A promessa foi para Jacó. Conversem em família sobre confiar em Deus.",
+            "motion_need": "fechamento editorial sem áudio ou visual aprovado",
+        },
+    ]
+    source_path = tmp_path / "source-bound.json"
+    source_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+    created = start_preproduction(tmp_path, "Jacó\n".encode())
+
+    result = advance_preproduction(tmp_path, created["request_id"], source_path, mode="PREPRODUCTION")
+
+    script = json.loads((Path(result["active_revision_path"]) / "script" / "script.json").read_text(encoding="utf-8"))
+    closing = script["segments"][-1]
+    assert result["status"] == "TTS_REQUIRED"
+    assert [segment["kind"] for segment in script["segments"]].count("family_reflection") == 1
+    assert closing["narration"] == source["research"]["narrative_segments"][-1]["narration"]
+    assert script["closing_estimated_duration_s"] == pytest.approx(19 / 130 * 60)
+    assert script["duration_measurement"] == "PENDING_MEASURED_AUDIO"
+    assert "closing_duration_s" not in script
+    assert "duration_s" not in closing
+    assert "presenter" not in closing
+    assert "visual_mode" not in closing
+    assert "recurring_narrator" not in script
+
+
+@pytest.mark.parametrize("bad_segments, finding", [
+    ([
+        {"id": "S001", "kind": "biblical_paraphrase", "verses": "Gênesis 28:1", "facts": ["x"], "narration": "Texto.", "motion_need": "local"},
+    ], "EXACTLY_ONE_FINAL_FAMILY_REFLECTION_REQUIRED"),
+    ([
+        {"id": "S001", "kind": "family_reflection", "facts": ["x"], "narration": "Primeira.", "motion_need": "local"},
+        {"id": "S002", "kind": "family_reflection", "facts": ["y"], "narration": "Segunda.", "motion_need": "local"},
+    ], "EXACTLY_ONE_FINAL_FAMILY_REFLECTION_REQUIRED"),
+    ([
+        {"id": "S001", "kind": "biblical_paraphrase", "verses": "Gênesis 28:1", "facts": ["x"], "narration": "Texto…", "motion_need": "local"},
+        {"id": "S002", "kind": "family_reflection", "facts": ["y"], "narration": "Reflexão.", "motion_need": "local"},
+    ], "source-bound narration must be complete prose"),
+])
+def test_source_bound_preproduction_rejects_missing_multiple_or_unicode_incomplete_reflection(tmp_path, bad_segments, finding):
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    source = json.loads(_source(tmp_path / "source.json", mode="PREPRODUCTION").read_text(encoding="utf-8"))
+    source["research"]["narrative_segments"] = bad_segments
+    source_path = tmp_path / "bad-source.json"
+    source_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+    created = start_preproduction(tmp_path, "Jacó\n".encode())
+
+    with pytest.raises(ValueError, match=finding):
+        advance_preproduction(tmp_path, created["request_id"], source_path, mode="PREPRODUCTION")
+
+
+def test_source_bound_preproduction_blocks_closing_estimate_over_ten_seconds(tmp_path):
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    source = json.loads(_source(tmp_path / "source.json", mode="PREPRODUCTION").read_text(encoding="utf-8"))
+    source["research"]["narrative_segments"] = [
+        {"id": "S001", "kind": "biblical_paraphrase", "verses": "Gênesis 28:1", "facts": ["x"], "narration": "Texto.", "motion_need": "local"},
+        {"id": "S002", "kind": "family_reflection", "facts": ["y"], "narration": " ".join(["palavra"] * 22) + ".", "motion_need": "local"},
+    ]
+    source_path = tmp_path / "long-closing.json"
+    source_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+    created = start_preproduction(tmp_path, "Jacó\n".encode())
+
+    with pytest.raises(ValueError, match="SOURCE_BOUND_CLOSING_ESTIMATE_EXCEEDS_10_SECONDS"):
+        advance_preproduction(tmp_path, created["request_id"], source_path, mode="PREPRODUCTION")
+
+
+@pytest.mark.parametrize("forbidden_key", ("price", "cost", "usd", "quote"))
+def test_preproduction_rejects_nested_candidate_price_claims(tmp_path, forbidden_key):
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    source = json.loads(_source(tmp_path / "source.json", mode="PREPRODUCTION").read_text(encoding="utf-8"))
+    source["research"]["provider_candidates"] = [{
+        "route": "unqualified", "capability": "none", "qualification_status": "UNQUALIFIED",
+        "commercial_status": "UNKNOWN", "nested": {f"{forbidden_key}_evidence": "invented"},
+    }]
+    path = tmp_path / "priced-source.json"
+    path.write_text(json.dumps(source), encoding="utf-8")
+    created = start_preproduction(tmp_path, b"No price\n")
+
+    with pytest.raises(ValueError, match="prices"):
+        advance_preproduction(tmp_path, created["request_id"], path, mode="PREPRODUCTION")
+
+
+def test_preproduction_rejects_price_claim_nested_in_candidate_array(tmp_path):
+    from src.hybrid.preproduction import advance_preproduction, start_preproduction
+
+    source = json.loads(_source(tmp_path / "source.json", mode="PREPRODUCTION").read_text(encoding="utf-8"))
+    source["research"]["provider_candidates"] = [{
+        "route": "unqualified", "capability": "none", "qualification_status": "UNQUALIFIED",
+        "commercial_status": "UNKNOWN", "evidence": [{"quote": "invented"}],
+    }]
+    path = tmp_path / "array-priced-source.json"
+    path.write_text(json.dumps(source), encoding="utf-8")
+    created = start_preproduction(tmp_path, b"No price array\n")
+
+    with pytest.raises(ValueError, match="prices"):
+        advance_preproduction(tmp_path, created["request_id"], path, mode="PREPRODUCTION")
+
+
 def test_preproduction_rejects_unlabelled_test_source_and_invalid_storyboard_evidence(tmp_path):
     from src.hybrid.preproduction import advance_preproduction, start_preproduction
 

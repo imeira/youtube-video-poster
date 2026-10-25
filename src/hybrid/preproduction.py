@@ -19,7 +19,6 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from src.agents.duration_planner import DurationPlannerAgent
 from src.agents.script import ScriptAgent
 from src.agents.script_qa import ScriptQAAgent
 from src.agents.storyboard import StoryboardAgent
@@ -213,6 +212,20 @@ def _validate_evidence(value: dict[str, Any], *, schema: str, mode: str, label: 
         raise ValueError("TEST source cannot enter non-TEST preproduction")
 
 
+def _contains_unqualified_price_claim(value: object) -> bool:
+    """Candidates without live qualification must carry no direct or nested quote."""
+    forbidden = ("price", "cost", "usd", "quote")
+    if isinstance(value, dict):
+        return any(
+            any(token in str(key).lower() for token in forbidden)
+            or _contains_unqualified_price_claim(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_unqualified_price_claim(child) for child in value)
+    return False
+
+
 def _storyboard_report(scenes: list[dict], segments: list[dict], duration: float) -> dict[str, Any]:
     if len(scenes) != len(segments) or not scenes:
         raise ValueError("timeline storyboard must cover every script segment")
@@ -375,27 +388,81 @@ def _advance_preproduction_locked(
         research_dir, plan_dir, script_dir, qa_dir = (revision / name for name in ("research", "plan", "script", "qa"))
         research_dir.mkdir(exist_ok=True)
         _atomic_json(research_dir / "sources.json", research)
-        with _without_ambient_story_plan():
-            duration_plan = asdict(DurationPlannerAgent().plan(str(research.get("story", "")), research))
-        plan = {"adapter": "src.agents.duration_planner:DurationPlannerAgent", "recommendation": duration_plan,
-                "prices_usd": None, "paid_execution": "BLOCKED", "source_sha256": source_sha}
-        plan["plan_sha256"] = _digest_json(plan)
-        plan_dir.mkdir(exist_ok=True)
-        _atomic_json(plan_dir / "editorial-plan.json", plan)
-        generated = asyncio.run(ScriptAgent(llm_provider=None).run("PREPRODUCTION", research, int(duration_plan["recommended_duration_s"]), str(script_dir)))
+        generated = asyncio.run(ScriptAgent(llm_provider=None).run(
+            "PREPRODUCTION", research, target_duration_s=None, script_dir=str(script_dir)
+        ))
         if not generated.success:
             raise ValueError("ScriptAgent rejected source evidence: " + str(generated.error))
         script_path = reject_reparse_path(script_dir / "script.json")
         script = json.loads(script_path.read_text(encoding="utf-8"))
+        segments = script["segments"]
+        source_segments = research.get("narrative_segments", [])
+        if source_segments:
+            if not isinstance(source_segments, list) or len(source_segments) != len(segments):
+                raise ValueError("source narrative segments must cover every semantic script segment")
+            segment_fact_matrix = [
+                {"segment_id": item.get("id"), "kind": item.get("kind"), "verses": item.get("verses", ""),
+                 "facts": item.get("facts"), "motion_need": item.get("motion_need")}
+                for item in source_segments
+            ]
+            if any(not isinstance(item["motion_need"], str) or not item["motion_need"].strip() for item in segment_fact_matrix):
+                raise ValueError("source narrative segment motion needs are required")
+        else:
+            motion_requirements = research.get("scene_motion_requirements", [])
+            if not isinstance(motion_requirements, list) or (motion_requirements and len(motion_requirements) != len(segments)):
+                raise ValueError("source motion requirements must cover every semantic script segment")
+            segment_fact_matrix = motion_requirements
+        provider_candidates = research.get("provider_candidates", [])
+        if not isinstance(provider_candidates, list) or any(not isinstance(item, dict) for item in provider_candidates):
+            raise ValueError("provider candidates must be a list of capability records")
+        if any(
+            item.get("qualification_status") != "UNQUALIFIED"
+            or item.get("commercial_status") != "UNKNOWN"
+            or _contains_unqualified_price_claim(item)
+            for item in provider_candidates
+        ):
+            raise ValueError("provider candidates cannot claim unqualified prices")
+        word_count = len(script["narration"].split())
+        estimated_narration_seconds = (word_count / ScriptAgent.WORDS_PER_MINUTE) * 60
+        recommendation = {
+            "schema": "source-bound-editorial-plan-v1",
+            "timing_policy": "semantic_segments_only",
+            "word_count_measured": word_count,
+            "words_per_minute_reference": ScriptAgent.WORDS_PER_MINUTE,
+            "estimated_narration_seconds": estimated_narration_seconds,
+            "semantic_segment_count": len(segments),
+            "scene_count": len(segments),
+            "biblical_event_count": len(research["narrative_classification"]["BIBLICAL_FACT"]),
+            "duration_status": "ESTIMATE_PENDING_MEASURED_AUDIO",
+            "segment_fact_matrix": segment_fact_matrix,
+            "provider_candidates": provider_candidates,
+            "references": research.get("references", []),
+        }
+        plan = {"adapter": "src.hybrid.preproduction:offline_source_bound_plan", "recommendation": recommendation,
+                "prices_usd": None, "paid_execution": "BLOCKED", "source_sha256": source_sha}
+        plan["plan_sha256"] = _digest_json(plan)
+        plan_dir.mkdir(exist_ok=True)
+        _atomic_json(plan_dir / "editorial-plan.json", plan)
         qa = ScriptQAAgent().review(script)
         qa_dir.mkdir(exist_ok=True)
-        _atomic_json(qa_dir / "script-qa.json", {"adapter": "src.agents.script_qa:ScriptQAAgent", "approved": qa.approved, "findings": list(qa.findings)})
+        source_bound_review = bool(source_segments)
+        qa_document = {
+            "adapter": "src.agents.script_qa:ScriptQAAgent",
+            "deterministic_checks_passed": qa.approved,
+            "findings": list(qa.findings),
+            "verdict": "PENDING_INDEPENDENT_EDITORIAL_REVIEW" if source_bound_review else ("PASS" if qa.approved else "FAIL"),
+        }
+        _atomic_json(qa_dir / "script-qa.json", qa_document)
         if not qa.approved:
             raise ValueError("ScriptQA rejected source-bound script: " + ", ".join(qa.findings))
         stages["research"] = {"status": "COMPLETE", "attempts": 1, "sha256": sha256(_guarded_bytes(research_dir / "sources.json")).hexdigest()}
         stages["plan"] = {"status": "COMPLETE", "attempts": 1, "sha256": sha256(_guarded_bytes(plan_dir / "editorial-plan.json")).hexdigest()}
         stages["script"] = {"status": "COMPLETE", "attempts": 1, "sha256": sha256(_guarded_bytes(script_dir / "script.json")).hexdigest()}
-        stages["script_qa"] = {"status": "PASS", "attempts": 1, "sha256": sha256(_guarded_bytes(qa_dir / "script-qa.json")).hexdigest()}
+        stages["script_qa"] = {
+            "status": "PENDING_INDEPENDENT_EDITORIAL_REVIEW" if source_bound_review else "PASS",
+            "attempts": 1,
+            "sha256": sha256(_guarded_bytes(qa_dir / "script-qa.json")).hexdigest(),
+        }
 
     if timeline_path is None:
         if audio_path is not None:
@@ -406,6 +473,8 @@ def _advance_preproduction_locked(
             stages.setdefault("storyboard", {"status": "TTS_REQUIRED", "attempts": 0})
             status = "TTS_REQUIRED"
     else:
+        if stages.get("script_qa", {}).get("status") == "PENDING_INDEPENDENT_EDITORIAL_REVIEW":
+            raise ValueError("independent editorial review is pending; audio and storyboard remain blocked")
         if audio_path is None:
             raise ValueError("timeline evidence requires a local measured audio file")
         timeline, timeline_sha, timeline_raw = _read_local_json(timeline_path, "timeline evidence")
