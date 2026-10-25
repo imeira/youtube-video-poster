@@ -45,6 +45,7 @@ async def test_synthesize_requests_word_boundaries_and_derives_sentence_windows(
     result = await tts.synthesize("Era uma vez. Outra frase.")
 
     assert _FakeCommunicate.boundary_requested == "WordBoundary"
+    assert result.metadata["boundary_source"] == "WordBoundary"
     assert [word["word"] for word in result.word_timestamps] == [
         "Era", "uma", "vez.", "Outra", "frase."
     ]
