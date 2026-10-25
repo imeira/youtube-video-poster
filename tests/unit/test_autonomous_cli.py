@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from hashlib import sha256
 from pathlib import Path
 
@@ -162,6 +163,30 @@ def test_cli_compiled_test_packet_rehydrates_successors_and_rejects_mutation(tmp
     assert rejected["kind"] == "compiled-test"
     assert rejected["state"] == "REJECTED"
     request_id = rejected["request_id"]
+    runner_root = workspace / "TC" / request_id[:16] / "runner"
+    metrics_db = runner_root / "operational-metrics.sqlite3"
+    ready = tmp_path / "compiled-wal-writer-ready"
+    writer = subprocess.Popen(
+        [str(PYTHON), "-c", "from pathlib import Path; import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); db.execute('PRAGMA journal_mode=WAL'); db.execute('BEGIN IMMEDIATE'); db.execute('PRAGMA user_version=9'); Path(sys.argv[2]).write_text('ready'); time.sleep(15); db.rollback(); db.close()", str(metrics_db), str(ready)],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": ""},
+    )
+    try:
+        for _ in range(40):
+            if ready.exists():
+                break
+            time.sleep(0.05)
+        assert ready.exists()
+        assert metrics_db.with_name(metrics_db.name + "-wal").exists()
+        before = {path.relative_to(runner_root): path.read_bytes() for path in runner_root.rglob("*") if path.is_file() and not path.name.endswith("-shm")}
+        code, compiled_status = run_cli("status", "--workspace", str(workspace), "--request-id", request_id)
+        after = {path.relative_to(runner_root): path.read_bytes() for path in runner_root.rglob("*") if path.is_file() and not path.name.endswith("-shm")}
+    finally:
+        writer.terminate()
+        writer.wait(timeout=10)
+    assert code == 0, compiled_status
+    assert compiled_status["operational_metrics"]["status"] == "CURRENT"
+    assert before == after
 
     code, remediated = run_cli(
         "remediate", "--workspace", str(workspace), "--request-id", request_id,

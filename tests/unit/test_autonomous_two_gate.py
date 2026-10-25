@@ -244,6 +244,366 @@ def test_metrics_separate_quota_tokens_and_money_and_cache_is_hash_compatible(tm
     assert cache.get("tts", [source], {"voice": "other", "rate": "+0%"}) is None
 
 
+def test_operational_metrics_reconciles_once_by_request_or_event_and_keeps_unknown_billing_unspent(tmp_path):
+    from datetime import UTC, datetime
+
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    ledger = OperationalMetricsLedger(tmp_path / "operational-metrics.sqlite3")
+    observation = {
+        "event_id": "event-1",
+        "request_id": "request-1",
+        "episode_id": "TEST-EP",
+        "worker": "worker-a",
+        "experiment": True,
+        "observed_at": datetime(2026, 10, 31, 23, 59, tzinfo=UTC),
+        "model": "model https://signed.example/result?token=secret",
+        "tokens_input": 10,
+        "tokens_cached": 3,
+        "tokens_output": 5,
+        "tokens_reasoning": 7,
+        "latency_s": 1.5,
+        "quota_units": 99,
+        "billing_status": "UNKNOWN",
+    }
+    assert ledger.reconcile(observation) is True
+    assert ledger.reconcile(dict(observation)) is False
+    replay = dict(observation, event_id="event-worker-replay", worker="worker-b")
+    assert ledger.reconcile(replay) is False
+
+    report = ledger.report()
+    assert report["money_usd"] is None
+    assert report["unknown_billing_requests"] == 1
+    assert report["unauthenticated_billing_requests"] == 0
+    assert report["tokens"] == {"input": 10, "cached": 3, "output": 5, "reasoning": 7}
+    assert report["quota_units"] == 99
+    assert report["latency_s"] == 1.5
+    assert report["by_month_utc"]["2026-10"]["unknown_billing_requests"] == 1
+    assert report["by_experiment"]["true"]["requests"] == 1
+    assert report["by_worker"]["worker-a"]["requests"] == 1
+    assert report["models"] == []
+
+
+def test_operational_metrics_rejects_missing_measurements_and_unauthenticated_money(tmp_path):
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    ledger = OperationalMetricsLedger(tmp_path / "operational-metrics.sqlite3")
+    with pytest.raises(ValueError, match="missing metric"):
+        ledger.reconcile({
+            "event_id": "e1", "request_id": "r1", "episode_id": "TEST-EP",
+            "worker": "worker", "experiment": False, "billing_status": "UNKNOWN",
+        })
+    with pytest.raises(ValueError, match="unauthenticated"):
+        ledger.reconcile({
+            "event_id": "e2", "request_id": "r2", "episode_id": "TEST-EP",
+            "worker": "worker", "experiment": False, "billing_status": "UNAUTHENTICATED",
+            "money_usd": "0.10",
+        })
+
+
+@pytest.mark.parametrize("latency_s", [float("nan"), float("inf"), float("-inf")])
+def test_operational_metrics_rejects_nonfinite_latency_before_any_metrics_write(tmp_path, latency_s):
+    import sqlite3
+
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    path = tmp_path / "operational-metrics.sqlite3"
+    ledger = OperationalMetricsLedger(path)
+    snapshot_before = path.with_suffix(".snapshot.json").read_bytes()
+    observation = {
+        "event_id": "nonfinite-latency-event", "request_id": "nonfinite-latency-request",
+        "episode_id": "TEST-EP", "worker": "writer", "experiment": False,
+        "tokens_input": 1, "latency_s": latency_s, "billing_status": "UNKNOWN",
+    }
+
+    with pytest.raises(ValueError, match="latency_s must be nonnegative"):
+        ledger.reconcile(observation)
+
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone() == (0,)
+    assert path.with_suffix(".snapshot.json").read_bytes() == snapshot_before
+
+
+def test_operational_metrics_keeps_finite_or_absent_latency_rules(tmp_path):
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    for index, (latency_s, expected_latency) in enumerate(((0, 0.0), (1.5, 1.5), (None, None))):
+        ledger = OperationalMetricsLedger(tmp_path / f"operational-metrics-{index}.sqlite3")
+        assert ledger.reconcile({
+            "event_id": f"finite-latency-event-{index}",
+            "request_id": f"finite-latency-request-{index}",
+            "episode_id": "TEST-EP", "worker": "writer", "experiment": False,
+            "tokens_input": 1, "latency_s": latency_s, "billing_status": "UNKNOWN",
+        }) is True
+        assert ledger.report()["latency_s"] == expected_latency
+
+
+def test_operational_metrics_only_persists_catalog_models_and_preserves_event_time_across_restart(tmp_path):
+    import sqlite3
+    from datetime import UTC, datetime
+
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    path = tmp_path / "operational-metrics.sqlite3"
+    ledger = OperationalMetricsLedger(path, model_catalog={"gpt-5.6-terra"})
+    known = {
+        "event_id": "known-model", "request_id": "known-request", "episode_id": "TEST-EP",
+        "worker": "first-worker", "experiment": False,
+        "observed_at": datetime(2026, 10, 31, 23, 59, tzinfo=UTC),
+        "model": "gpt-5.6-terra", "tokens_input": 1, "billing_status": "UNKNOWN",
+    }
+    unknown = {
+        "event_id": "unknown-model", "request_id": "unknown-request", "episode_id": "TEST-EP",
+        "worker": "first-worker", "experiment": False,
+        "observed_at": datetime(2026, 11, 1, 0, 1, tzinfo=UTC),
+        "model": "arbitrary-secret-value", "tokens_input": 1, "billing_status": "UNKNOWN",
+    }
+    assert ledger.reconcile(known) is True
+    assert ledger.reconcile(unknown) is True
+    restarted = OperationalMetricsLedger(path, model_catalog={"gpt-5.6-terra"})
+    report = restarted.report()
+    snapshot = OperationalMetricsLedger.read_snapshot(path)
+    assert snapshot["status"] == "CURRENT"
+    assert snapshot["report"]["requests"] == 2
+    assert report["models"] == ["gpt-5.6-terra"]
+    assert report["by_month_utc"]["2026-10"]["requests"] == 1
+    assert report["by_month_utc"]["2026-11"]["requests"] == 1
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT model FROM observations WHERE request_id='unknown-request'").fetchone() == (None,)
+        assert db.execute("SELECT observed_at_utc FROM observations WHERE request_id='known-request'").fetchone() == ("2026-10-31T23:59:00+00:00",)
+
+
+def test_operational_metrics_unknown_receipt_time_is_not_assigned_a_month(tmp_path):
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    ledger = OperationalMetricsLedger(tmp_path / "operational-metrics.sqlite3")
+    assert ledger.reconcile_executor_receipt(
+        {"request_id": "receipt-without-time", "status": "COMPLETE"}, episode_id="TEST-EP"
+    ) is True
+    report = ledger.report()
+    assert report["unknown_timestamp_requests"] == 1
+    assert report["by_month_utc"] == {}
+
+
+def test_operational_metrics_rejects_secret_bearing_identity_urls_before_observation_write(tmp_path):
+    import sqlite3
+
+    from src.hybrid.autonomous import (
+        OperationalMetricsConflict,
+        OperationalMetricsLedger,
+    )
+
+    path = tmp_path / "operational-metrics.sqlite3"
+    ledger = OperationalMetricsLedger(path)
+    base = {
+        "event_id": "evt:literal-1", "request_id": "req:literal-1", "episode_id": "TEST-EP",
+        "worker": "worker:one", "experiment": False, "tokens_input": 1,
+        "billing_status": "UNKNOWN",
+    }
+    for request_id, event_id in (
+        ("https://example/a?token=one", "evt:secret-a"),
+        ("https://example/b?token=two", "evt:secret-b"),
+    ):
+        with pytest.raises(ValueError, match="opaque identifier"):
+            ledger.reconcile({**base, "request_id": request_id, "event_id": event_id})
+    for field in ("event_id", "episode_id", "worker"):
+        with pytest.raises(ValueError, match="opaque identifier"):
+            ledger.reconcile({**base, field: "https://example/a?token=one"})
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone() == (0,)
+
+    assert ledger.reconcile(base) is True
+    assert ledger.reconcile(dict(base)) is False
+    assert ledger.reconcile({**base, "event_id": "evt:worker-replay", "worker": "worker:two"}) is False
+    with pytest.raises(OperationalMetricsConflict):
+        ledger.reconcile({**base, "event_id": "evt:divergent", "tokens_input": 2})
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT request_id, event_id, episode_id, worker FROM observations").fetchone() == (
+            "req:literal-1", "evt:literal-1", "TEST-EP", "worker:one",
+        )
+    assert ledger.report()["conflicts"] == 1
+
+
+def test_operational_metrics_rejects_persistent_divergent_identity_but_dedupes_worker_replay(tmp_path):
+    from datetime import UTC, datetime
+
+    from src.hybrid.autonomous import (
+        OperationalMetricsConflict,
+        OperationalMetricsLedger,
+    )
+
+    ledger = OperationalMetricsLedger(tmp_path / "operational-metrics.sqlite3")
+    observation = {
+        "event_id": "event-1", "request_id": "request-1", "episode_id": "TEST-EP",
+        "worker": "worker-a", "experiment": True,
+        "observed_at": datetime(2026, 10, 31, 23, 59, tzinfo=UTC),
+        "tokens_input": 10, "billing_status": "UNKNOWN",
+    }
+    assert ledger.reconcile(observation) is True
+    assert ledger.reconcile({**observation, "event_id": "worker-replay", "worker": "worker-b"}) is False
+    with pytest.raises(OperationalMetricsConflict):
+        ledger.reconcile({**observation, "tokens_input": 11})
+    assert ledger.report()["requests"] == 1
+    assert ledger.report()["conflicts"] == 1
+
+
+def test_cli_status_reads_only_atomic_metrics_snapshot_with_existing_wal_and_writer(tmp_path):
+    import json
+
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    rid = "a" * 64
+    root = tmp_path / "TEST" / rid
+    root.mkdir(parents=True)
+    (root / "prompt.txt").write_text("fixture", encoding="utf-8")
+    (root / "harness.json").write_text('{"prompt_sha256":"' + __import__("hashlib").sha256(b"fixture").hexdigest() + '","request":{}}', encoding="utf-8")
+    (root / "runner.json").write_text('{"state":"NEW","media":{}}', encoding="utf-8")
+    db_path = root / "operational-metrics.sqlite3"
+    ledger = OperationalMetricsLedger(db_path)
+    assert ledger.reconcile({
+        "event_id": "snapshot-event", "request_id": "snapshot-request", "episode_id": "TEST-EP",
+        "worker": "writer", "experiment": False, "tokens_input": 1, "billing_status": "UNKNOWN",
+    }) is True
+    ready = tmp_path / "writer-ready"
+    child = subprocess.Popen(
+        [sys.executable, "-c", "from pathlib import Path; import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); db.execute('PRAGMA journal_mode=WAL'); db.execute('BEGIN IMMEDIATE'); db.execute('PRAGMA user_version=7'); Path(sys.argv[2]).write_text('ready'); time.sleep(2); db.rollback(); db.close()", str(db_path), str(ready)],
+        cwd=Path(__file__).parents[2],
+    )
+    try:
+        for _ in range(40):
+            if ready.exists():
+                break
+            time.sleep(0.05)
+        assert ready.exists()
+        assert db_path.with_name(db_path.name + "-wal").exists()
+        before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file() and not path.name.endswith("-shm")}
+        completed = subprocess.run(
+            [sys.executable, "-c", "from src.hybrid.autonomous_cli import main; import sys; raise SystemExit(main(sys.argv[1:]))", "status", "--workspace", str(tmp_path), "--request-id", rid],
+            cwd=Path(__file__).parents[2], text=True, capture_output=True, check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        result = json.loads(completed.stdout)
+        after = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file() and not path.name.endswith("-shm")}
+    finally:
+        child.wait(timeout=10)
+    assert after == before
+    assert result["operational_metrics"]["status"] == "CURRENT"
+    assert result["operational_metrics"]["report"]["requests"] == 1
+    assert result["operational_metrics"]["snapshot_sha256"]
+
+
+def test_metrics_snapshot_missing_and_stale_are_never_current(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    path = tmp_path / "operational-metrics.sqlite3"
+    assert OperationalMetricsLedger.read_snapshot(path) == {"status": "MISSING"}
+    ledger = OperationalMetricsLedger(path)
+    ledger.reconcile({
+        "event_id": "stale-event", "request_id": "stale-request", "episode_id": "TEST-EP",
+        "worker": "writer", "experiment": False, "tokens_input": 1, "billing_status": "UNKNOWN",
+    })
+    stale = OperationalMetricsLedger.read_snapshot(
+        path, now=datetime.now(UTC) + timedelta(seconds=301)
+    )
+    assert stale["status"] == "STALE"
+    assert "report" not in stale
+
+
+def test_metrics_snapshot_rejects_future_timestamp_under_explicit_clock_policy(tmp_path):
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    from src.hybrid.autonomous import OperationalMetricsLedger, _digest_json
+
+    path = tmp_path / "operational-metrics.sqlite3"
+    ledger = OperationalMetricsLedger(path)
+    ledger.reconcile({
+        "event_id": "future-event", "request_id": "future-request", "episode_id": "TEST-EP",
+        "worker": "writer", "experiment": False, "tokens_input": 1, "billing_status": "UNKNOWN",
+    })
+    snapshot_path = path.with_suffix(".snapshot.json")
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["generated_at_utc"] = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
+    snapshot["snapshot_sha256"] = _digest_json({key: value for key, value in snapshot.items() if key != "snapshot_sha256"})
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    result = OperationalMetricsLedger.read_snapshot(path)
+    assert result == {"status": "STALE", "reason": "SNAPSHOT_CLOCK_POLICY"}
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda report: report.update({"requests": False}),
+    lambda report: report["tokens"].update({"input": float("nan")}),
+    lambda report: report["by_worker"].update({"writer": {"requests": 0}}),
+    lambda report: report.update({"unexpected": 1}),
+])
+def test_metrics_snapshot_requires_closed_typed_report_schema(tmp_path, mutate):
+    import json
+
+    from src.hybrid.autonomous import OperationalMetricsLedger, _digest_json
+
+    path = tmp_path / "operational-metrics.sqlite3"
+    ledger = OperationalMetricsLedger(path)
+    ledger.reconcile({
+        "event_id": "schema-event", "request_id": "schema-request", "episode_id": "TEST-EP",
+        "worker": "writer", "experiment": False, "tokens_input": 1, "billing_status": "UNKNOWN",
+    })
+    snapshot_path = path.with_suffix(".snapshot.json")
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    mutate(snapshot["report"])
+    snapshot["snapshot_sha256"] = _digest_json({key: value for key, value in snapshot.items() if key != "snapshot_sha256"})
+    snapshot_path.write_text(json.dumps(snapshot, allow_nan=True), encoding="utf-8")
+
+    assert OperationalMetricsLedger.read_snapshot(path) == {"status": "STALE", "reason": "SNAPSHOT_INVALID"}
+
+
+def test_metrics_constructor_crash_leaves_durable_writer_marker_not_prior_current(tmp_path, monkeypatch):
+    import json
+    from datetime import UTC, datetime
+
+    from src.hybrid.autonomous import OperationalMetricsLedger, _digest_json
+
+    path = tmp_path / "operational-metrics.sqlite3"
+    prior = {
+        "schema": OperationalMetricsLedger._SNAPSHOT_SCHEMA,
+        "status": "CURRENT",
+        "generated_at_utc": datetime.now(UTC).isoformat(),
+        "report": {"prior": "must-not-survive-reset"},
+    }
+    prior["snapshot_sha256"] = _digest_json(prior)
+    path.with_suffix(".snapshot.json").write_text(json.dumps(prior), encoding="utf-8")
+    monkeypatch.setattr(OperationalMetricsLedger, "_db", lambda self: (_ for _ in ()).throw(OSError("ctor crash")))
+
+    with pytest.raises(OSError, match="ctor crash"):
+        OperationalMetricsLedger(path)
+    assert OperationalMetricsLedger.read_snapshot(path) == {"status": "STALE", "reason": "WRITER_IN_PROGRESS"}
+
+
+def test_cli_status_missing_metrics_database_creates_nothing(tmp_path):
+    import json
+
+    rid = "b" * 64
+    root = tmp_path / "TEST" / rid
+    root.mkdir(parents=True)
+    (root / "prompt.txt").write_text("fixture", encoding="utf-8")
+    (root / "harness.json").write_text('{"prompt_sha256":"' + __import__("hashlib").sha256(b"fixture").hexdigest() + '","request":{}}', encoding="utf-8")
+    (root / "runner.json").write_text('{"state":"NEW","media":{}}', encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+    completed = subprocess.run(
+        [sys.executable, "-c", "from src.hybrid.autonomous_cli import main; import sys; raise SystemExit(main(sys.argv[1:]))", "status", "--workspace", str(tmp_path), "--request-id", rid],
+        cwd=Path(__file__).parents[2], text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["operational_metrics"] == {"status": "MISSING"}
+    assert {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()} == before
+    assert not (root / "operational-metrics.sqlite3").exists()
+    assert not (root / "operational-metrics.sqlite3-wal").exists()
+
+
 def test_profile_d_uses_terra_medium_and_luna_low_with_explicit_escalation():
     from src.providers.llm.core_model_router import CoreModelRouter
 

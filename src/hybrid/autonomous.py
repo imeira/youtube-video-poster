@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
@@ -227,6 +230,326 @@ class PersistentMetrics:
         _atomic_json(self.path, document)
 
 
+class OperationalMetricsConflict(ValueError):
+    """A request or event identity was reused for different immutable evidence."""
+
+
+class OperationalMetricsLedger:
+    """Offline deduplicated telemetry, explicitly separate from financial authority."""
+
+    _BILLING = frozenset({"AUTHENTICATED", "UNAUTHENTICATED", "UNKNOWN"})
+    _DEFAULT_MODEL_CATALOG = frozenset({"gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"})
+    _OPAQUE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+
+    _SNAPSHOT_SCHEMA = "operational-metrics-snapshot-v1"
+    _SNAPSHOT_MAX_AGE_SECONDS = 300
+
+    def __init__(self, path: Path, *, model_catalog=None, read_only=False):
+        self.path = Path(path)
+        self.snapshot_path = self.path.with_suffix(".snapshot.json")
+        self.lock_path = self.path.with_suffix(".metrics.lock")
+        self.read_only = read_only
+        catalog = self._DEFAULT_MODEL_CATALOG if model_catalog is None else frozenset(model_catalog)
+        if any(not isinstance(item, str) or not item or len(item) > 128 for item in catalog):
+            raise ValueError("model catalog must contain bounded model identifiers")
+        self.model_catalog = catalog
+        if read_only:
+            return
+        with file_lock(self.lock_path):
+            # A reset database must never inherit a prior CURRENT projection.
+            self._write_snapshot("WRITER_IN_PROGRESS")
+            db = self._db()
+            try:
+                db.execute("""CREATE TABLE IF NOT EXISTS observations (
+                  request_id TEXT PRIMARY KEY, event_id TEXT UNIQUE NOT NULL, episode_id TEXT NOT NULL,
+                  observed_at_utc TEXT, month_utc TEXT, experiment INTEGER NOT NULL, worker TEXT NOT NULL, model TEXT,
+                  tokens_input INTEGER, tokens_cached INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
+                  latency_s REAL, quota_units INTEGER, billing_status TEXT NOT NULL, money_usd TEXT,
+                  payload_sha256 TEXT NOT NULL)""")
+                db.execute("""CREATE TABLE IF NOT EXISTS observation_conflicts (
+                  identity_kind TEXT NOT NULL, identity_value TEXT NOT NULL, payload_sha256 TEXT NOT NULL,
+                  conflicting_payload_sha256 TEXT NOT NULL,
+                  PRIMARY KEY(identity_kind, identity_value, conflicting_payload_sha256))""")
+                db.commit()
+                rows = list(db.execute("SELECT * FROM observations"))
+                conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
+                self._write_snapshot("CURRENT", self._report_from_rows(rows, conflicts))
+            finally:
+                db.close()
+
+    def _db(self):
+        import sqlite3
+
+        if self.read_only:
+            db = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+        else:
+            db = sqlite3.connect(self.path, timeout=30)
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=FULL")
+        db.row_factory = sqlite3.Row
+        return db
+
+    @staticmethod
+    def _text(value, field, optional=False):
+        if value is None and optional:
+            return None
+        if not isinstance(value, str) or not OperationalMetricsLedger._OPAQUE_IDENTIFIER.fullmatch(value):
+            raise ValueError(f"{field} must be a bounded opaque identifier")
+        # Identity is not display text: accepted caller values are stored and keyed exactly.
+        return value
+
+    def _write_snapshot(self, status: str, report: dict[str, Any] | None = None) -> None:
+        document: dict[str, Any] = {
+            "schema": self._SNAPSHOT_SCHEMA,
+            "status": status,
+            "generated_at_utc": datetime.now(UTC).isoformat(),
+        }
+        if report is not None:
+            document["report"] = report
+        document["snapshot_sha256"] = _digest_json(document)
+        _atomic_json(self.snapshot_path, document)
+
+    @staticmethod
+    def _nonnegative_integer(value: object) -> bool:
+        return type(value) is int and value >= 0
+
+    @classmethod
+    def _valid_money(cls, value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            return _decimal(value, "money_usd") >= 0
+        except (PolicyError, ValueError):
+            return False
+
+    @classmethod
+    def _valid_bucket(cls, value: object) -> bool:
+        if not isinstance(value, dict) or set(value) != {
+            "requests", "money_usd", "unknown_billing_requests", "unauthenticated_billing_requests"
+        }:
+            return False
+        return (
+            all(cls._nonnegative_integer(value[key]) for key in (
+                "requests", "unknown_billing_requests", "unauthenticated_billing_requests"
+            ))
+            and (value["money_usd"] is None or cls._valid_money(value["money_usd"]))
+        )
+
+    @classmethod
+    def _valid_report(cls, report: object) -> bool:
+        expected = {
+            "schema", "requests", "money_usd", "unknown_billing_requests",
+            "unauthenticated_billing_requests", "tokens", "quota_units", "latency_s",
+            "unknown_timestamp_requests", "conflicts", "models", "by_episode",
+            "by_month_utc", "by_experiment", "by_worker",
+        }
+        if not isinstance(report, dict) or set(report) != expected or report.get("schema") != 1:
+            return False
+        if not all(cls._nonnegative_integer(report[key]) for key in (
+            "requests", "unknown_billing_requests", "unauthenticated_billing_requests",
+            "quota_units", "unknown_timestamp_requests", "conflicts",
+        )):
+            return False
+        if report["money_usd"] is not None and not cls._valid_money(report["money_usd"]):
+            return False
+        latency = report["latency_s"]
+        if latency is not None and (type(latency) not in {int, float} or not math.isfinite(latency) or latency < 0):
+            return False
+        tokens = report["tokens"]
+        if not isinstance(tokens, dict) or set(tokens) != {"input", "cached", "output", "reasoning"}:
+            return False
+        if not all(cls._nonnegative_integer(value) for value in tokens.values()):
+            return False
+        models = report["models"]
+        if not isinstance(models, list) or models != sorted(set(models)):
+            return False
+        if any(not isinstance(model, str) or not model or len(model) > 128 for model in models):
+            return False
+        for dimension in ("by_episode", "by_month_utc", "by_experiment", "by_worker"):
+            buckets = report[dimension]
+            if not isinstance(buckets, dict) or not all(cls._valid_bucket(bucket) for bucket in buckets.values()):
+                return False
+            if dimension == "by_month_utc" and any(not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", key) for key in buckets):
+                return False
+            if dimension == "by_experiment" and set(buckets) - {"true", "false"}:
+                return False
+            if dimension in {"by_episode", "by_worker"} and any(not cls._OPAQUE_IDENTIFIER.fullmatch(key) for key in buckets):
+                return False
+        return True
+
+    @classmethod
+    def read_snapshot(cls, database_path: Path, *, now: datetime | None = None) -> dict[str, Any]:
+        """Read only an atomically replaced metrics report; never open SQLite."""
+        snapshot_path = Path(database_path).with_suffix(".snapshot.json")
+        if not snapshot_path.is_file():
+            return {"status": "MISSING"}
+        try:
+            document = json.loads(snapshot_path.read_bytes())
+            if not isinstance(document, dict):
+                raise TypeError("snapshot must be an object")
+            claimed_hash = document.get("snapshot_sha256")
+            payload = {key: value for key, value in document.items() if key != "snapshot_sha256"}
+            if document.get("status") not in {"CURRENT", "WRITER_IN_PROGRESS"}:
+                raise ValueError("snapshot status schema mismatch")
+            expected = {"schema", "status", "generated_at_utc", "snapshot_sha256"}
+            if document.get("status") == "CURRENT":
+                expected.add("report")
+            if set(document) != expected:
+                raise ValueError("snapshot envelope schema mismatch")
+            if not isinstance(claimed_hash, str) or claimed_hash != _digest_json(payload):
+                raise ValueError("snapshot hash mismatch")
+            if document.get("schema") != cls._SNAPSHOT_SCHEMA:
+                raise ValueError("snapshot schema mismatch")
+            generated_at = datetime.fromisoformat(document["generated_at_utc"])
+            if generated_at.tzinfo is None or generated_at.utcoffset() != UTC.utcoffset(generated_at):
+                raise ValueError("snapshot timestamp must be UTC")
+            if document.get("status") != "CURRENT" or "report" not in document:
+                return {"status": "STALE", "reason": "WRITER_IN_PROGRESS"}
+            current = datetime.now(UTC) if now is None else now
+            if current.tzinfo is None:
+                return {"status": "STALE", "reason": "SNAPSHOT_CLOCK_POLICY"}
+            age = (current.astimezone(UTC) - generated_at).total_seconds()
+            if age < 0:
+                return {"status": "STALE", "reason": "SNAPSHOT_CLOCK_POLICY"}
+            if age > cls._SNAPSHOT_MAX_AGE_SECONDS:
+                return {"status": "STALE", "reason": "SNAPSHOT_EXPIRED", "generated_at_utc": document["generated_at_utc"]}
+            if not cls._valid_report(document["report"]):
+                raise ValueError("snapshot report schema mismatch")
+            return {**document, "snapshot_sha256": claimed_hash}
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return {"status": "STALE", "reason": "SNAPSHOT_INVALID"}
+
+    def reconcile(self, observation: dict[str, Any]) -> bool:
+        if not isinstance(observation, dict):
+            raise TypeError("metrics observation must be an object")
+        event_id, request_id, episode_id, worker = (
+            self._text(observation.get(key), key)
+            for key in ("event_id", "request_id", "episode_id", "worker")
+        )
+        if type(observation.get("experiment")) is not bool:
+            raise ValueError("experiment must be boolean")
+        billing = observation.get("billing_status")
+        if billing not in self._BILLING:
+            raise ValueError("closed billing status is required")
+        when = observation.get("observed_at")
+        if when is not None and (not isinstance(when, datetime) or when.tzinfo is None):
+            raise ValueError("timezone-aware observed_at is required")
+        counts = []
+        for key in ("tokens_input", "tokens_cached", "tokens_output", "tokens_reasoning", "quota_units"):
+            value = observation.get(key)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{key} must be a nonnegative integer")
+            counts.append(value)
+        latency = observation.get("latency_s")
+        if latency is not None and (
+            type(latency) not in {int, float} or not math.isfinite(latency) or latency < 0
+        ):
+            raise ValueError("latency_s must be nonnegative")
+        money = observation.get("money_usd")
+        if billing != "AUTHENTICATED" and money is not None:
+            raise ValueError("unauthenticated or unknown billing cannot be real money")
+        if billing == "AUTHENTICATED" and money is None:
+            raise ValueError("authenticated billing requires reconciled money")
+        if not observation.get("missing_metrics") and all(value is None for value in (*counts, latency)):
+            raise ValueError("missing metric measurements must be explicit")
+        amount = None if money is None else str(_decimal(money, "money_usd"))
+        occurred = None if when is None else when.astimezone(UTC)
+        observed_at_utc = None if occurred is None else occurred.isoformat()
+        model = observation.get("model")
+        model = model if isinstance(model, str) and model in self.model_catalog else None
+        payload = {"episode_id": episode_id, "observed_at_utc": observed_at_utc,
+                   "experiment": observation["experiment"], "model": model,
+                   "tokens_input": counts[0], "tokens_cached": counts[1],
+                   "tokens_output": counts[2], "tokens_reasoning": counts[3],
+                   "latency_s": None if latency is None else float(latency), "quota_units": counts[4],
+                   "billing_status": billing, "money_usd": amount}
+        payload_sha256 = sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        row = (request_id, event_id, episode_id, observed_at_utc,
+               None if occurred is None else occurred.strftime("%Y-%m"), int(observation["experiment"]), worker,
+               model, *counts[:4], None if latency is None else float(latency), counts[4], billing, amount,
+               payload_sha256)
+        with file_lock(self.lock_path):
+            self._write_snapshot("WRITER_IN_PROGRESS")
+            db = self._db()
+            try:
+                matches = list(db.execute("SELECT * FROM observations WHERE request_id=? OR event_id=?", (request_id, event_id)))
+                if matches:
+                    if all(item["payload_sha256"] == payload_sha256 for item in matches):
+                        rows = list(db.execute("SELECT * FROM observations"))
+                        conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
+                        self._write_snapshot("CURRENT", self._report_from_rows(rows, conflicts))
+                        return False
+                    for item in matches:
+                        kind = "request_id" if item["request_id"] == request_id else "event_id"
+                        value = request_id if kind == "request_id" else event_id
+                        db.execute("INSERT OR IGNORE INTO observation_conflicts VALUES(?,?,?,?)",
+                                   (kind, value, item["payload_sha256"], payload_sha256))
+                    # Conflict evidence is append-only even though the caller receives an error.
+                    db.commit()
+                    rows = list(db.execute("SELECT * FROM observations"))
+                    conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
+                    self._write_snapshot("CURRENT", self._report_from_rows(rows, conflicts))
+                    raise OperationalMetricsConflict("metrics identity collision has divergent canonical payload")
+                db.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+                db.commit()
+                rows = list(db.execute("SELECT * FROM observations"))
+                conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
+                self._write_snapshot("CURRENT", self._report_from_rows(rows, conflicts))
+            finally:
+                db.close()
+        return True
+
+    def reconcile_executor_receipt(self, receipt, *, episode_id, worker="runner", experiment=False):
+        request_id = receipt.get("request_id") if isinstance(receipt, dict) else None
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError("executor receipt request_id is required")
+        observation = {"event_id": f"executor:{request_id}:{receipt.get('status', 'UNKNOWN')}",
+            "request_id": request_id, "episode_id": episode_id, "worker": worker,
+            "experiment": experiment, "billing_status": "UNAUTHENTICATED" if receipt.get("status") == "COMPLETE" else "UNKNOWN",
+            "missing_metrics": True}
+        if isinstance(receipt.get("observed_at"), datetime):
+            observation["observed_at"] = receipt["observed_at"]
+        return self.reconcile(observation)
+
+    def _report_from_rows(self, rows, conflicts):
+        tokens = {"input": 0, "cached": 0, "output": 0, "reasoning": 0}
+        buckets = {name: {} for name in ("by_episode", "by_month_utc", "by_experiment", "by_worker")}
+        money, latency, money_seen, latency_seen, models = Decimal(0), 0.0, False, False, set()
+        for row in rows:
+            dimensions = (("by_episode", row["episode_id"]), ("by_experiment", str(bool(row["experiment"])).lower()), ("by_worker", row["worker"]))
+            if row["month_utc"] is not None:
+                dimensions += (("by_month_utc", row["month_utc"]),)
+            for name, key in dimensions:
+                bucket = buckets[name].setdefault(key, {"requests": 0, "money_usd": None, "unknown_billing_requests": 0, "unauthenticated_billing_requests": 0})
+                bucket["requests"] += 1
+                if row["billing_status"] == "UNKNOWN": bucket["unknown_billing_requests"] += 1
+                if row["billing_status"] == "UNAUTHENTICATED": bucket["unauthenticated_billing_requests"] += 1
+                if row["money_usd"] is not None: bucket["money_usd"] = str(Decimal(bucket["money_usd"] or "0") + Decimal(row["money_usd"]))
+            for out, column in (("input", "tokens_input"), ("cached", "tokens_cached"), ("output", "tokens_output"), ("reasoning", "tokens_reasoning")): tokens[out] += row[column] or 0
+            if row["quota_units"] is None: pass
+            if row["latency_s"] is not None: latency, latency_seen = latency + row["latency_s"], True
+            if row["money_usd"] is not None: money, money_seen = money + Decimal(row["money_usd"]), True
+            if row["model"]: models.add(row["model"])
+        return {"schema": 1, "requests": len(rows), "money_usd": str(money) if money_seen else None,
+                "unknown_billing_requests": sum(row["billing_status"] == "UNKNOWN" for row in rows),
+                "unauthenticated_billing_requests": sum(row["billing_status"] == "UNAUTHENTICATED" for row in rows),
+                "tokens": tokens, "quota_units": sum(row["quota_units"] or 0 for row in rows), "latency_s": latency if latency_seen else None,
+                "unknown_timestamp_requests": sum(row["observed_at_utc"] is None for row in rows),
+                "conflicts": conflicts, "models": sorted(models), **buckets}
+
+    def report(self):
+        """Writer-side diagnostic projection; CLI status must call read_snapshot."""
+        if not self.path.is_file():
+            return {"status": "unavailable"}
+        db = self._db()
+        try:
+            rows = list(db.execute("SELECT * FROM observations"))
+            conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
+        finally:
+            db.close()
+        return self._report_from_rows(rows, conflicts)
+
+
 class ArtifactCache:
     """Small cache for TTS segments and rendered clips, keyed by bytes and config."""
 
@@ -313,6 +636,7 @@ class AutonomousTwoGateRunner:
         self.ledger = ledger
         self.path = self.root / "runner.json"
         self.lock_path = self.root / "runner.lock"
+        self.metrics = OperationalMetricsLedger(self.root / "operational-metrics.sqlite3")
         self._jobs: dict[str, Job] = {}
 
     def _load(self) -> dict[str, Any]:
@@ -535,6 +859,7 @@ class AutonomousTwoGateRunner:
             if receipt.get("status") != "COMPLETE":
                 if self.ledger is not None:
                     self.ledger.mark_unknown(request_id)
+                self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
                 raise RuntimeError(
                     "incomplete job requires resume_with_jobs; no ambiguous resubmit"
                 )
@@ -547,6 +872,8 @@ class AutonomousTwoGateRunner:
                 raise ValueError("completed receipt output hash mismatch")
             if self.ledger is not None:
                 self.ledger.settle(request_id, receipt["actual_cost"])
+            # A local provider receipt is operational evidence only, never authenticated billing.
+            self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
             if request_id not in document["qa"]:
                 verdict = independent_qa(receipt)
                 if asyncio.iscoroutine(verdict):

@@ -17,6 +17,7 @@ from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
 from src.hybrid.autonomous import (
     AutonomousPolicy,
     AutonomousTwoGateRunner,
+    OperationalMetricsLedger,
     _atomic_json,
 )
 from src.hybrid.execution import Executor, Job, ProviderResult
@@ -220,6 +221,7 @@ def public(root, rid, doc):
             for k, v in doc.get("media", {}).items()
         },
         "publication": doc.get("publication"),
+        "operational_metrics": OperationalMetricsLedger.read_snapshot(root / "operational-metrics.sqlite3"),
         "note": "Artifacts are local TEST fixtures, not human-approved real media and not an episode delivery.",
     }
 
@@ -289,6 +291,18 @@ def load(workspace, rid):
     run = runner(root, rid)
     run.assert_packet(packet(raw, meta["request"]))
     return root, run, run._load()
+
+
+def status(workspace, rid):
+    """Read an existing fixture snapshot without constructing any SQLite-backed service."""
+    if len(rid) != 64 or any(c not in "0123456789abcdef" for c in rid):
+        raise ValueError("request-id must be lowercase sha256")
+    root = Path(workspace).resolve() / "TEST" / rid
+    meta = json.loads((root / "harness.json").read_text(encoding="utf-8"))
+    raw = (root / "prompt.txt").read_bytes()
+    if meta.get("prompt_sha256") != sha256(raw).hexdigest():
+        raise ValueError("stored prompt bytes hash mismatch")
+    return root, json.loads((root / "runner.json").read_text(encoding="utf-8"))
 
 
 def _under(path: Path, root: Path) -> Path:
@@ -373,6 +387,26 @@ def _compiled_public(root: Path, adapter, document: dict) -> dict:
         "compiled_sha256": adapter.pipeline.episode.checksum,
         "source_manifest_sha256": adapter.pipeline.run.source_manifest.checksum,
         "artifacts": {key: {"path": value["path"], "sha256": value["sha256"]} for key, value in media.items()},
+        "operational_metrics": adapter.runner.metrics.report(),
+        "note": "Local TEST compiled evidence only; TEST assertions and gates are not human approval or a production delivery.",
+    }
+
+
+def _compiled_status(root: Path, rid: str) -> dict:
+    """Project compiled status from durable files without opening mutable ledgers."""
+    meta = json.loads((root / "compiled-harness.json").read_text(encoding="utf-8"))
+    if meta.get("kind") != "compiled-test" or meta.get("mode") != "TEST" or meta.get("request_id") != rid:
+        raise ValueError("not a compiled TEST request")
+    inputs = root / "inputs"
+    observed = {name: sha256((inputs / name).read_bytes()).hexdigest() for name in COMPILED_PACKET_FILES}
+    if observed != meta.get("input_sha256"):
+        raise ValueError("compiled input snapshot hash mismatch")
+    document = json.loads((root / "runner" / "runner.json").read_text(encoding="utf-8"))
+    return {
+        "kind": "compiled-test", "mode": "TEST", "request_id": rid, "state": document["state"],
+        "compiled_sha256": meta["compiled_sha256"], "source_manifest_sha256": meta["source_manifest_sha256"],
+        "artifacts": {key: {"path": value["path"], "sha256": value["sha256"]} for key, value in document.get("media", {}).items()},
+        "operational_metrics": OperationalMetricsLedger.read_snapshot(root / "runner" / "operational-metrics.sqlite3"),
         "note": "Local TEST compiled evidence only; TEST assertions and gates are not human approval or a production delivery.",
     }
 
@@ -573,12 +607,12 @@ def main(argv=None):
                 from src.hybrid.preproduction import load_preproduction
 
                 result = load_preproduction(a.workspace, a.request_id)
+            elif _compiled_root(a.workspace, a.request_id).exists() and a.action == "status":
+                result = _compiled_status(_compiled_root(a.workspace, a.request_id), a.request_id)
             elif _compiled_root(a.workspace, a.request_id).exists():
                 root, adapter, doc = _load_compiled(a.workspace, a.request_id)
                 run = adapter.runner
-                if a.action == "status":
-                    pass
-                elif a.action == "resume":
+                if a.action == "resume":
                     doc = asyncio.run(adapter.resume(FixtureProvider(root.parent / "provider"), _compiled_image_qa()))
                     doc = _stage_compiled(adapter, doc)
                 elif a.action == "remediate":
@@ -602,11 +636,12 @@ def main(argv=None):
                 elif a.action == "publish":
                     raise ValueError("compiled TEST policy disables publication; no publication path exists")
                 result = _compiled_public(root, adapter, doc)
+            elif a.action == "status":
+                root, doc = status(a.workspace, a.request_id)
+                result = public(root, a.request_id, doc)
             else:
                 root, run, doc = load(a.workspace, a.request_id)
-                if a.action == "status":
-                    pass
-                elif a.action == "resume":
+                if a.action == "resume":
                     doc = asyncio.run(run.resume(FixtureProvider(root), lambda _: (_ for _ in ()).throw(AssertionError("QA must not rerun"))))
                 elif a.action == "approve":
                     if not a.test_approval or not a.kind:
