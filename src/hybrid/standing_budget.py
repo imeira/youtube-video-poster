@@ -33,18 +33,55 @@ def _usd(units):
 
 
 class StandingBudgetLedger:
+    @classmethod
+    def from_authorized_policy(cls, path, policy=None, *, loader=None, receipt_path=None, clock=None):
+        """Construct only from a generic authenticated preflight projection.
+
+        The caller must obtain ``policy`` through an authenticated policy loader;
+        this ledger deliberately does not parse arbitrary JSON authority files.
+        """
+        if policy is not None:
+            raise BudgetDenied('authenticated loader is required; policy snapshots are not authority')
+        # Import lazily to avoid the ledger/authority module import cycle.
+        from src.hybrid.budget_authorization import AuthorizedBudgetPolicyLoader
+        if not isinstance(loader, AuthorizedBudgetPolicyLoader) or receipt_path is None:
+            raise BudgetDenied('authenticated loader and receipt are required')
+        policy = loader.load(receipt_path)
+        required = (
+            'request_id', 'policy_sha256', 'episode_cap_usd', 'month_cap_usd',
+            'experiment_cap_usd', 'mode',
+        )
+        if any(not hasattr(policy, name) for name in required) or policy.mode != 'TEST':
+            raise BudgetDenied('authenticated TEST budget policy is required')
+        return cls(
+            path,
+            policy_sha256=policy.policy_sha256,
+            episode_limit_usd=policy.episode_cap_usd,
+            month_limit_usd=policy.month_cap_usd,
+            experiment_limit_usd=policy.experiment_cap_usd,
+            mode=policy.mode, clock=clock, _authenticated_authority=True,
+            _authorization_id=policy.request_id,
+        )
+
     def __init__(self, path, *, policy_sha256, episode_limit_usd,
-                 month_limit_usd, experiment_limit_usd, mode, clock=None):
+                 month_limit_usd, experiment_limit_usd, mode, clock=None,
+                 _authenticated_authority=False, _authorization_id=None):
         if not isinstance(policy_sha256, str) or not re.fullmatch('[a-f0-9]{64}', policy_sha256):
             raise BudgetDenied('policy hash required')
         if mode not in {'TEST', 'LIVE'}:
             raise BudgetDenied('explicit TEST or LIVE mode required')
+        if _authenticated_authority and (not isinstance(_authorization_id, str) or not _authorization_id.strip()):
+            raise BudgetDenied('authenticated authorization id required')
         self.path = Path(path)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.limits = {'episode': _units(episode_limit_usd), 'month': _units(month_limit_usd),
                        'experiment': _units(experiment_limit_usd)}
         self.binding = {'schema': 1, 'policy_sha256': policy_sha256, 'mode': mode,
-                        'currency': 'USD', **self.limits}
+                        'currency': 'USD',
+                        'authority': 'authenticated' if _authenticated_authority else 'direct',
+                        **self.limits}
+        if _authenticated_authority:
+            self.binding['authorization_id'] = _authorization_id
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as db, db:
             db.execute('PRAGMA journal_mode=WAL')
