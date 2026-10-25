@@ -239,3 +239,113 @@ def test_registry_mutation_cannot_redirect_an_authenticated_reply(tmp_path: Path
     result = service.handle_webhook(_update(), SECRET)
     assert result.status == 404
     assert EpisodeStateStore.load(episode / "state.json").current_state is EpisodeState.WAITING_THUMBNAIL_APPROVAL
+
+
+def test_startup_reconciles_configured_episode_delivery_receipt_after_crash_before_registration(tmp_path: Path):
+    episodes = tmp_path / "episodes"
+    episode = episodes / "EP8"
+    (episode / "qa" / "delivery").mkdir(parents=True)
+    state = EpisodeStateStore.load_or_create(episode / "state.json", "EP8")
+    state.current_state = EpisodeState.WAITING_THUMBNAIL_APPROVAL
+    state.save(episode / "state.json")
+    _, source = _delivery(tmp_path)
+    destination = episode / "qa" / "delivery" / "thumbnail.json"
+    destination.write_bytes(source.read_bytes())
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = _config(episodes)
+
+    restarted = TelegramDirectorService(
+        director=director,
+        settings=TelegramInboundSettings(
+            webhook_secret=SECRET, chat_id=CHAT_ID, trusted_sender_ids=frozenset({SENDER_ID}),
+            instance_id="test-instance", journal_path=tmp_path / "external" / "journal.sqlite3",
+            registry_path=tmp_path / "external" / "deliveries.sqlite3",
+        ),
+    )
+
+    result = restarted.handle_webhook(_update(), SECRET)
+    assert result.status == 200
+    assert result.body["status"] == "approved"
+    assert EpisodeStateStore.load(episode / "state.json").current_state is EpisodeState.WAITING_VIDEO_APPROVAL
+
+
+def test_startup_reconciliation_rejects_tampered_delivery_receipt(tmp_path: Path):
+    episodes = tmp_path / "episodes"
+    episode = episodes / "EP8"
+    (episode / "qa" / "delivery").mkdir(parents=True)
+    _, source = _delivery(tmp_path)
+    document = json.loads(source.read_text(encoding="utf-8"))
+    document["chat_id"] = "10009"
+    (episode / "qa" / "delivery" / "thumbnail.json").write_text(json.dumps(document), encoding="utf-8")
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = _config(episodes)
+
+    with pytest.raises(ValueError, match="configured Telegram chat"):
+        TelegramDirectorService(
+            director=director,
+            settings=TelegramInboundSettings(
+                webhook_secret=SECRET, chat_id=CHAT_ID, trusted_sender_ids=frozenset({SENDER_ID}),
+                instance_id="test-instance", journal_path=tmp_path / "external" / "journal.sqlite3",
+                registry_path=tmp_path / "external" / "deliveries.sqlite3",
+            ),
+        )
+
+
+def test_recovery_rejects_reparse_delivery_ancestry_before_receipt_read_or_lock(tmp_path: Path, monkeypatch):
+    episodes = tmp_path / "episodes"
+    episode = episodes / "EP8"
+    delivery = episode / "qa" / "delivery"
+    delivery.mkdir(parents=True)
+    target = tmp_path / "outside"
+    target.mkdir()
+    _, source = _delivery(tmp_path)
+    (target / "thumbnail.json").write_bytes(source.read_bytes())
+    linked = episode / "qa" / "linked-delivery"
+    try:
+        linked.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlinks or junctions unsupported: {error}")
+    delivery.rmdir()
+    linked.rename(delivery)
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = _config(episodes)
+
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: pytest.fail("receipt read before boundary validation"))
+    monkeypatch.setattr("src.approval.telegram_service.file_lock", lambda *_args, **_kwargs: pytest.fail("lock before boundary validation"))
+
+    with pytest.raises(ValueError, match="reparse"):
+        TelegramDirectorService(
+            director=director,
+            settings=TelegramInboundSettings(
+                webhook_secret=SECRET, chat_id=CHAT_ID, trusted_sender_ids=frozenset({SENDER_ID}),
+                instance_id="test-instance", journal_path=tmp_path / "external" / "journal.sqlite3",
+                registry_path=tmp_path / "external" / "deliveries.sqlite3",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_inbound_recovers_persisted_receipt_injected_before_registry_write(tmp_path: Path):
+    episodes = tmp_path / "episodes"
+    episode = episodes / "EP8"
+    (episode / "qa" / "delivery").mkdir(parents=True)
+    state = EpisodeStateStore.load_or_create(episode / "state.json", "EP8")
+    state.current_state = EpisodeState.WAITING_THUMBNAIL_APPROVAL
+    state.save(episode / "state.json")
+    director = DirectorAgent.__new__(DirectorAgent)
+    director.config = _config(episodes)
+    service = TelegramDirectorService(
+        director=director,
+        settings=TelegramInboundSettings(
+            webhook_secret=SECRET, chat_id=CHAT_ID, trusted_sender_ids=frozenset({SENDER_ID}),
+            instance_id="test-instance", journal_path=tmp_path / "external" / "journal.sqlite3",
+            registry_path=tmp_path / "external" / "deliveries.sqlite3",
+        ),
+    )
+    _, source = _delivery(tmp_path, message_id=43)
+    (episode / "qa" / "delivery" / "thumbnail.json").write_bytes(source.read_bytes())
+
+    result = await service.handle_webhook_async(_update(reply_to=43), SECRET)
+
+    assert result.body["status"] == "approved"
+    assert service._lookup(chat_id=CHAT_ID, message_id=43)["episode_id"] == "EP8"

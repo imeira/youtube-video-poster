@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -33,6 +34,7 @@ class DeliveryController:
         receipt_dir: Path | str,
         video: ApprovalReceipt | None = None,
         thumbnail_approval: ApprovalReceipt | None = None,
+        after_persist=None,
     ) -> dict[str, Any]:
         """Deliver one gate artifact, never both in the same unapproved call.
 
@@ -49,7 +51,7 @@ class DeliveryController:
         root = Path(receipt_dir)
         if video is None:
             return await self._send(
-                chat_id, episode_id, thumbnail, root / "thumbnail.json", "send_photo"
+                chat_id, episode_id, thumbnail, root / "thumbnail.json", "send_photo", after_persist
             )
         if video.artifact_kind != "video":
             raise DeliveryError("a video approval artifact is required")
@@ -62,7 +64,7 @@ class DeliveryController:
             receipt_path=root / "thumbnail.json",
         )
         return await self._send(
-            chat_id, episode_id, video, root / "video.json", "send_video"
+            chat_id, episode_id, video, root / "video.json", "send_video", after_persist
         )
 
     @staticmethod
@@ -159,6 +161,7 @@ class DeliveryController:
         approval: ApprovalReceipt,
         receipt_path: Path,
         method_name: str,
+        after_persist=None,
     ) -> dict[str, Any]:
         async with self._gate_lock(receipt_path):
             if receipt_path.exists():
@@ -204,6 +207,11 @@ class DeliveryController:
                 raise DeliveryError("notification provider did not return a media message identifier")
             receipt = {**attempt, "message_id": message_id}
             atomic_json(receipt_path, receipt)
-            return self._recover_receipt(
+            persisted = self._recover_receipt(
                 receipt_path, chat_id=chat_id, episode_id=episode_id, approval=approval
             )
+            if after_persist is not None:
+                callback_result = after_persist(receipt_path)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            return persisted

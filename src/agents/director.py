@@ -1106,6 +1106,7 @@ class DirectorAgent:
         messenger,
         chat_id: str,
         thumbnail_path: Path,
+        after_persist=None,
     ) -> dict[str, Any]:
         """Send one frozen review artifact for the currently-open human gate.
 
@@ -1149,6 +1150,7 @@ class DirectorAgent:
                 episode_id=episode_id,
                 thumbnail=thumbnail,
                 receipt_dir=fs.paths.qa_dir / "delivery",
+                after_persist=after_persist,
             )
         thumbnail_approval = load_approval_receipt(fs.paths.qa_dir / "approval-thumbnail.json")
         thumbnail_approval.verify()
@@ -1166,6 +1168,7 @@ class DirectorAgent:
             video=video,
             thumbnail_approval=thumbnail_approval,
             receipt_dir=fs.paths.qa_dir / "delivery",
+            after_persist=after_persist,
         )
 
     async def record_final_render_qa(

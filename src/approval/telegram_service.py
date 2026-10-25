@@ -20,7 +20,7 @@ from typing import Any
 from src.approval.controller import ApprovalController, ApprovalControllerError
 from src.approval.receipts import ApprovalReceipt
 from src.approval.telegram_inbound import TelegramInboundAdapter
-from src.hybrid.locks import file_lock
+from src.hybrid.locks import file_lock, reject_reparse_path
 from src.state.machine import EpisodeState, EpisodeStateStore
 
 _HEADER = "X-Telegram-Bot-Api-Secret-Token"
@@ -65,6 +65,7 @@ class TelegramDirectorService:
         )
         if self._enabled:
             self._initialize_registry()
+            self._reconcile_configured_deliveries()
             # Director receives transport authority only from this configured adapter.
             self._director.inbound_approval_source = self._adapter
 
@@ -162,6 +163,46 @@ class TelegramDirectorService:
                 "INSERT INTO deliveries(chat_id, message_id, episode_id, artifact_kind, artifact_path, artifact_sha256, delivery_receipt_path, mac) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (*record.values(), mac),
             )
+
+    def _configured_delivery_receipts(self) -> tuple[Path, ...]:
+        """Enumerate only the configured episode root's fixed delivery slots."""
+        root = reject_reparse_path(Path(self._director.config.episodes_dir))
+        if not root.is_dir():
+            return ()
+        candidates: list[Path] = []
+        for entry in root.iterdir():
+            episode = reject_reparse_path(entry)
+            if not episode.is_dir():
+                continue
+            qa = reject_reparse_path(episode / "qa")
+            delivery = reject_reparse_path(qa / "delivery")
+            for kind in ("thumbnail", "video"):
+                receipt = reject_reparse_path(delivery / f"{kind}.json")
+                if receipt.is_file():
+                    candidates.append(receipt)
+        return tuple(candidates)
+
+    def _reconcile_configured_deliveries(self) -> None:
+        """Recover durable, authenticated outbound receipts without any resend."""
+        for receipt in self._configured_delivery_receipts():
+            lock_path = reject_reparse_path(receipt.with_suffix(".lock"))
+            with file_lock(lock_path):
+                self.register_delivery(receipt)
+
+    def _recover_delivery(self, *, chat_id: str, message_id: int) -> dict[str, object] | None:
+        """Close persist/register interruption from fixed configured receipt slots only."""
+        for receipt_path in self._configured_delivery_receipts():
+            try:
+                document, _ = self._load_delivery(receipt_path)
+            except ValueError:
+                continue
+            if document["chat_id"] != chat_id or document["message_id"] != message_id:
+                continue
+            lock_path = reject_reparse_path(receipt_path.with_suffix(".lock"))
+            with file_lock(lock_path):
+                self.register_delivery(receipt_path)
+                return self._lookup(chat_id=chat_id, message_id=message_id)
+        return None
 
     @staticmethod
     def _reply_locator(body: bytes) -> tuple[str, int] | None:
@@ -315,6 +356,8 @@ class TelegramDirectorService:
             return WebhookResult(400, {"status": "rejected"})
         record = self._lookup(chat_id=locator[0], message_id=locator[1])
         if record is None:
+            record = self._recover_delivery(chat_id=locator[0], message_id=locator[1])
+        if record is None:
             return WebhookResult(404, {"status": "unknown_delivery"})
         return locator[0], locator[1], record
 
@@ -350,7 +393,7 @@ class TelegramDirectorService:
 
     async def handle_webhook_async(self, body: bytes, secret_header: str | None) -> WebhookResult:
         """HTTP-safe serialized path; cancellation cannot release an active gate early."""
-        admitted = self._admit(body, secret_header)
+        admitted = await asyncio.to_thread(self._admit, body, secret_header)
         if isinstance(admitted, WebhookResult):
             return admitted
         chat_id, message_id, record = admitted
