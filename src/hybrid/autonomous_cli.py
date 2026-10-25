@@ -20,6 +20,7 @@ from src.hybrid.autonomous import (
     _atomic_json,
 )
 from src.hybrid.execution import Executor, Job, ProviderResult
+from src.hybrid.locks import file_lock
 from src.hybrid.locks import reject_reparse_path as _reject_reparse_path
 from src.hybrid.planner import Config
 from src.hybrid.standing_budget import StandingBudgetLedger
@@ -442,9 +443,62 @@ def start_compiled(workspace: Path, packet: Path, reject_scene: str | None):
     return _compiled_public(root, adapter, _stage_compiled(adapter, document))
 
 
+def run_preproduction_test(workspace: Path, request_id: str, manifest_path: Path) -> dict:
+    """Compile then start exactly one revalidated local TEST runner."""
+    from src.hybrid.preproduction import compile_preproduction, load_preproduction
+
+    # Compiler validation happens before the compiled runner, provider fixture,
+    # budget ledger, or delivery gate can be constructed.
+    compiled = compile_preproduction(workspace, request_id, manifest_path)
+    request = load_preproduction(workspace, request_id)
+    if request.get("status") != "PREPRODUCTION_VALIDATED":
+        raise ValueError("TEST handoff requires a validated preproduction request")
+    execution = request.get("execution")
+    if not isinstance(execution, dict) or execution.get("mode") != "TEST":
+        raise ValueError("TEST handoff rejects non-TEST preproduction")
+    revision = execution.get("active_revision")
+    if not isinstance(revision, str):
+        raise TypeError("TEST handoff requires a hash-bound active revision")
+    packet = _reject_reparse_path(Path(compiled["packet_path"]))
+    packet_files = tuple(_reject_reparse_path(packet / name) for name in COMPILED_PACKET_FILES)
+    runner_id = sha256(b"autonomous-compiled-test-v1\0" + b"".join(path.read_bytes() for path in packet_files)).hexdigest()
+    revision_path = _reject_reparse_path(Path(workspace) / "PREPRODUCTION" / request_id / revision)
+
+    # A separate crash-released lock closes the compile/start gap and makes a
+    # second CLI invocation a read-only recovery of the first TEST run.
+    with file_lock(revision_path / ".run-preproduction-test.lock"):
+        if _compiled_root(workspace, runner_id).exists():
+            _root, _adapter, document = _load_compiled(workspace, runner_id)
+            if document is None:
+                raise ValueError("compiled TEST runner exists without durable state")
+        else:
+            start_compiled(workspace, packet, None)
+            _root, _adapter, document = _load_compiled(workspace, runner_id)
+            if document is None:
+                raise ValueError("compiled TEST runner did not persist durable state")
+    state = document["state"]
+    gate = {
+        "state": state,
+        "decision": "TEST_LOCAL_GATE_REQUIRED" if state in {"WAITING_THUMBNAIL_APPROVAL", "WAITING_VIDEO_APPROVAL"} else "NO_GATE_DECISION",
+    }
+    return {
+        "mode": "TEST",
+        "request_id": request_id,
+        "revision_path": str(revision_path),
+        "compiled": {
+            "packet_path": str(packet),
+            "compilation_input_sha256": compiled["compilation_input_sha256"],
+            "receipt_sha256": compiled["receipt_sha256"],
+        },
+        "runner_request_id": runner_id,
+        "gate": gate,
+        "publication": "BLOCKED",
+    }
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("start", "preproduce", "advance", "audio-preflight", "compile-preproduction", "status", "resume", "remediate", "heroes", "approve", "publish"))
+    p.add_argument("action", choices=("start", "preproduce", "advance", "audio-preflight", "compile-preproduction", "run-preproduction-test", "status", "resume", "remediate", "heroes", "approve", "publish"))
     p.add_argument("--workspace", required=True, type=Path)
     p.add_argument("--prompt-file", type=Path)
     p.add_argument("--source-file", type=Path)
@@ -486,6 +540,12 @@ def main(argv=None):
             from src.hybrid.audio_preproduction import preflight_audio_execution
 
             result = preflight_audio_execution(a.workspace, a.request_id, a.review_file, a.audio_authorization_file)
+        elif a.action == "run-preproduction-test":
+            if not a.request_id or a.manifest_file is None:
+                p.error("run-preproduction-test requires --request-id and --manifest-file")
+            if any(value is not None for value in (a.prompt_file, a.source_file, a.timeline_file, a.audio_file, a.review_file, a.audio_authorization_file, a.compiled_input)) or a.mode is not None or a.test_approval or a.test_publish or a.test_reject_scene is not None or a.correction:
+                p.error("run-preproduction-test accepts only existing local TEST request and manifest evidence")
+            result = run_preproduction_test(a.workspace, a.request_id, a.manifest_file)
         elif a.action == "compile-preproduction":
             if not a.request_id or a.manifest_file is None:
                 p.error("compile-preproduction requires --request-id and --manifest-file")
@@ -561,7 +621,7 @@ def main(argv=None):
                 result = public(root, a.request_id, doc)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
-    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as e:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.CalledProcessError) as e:
         print(json.dumps({"status": "BLOCKED", "mode": "TEST", "error": str(e)}, ensure_ascii=False))
         return 1
 

@@ -74,6 +74,12 @@ Each source SHA-256 creates a distinct revision directory. Existing scripts, QA 
 
 `advance_preproduction` is the sole offline entry point. It invokes `ScriptAgent` with `target_duration_s=None`, writes the immutable artifacts, and stops before TTS. Timeline/storyboard construction remains unavailable without supplied measured local audio.
 
+## TEST compiled-run handoff
+
+`autonomous run-preproduction-test` is the single TEST-only operational handoff. It takes an existing request ID and local manifest, calls `compile_preproduction`, then reopens and revalidates the frozen packet before calling the existing compiled TEST runner. It accepts no caller mode, policy, review, audio, approval, publication, or provider settings. It rejects `PREPRODUCTION`, `LIVE`, forged/mutated packet bytes, reparse paths, and non-TEST evidence before runner/provider/budget construction.
+
+The return document binds the originating `request_id`, active revision, compile receipt/packet, compiled runner request ID, and the runner's TEST gate/state. Repeating an already completed handoff returns the same binding; it never creates a second compiled run or repeats completed work. A crash after compilation and before runner start resumes from the same immutable packet. The runner exposes only its existing two explicit TEST local gate decisions; neither deterministic QA nor this command claims human review. Publication remains blocked by this handoff.
+
 ## Negative acceptance tests
 
 1. A source-bound narrative is emitted as complete, exact prose with no fixed target duration.

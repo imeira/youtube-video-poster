@@ -713,6 +713,63 @@ def test_preproduction_advance_serializes_same_request_and_preserves_one_progres
     ).encode("utf-8")).hexdigest()
 
 
+def test_cli_run_preproduction_test_compiles_reopens_and_starts_one_test_runner(tmp_path):
+    """Fresh CLI process creates one hash-bound TEST runner from frozen inputs."""
+    from tests.unit.test_autonomous_cli import run_cli
+
+    created, revision, manifest_path = _validated_compile_request(tmp_path)
+    code, result = run_cli(
+        "run-preproduction-test", "--workspace", str(tmp_path),
+        "--request-id", created["request_id"], "--manifest-file", str(manifest_path),
+    )
+    assert code == 0, result
+    assert result["mode"] == "TEST"
+    assert result["request_id"] == created["request_id"]
+    assert result["revision_path"] == str(revision)
+    assert result["compiled"]["packet_path"].endswith("compiled-test")
+    assert len(result["runner_request_id"]) == 64
+    assert result["gate"]["state"] == "WAITING_THUMBNAIL_APPROVAL"
+    assert result["gate"]["decision"] == "TEST_LOCAL_GATE_REQUIRED"
+    assert result["publication"] == "BLOCKED"
+    assert "human" not in json.dumps(result).lower()
+
+    code, replay = run_cli(
+        "run-preproduction-test", "--workspace", str(tmp_path),
+        "--request-id", created["request_id"], "--manifest-file", str(manifest_path),
+    )
+    assert code == 0, replay
+    assert replay == result
+
+    packet = Path(result["compiled"]["packet_path"])
+    (packet / "compiled.json").write_text("{}", encoding="utf-8")
+    code, blocked = run_cli(
+        "run-preproduction-test", "--workspace", str(tmp_path),
+        "--request-id", created["request_id"], "--manifest-file", str(manifest_path),
+    )
+    assert code == 1 and blocked["status"] == "BLOCKED"
+
+
+def test_run_preproduction_test_recovers_after_compile_before_runner_start(tmp_path, monkeypatch):
+    """The immutable packet survives a start crash and later yields one runner."""
+    from src.hybrid import autonomous_cli
+
+    created, _revision, manifest_path = _validated_compile_request(tmp_path)
+    original_start = autonomous_cli.start_compiled
+
+    def crash_before_start(*_args, **_kwargs):
+        raise RuntimeError("simulated handoff crash")
+
+    monkeypatch.setattr(autonomous_cli, "start_compiled", crash_before_start)
+    with pytest.raises(RuntimeError, match="simulated handoff crash"):
+        autonomous_cli.run_preproduction_test(tmp_path, created["request_id"], manifest_path)
+    monkeypatch.setattr(autonomous_cli, "start_compiled", original_start)
+
+    recovered = autonomous_cli.run_preproduction_test(tmp_path, created["request_id"], manifest_path)
+    assert recovered["gate"]["state"] == "WAITING_THUMBNAIL_APPROVAL"
+    runner_roots = [path for path in (tmp_path / "TC").iterdir() if len(path.name) == 16]
+    assert len(runner_roots) == 1
+
+
 def test_compile_preproduction_creates_hash_bound_test_packet_for_existing_compiled_start(tmp_path):
     from PIL import Image
 
