@@ -9,9 +9,12 @@ There is no environment flag, policy field, test builder, or package configurati
 can turn this into a dispatch path.
 
 This is intentional. The repository has no existing externally administered signature
-verification mechanism for LIVE trust roots/independent reviews and no authenticated
-provider billing-receipt adapter. Hashes produced by this package are integrity labels,
-not authority. The legacy `FalFluxProvider` is not changed or selected by this service.
+verification mechanism for LIVE trust roots/independent reviews and does not integrate
+the standalone GET-only FAL billing consumer into a durable authenticated receipt,
+reservation, or settlement path. Its transport readback is informational and does not
+establish authorization or qualification. Hashes produced by this package are integrity
+labels, not authority. The legacy `FalFluxProvider` is not changed or selected by this
+service.
 
 ## Inputs and persistence
 
