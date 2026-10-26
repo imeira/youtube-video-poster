@@ -5,8 +5,6 @@ import asyncio
 import hashlib
 from pathlib import Path
 
-import pytest
-
 
 def test_explicit_outbox_drain_delivers_one_video_gate_once_across_restart(tmp_path: Path):
     from src.approval.delivery_session import DeliverySessionRunner
@@ -68,11 +66,13 @@ def test_crash_after_video_receipt_before_outbox_ack_restarts_without_duplicate_
         episode_id="EP8", thumbnail_path=thumbnail,
         thumbnail_sha256=hashlib.sha256(thumbnail.read_bytes()).hexdigest(),
     )
-    with pytest.raises(RuntimeError, match="crash after delivery receipt"):
-        asyncio.run(first.drain_once())
+    assert asyncio.run(first.drain_once()) == {
+        "status": "unknown", "episode_id": "EP8",
+        "reason": "delivery acknowledgement failed; manual reconciliation required",
+    }
 
     restarted = DeliverySessionRunner(registry_path=tmp_path / "delivery.sqlite3", composition=composition)
-    assert asyncio.run(restarted.drain_once())["status"] == "delivered"
+    assert asyncio.run(restarted.drain_once()) == {"status": "idle"}
     assert composition.posts == 1
 
 
@@ -115,6 +115,38 @@ def test_outbox_revalidates_authenticated_thumbnail_approval_before_video_post(t
     assert asyncio.run(runner.drain_once()) == {
         "status": "blocked", "episode_id": "EP8", "reason": "thumbnail approval is no longer authenticated",
     }
+
+
+def test_malformed_post_submit_receipt_becomes_unknown_and_never_reposts_after_restart(tmp_path: Path):
+    from src.approval.delivery_session import DeliverySessionRunner
+
+    class Composition:
+        def __init__(self) -> None:
+            self.posts = 0
+
+        def revalidate_thumbnail_approval(self, **_kwargs) -> None:
+            return None
+
+        async def deliver_for_approval(self, _episode_id: str, *, thumbnail_path: Path):
+            self.posts += 1
+            return {"artifact_kind": "thumbnail", "message_id": 702}
+
+    thumbnail = tmp_path / "approved-thumbnail.png"
+    thumbnail.write_bytes(b"thumbnail")
+    composition = Composition()
+    registry = tmp_path / "delivery.sqlite3"
+    runner = DeliverySessionRunner(registry_path=registry, composition=composition)
+    runner.enqueue_video(
+        episode_id="EP8", thumbnail_path=thumbnail,
+        thumbnail_sha256=hashlib.sha256(thumbnail.read_bytes()).hexdigest(),
+    )
+
+    assert asyncio.run(runner.drain_once()) == {
+        "status": "unknown", "episode_id": "EP8",
+        "reason": "delivery receipt invalid; manual reconciliation required",
+    }
+    assert asyncio.run(DeliverySessionRunner(registry_path=registry, composition=composition).drain_once()) == {"status": "idle"}
+    assert composition.posts == 1
 
 
 def test_cli_session_preflight_does_not_open_or_inspect_sqlite(tmp_path: Path, monkeypatch, capsys):

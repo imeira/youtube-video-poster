@@ -264,10 +264,12 @@ def test_fal_exact_wire_submit_recovery_qa_and_independent_delivery(deployment, 
         assert correction.request_id in deps.authorize([correction], deps.plan)[0]
     asyncio.run(exercise())
     sends = []
-    def urlopen(request, **kwargs):
-        sends.append(request.full_url.rsplit("/", 1)[-1])
-        return __import__("io").BytesIO(json.dumps({"ok": True, "result": {"message_id": len(sends)}}).encode())
-    monkeypatch.setattr(live.urllib.request, "urlopen", urlopen)
+
+    async def post(endpoint, _data, _headers):
+        sends.append(endpoint)
+        return {"ok": True, "result": {"message_id": len(sends)}}
+
+    monkeypatch.setattr(deps.messenger, "_post", post)
     media = deps.root / "dummy.mp4"
     media.write_bytes(b"offline fixture")
     photo = deps.root / "quarantine" / job.request_id / "result.png"

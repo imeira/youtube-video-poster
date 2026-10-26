@@ -70,6 +70,68 @@ runner needs delivery, it must call this explicit adapter only after its own
 reviewed bridge opens a current Director `WAITING_*_APPROVAL` state; the current
 TEST runner is not promoted to LIVE by this composition.
 
+## Durable outbox worker lifecycle
+
+The durable registry remains the sole outbox truth. A thumbnail approval and its
+hash-bound `video_delivery_outbox` eligibility row commit in the same SQLite
+transaction. Only after that transaction completes does the authenticated async
+inbound route signal the composition-owned `DeliveryOutboxWorker`. A wakeup is
+an in-memory hint only: it is coalesced, carries no authority, and a missed
+hint is repaired by the worker's startup drain.
+
+`TelegramInboundLauncher.serve()` is the only opt-in lifecycle for this worker.
+After its loopback app has bound, it starts exactly one worker. The worker drains
+durable `PENDING` rows fairly across episodes (concurrency one): a revoked or
+unavailable thumbnail is durably marked `BLOCKED` with its reason and an
+ambiguous send is durably marked `UNKNOWN`; neither can hold the queue head or
+cause another POST. Both statuses require explicit operator reconciliation.
+The normal manual drain command remains backward-compatible for one explicit
+eligible attempt, but it also never retries an `UNKNOWN` row.
+
+Authenticated thumbnail outcomes are the primary wakeup. The callback is never
+awaited on the inbound ACK path: synchronous errors and asynchronous failures
+are isolated and coalesced. A configured positive, low-frequency reconciliation
+period is the deterministic fallback for a lost host wakeup while the process is
+alive; it is database-only queue inspection, not an LLM loop or busy poll. The
+worker never constructs another provider, runs preflight, or opens external
+configuration.
+
+At graceful serve shutdown, the launcher first stops accepting new work and
+uses the configured positive shutdown deadline. The concrete Telegram provider
+uses cancellable asyncio socket I/O with an explicit transport timeout; it does
+not use `to_thread` around `urllib`. If an active send crosses the deadline,
+`drain_once` persists `UNKNOWN` before transport cancellation, retains the task
+and delivery lock until that cancellation has actually unwound. `stop()` returns
+`{"status":"stopping","ownership":"retained"}` at that deadline; it does not
+claim the worker stopped and it keeps the worker task reference, so another
+worker cannot start or acquire the duplicate-prevention lock. When the owned
+task later finishes, its completion callback alone releases that reference;
+only a completed stop can report
+`{"status":"stopped","ownership":"released"}`. If this happens while
+`TelegramInboundLauncher.serve()` exits normally, the launcher finishes aiohttp
+site/runner cleanup and raises `RetainedOutboxWorkerError`, exposing both the
+retained worker reference and outcome to the host. If the host body already
+raised or was cancelled, that original exception/cancellation remains primary
+and receives transparent stopping information instead of being suppressed.
+
+This is a bounded host-stop API, not a claim that a remote server can be killed:
+a POST already accepted remotely may still complete. The durable UNKNOWN barrier
+is the stronger invariant—no worker, restart, or manual drain automatically
+dispatches that intent again after the lock releases. Operators recover
+`BLOCKED` by fixing the authenticated input and creating a reviewed successor
+eligibility row; they recover `UNKNOWN` only by recorded, authenticated provider
+or receipt evidence that resolves the original intent. Reconciliation never
+fabricates a delivery, deletes the UNKNOWN barrier, or reposts the media.
+
+On startup, the worker drains durable pending entries before waiting for host
+wakeups. It reuses `DeliverySessionRunner`'s hash revalidation and Director /
+DeliveryController path, so duplicate webhooks, coalesced wakeups, crashes
+between provider receipt and outbox acknowledgement, and restart recovery do
+not create a second POST. A failed or blocked row is isolated from successful
+inbound acknowledgement and does not cause a retry loop. A final video approval
+creates no outbox row and ends at `WAITING_FINAL_APPROVAL`; it never activates
+publication.
+
 ## CLI preflight
 
 `studio telegram-inbound-preflight` is offline only. It requires a deployment

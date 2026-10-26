@@ -9,12 +9,14 @@ changes a webhook, starts a runner, or enables publication.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.approval.delivery_session import DeliveryOutboxWorker, DeliverySessionRunner
 from src.approval.telegram_service import (
     TelegramDirectorService,
     TelegramInboundSettings,
@@ -38,6 +40,17 @@ class ProductionTelegramGateConfig:
     registry_path: Path
     host: str = "127.0.0.1"
     port: int = 9443
+    outbox_reconcile_period_seconds: float = 60.0
+    outbox_shutdown_timeout_seconds: float = 30.0
+
+
+class RetainedOutboxWorkerError(RuntimeError):
+    """The host shut down, but duplicate-prevention ownership is still live."""
+
+    def __init__(self, worker: DeliveryOutboxWorker, outcome: dict[str, str]) -> None:
+        super().__init__("outbox worker is still stopping; ownership is retained")
+        self.worker = worker
+        self.outcome = outcome
 
 
 @dataclass(frozen=True)
@@ -47,6 +60,7 @@ class TelegramInboundLauncher:
     app: Any
     host: str
     port: int
+    outbox_worker: DeliveryOutboxWorker
 
     @asynccontextmanager
     async def serve(self) -> AsyncIterator[TelegramInboundLauncher]:
@@ -57,17 +71,49 @@ class TelegramInboundLauncher:
             raise RuntimeError("aiohttp is required to serve the local Telegram inbound route") from error
         runner = web.AppRunner(self.app)
         site = None
+        worker_started = False
+        host_error: BaseException | None = None
         try:
             await runner.setup()
             site = web.TCPSite(runner, self.host, self.port)
             await site.start()
+            await self.outbox_worker.start()
+            worker_started = True
             yield self
+        except BaseException as error:
+            host_error = error
+            raise
         finally:
+            cleanup_error: BaseException | None = None
+            retained_error: RetainedOutboxWorkerError | None = None
             try:
                 if site is not None:
                     await site.stop()
-            finally:
+            except BaseException as error:  # noqa: BLE001 - all cleanup must finish before propagation
+                cleanup_error = error
+            try:
+                if worker_started:
+                    outcome = await self.outbox_worker.stop()
+                    if outcome == {"status": "stopping", "ownership": "retained"}:
+                        retained_error = RetainedOutboxWorkerError(self.outbox_worker, outcome)
+            except BaseException as error:  # noqa: BLE001 - all cleanup must finish before propagation
+                if cleanup_error is None:
+                    cleanup_error = error
+            try:
                 await runner.cleanup()
+            except BaseException as error:  # noqa: BLE001 - all cleanup must finish before propagation
+                if cleanup_error is None:
+                    cleanup_error = error
+
+            if host_error is not None:
+                if retained_error is not None:
+                    host_error.add_note(f"{retained_error}; worker reference is available on the launcher")
+                if cleanup_error is not None:
+                    host_error.add_note(f"launcher cleanup also failed: {cleanup_error!r}")
+            elif cleanup_error is not None:
+                raise cleanup_error
+            elif retained_error is not None:
+                raise retained_error
 
 
 @dataclass(frozen=True)
@@ -78,6 +124,7 @@ class ProductionTelegramGateComposition:
     delivery_controller: DeliveryController
     service: TelegramDirectorService
     launcher: TelegramInboundLauncher
+    outbox_worker: DeliveryOutboxWorker
     director: Any
     config: ProductionTelegramGateConfig
 
@@ -164,6 +211,12 @@ def _validate(config: ProductionTelegramGateConfig, director: Any) -> Production
         raise ValueError("Telegram inbound host must be explicit loopback")
     if type(config.port) is not int or not 1 <= config.port <= 65535:
         raise ValueError("Telegram inbound port must be valid")
+    for value, label in (
+        (config.outbox_reconcile_period_seconds, "outbox reconcile period"),
+        (config.outbox_shutdown_timeout_seconds, "outbox shutdown timeout"),
+    ):
+        if type(value) not in {int, float} or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"Telegram {label} must be a positive finite number")
     director_config = getattr(director, "config", None)
     if director_config is None or getattr(director_config, "approval_delivery_chat_id", None) != inbound.chat_id:
         raise ValueError("trusted Telegram chat must match Director delivery configuration")
@@ -180,6 +233,8 @@ def _validate(config: ProductionTelegramGateConfig, director: Any) -> Production
         registry_path=inbound.registry_path,
         host=config.host,
         port=config.port,
+        outbox_reconcile_period_seconds=float(config.outbox_reconcile_period_seconds),
+        outbox_shutdown_timeout_seconds=float(config.outbox_shutdown_timeout_seconds),
     )
 
 
@@ -205,14 +260,26 @@ def create_production_telegram_gate(
         ),
     )
     app = create_telegram_inbound_app(service)
-    return ProductionTelegramGateComposition(
+    runner = DeliverySessionRunner(registry_path=trusted.registry_path, composition=None)
+    outbox_worker = DeliveryOutboxWorker(
+        runner,
+        reconcile_period_seconds=trusted.outbox_reconcile_period_seconds,
+        shutdown_timeout_seconds=trusted.outbox_shutdown_timeout_seconds,
+    )
+    composition = ProductionTelegramGateComposition(
         provider=provider,
         delivery_controller=controller,
         service=service,
-        launcher=TelegramInboundLauncher(app=app, host=trusted.host, port=trusted.port),
+        launcher=TelegramInboundLauncher(
+            app=app, host=trusted.host, port=trusted.port, outbox_worker=outbox_worker,
+        ),
+        outbox_worker=outbox_worker,
         director=director,
         config=trusted,
     )
+    runner.composition = composition
+    service.set_outbox_wakeup(outbox_worker.wake)
+    return composition
 
 
 def preflight_production_telegram_gate(**kwargs: Any) -> dict[str, str]:

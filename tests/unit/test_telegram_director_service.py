@@ -115,6 +115,55 @@ def test_thumbnail_approval_creates_hash_bound_video_outbox_without_delivery_cal
     assert row == ("EP8", str(artifact.resolve()), hashlib.sha256(artifact.read_bytes()).hexdigest(), "PENDING")
 
 
+@pytest.mark.asyncio
+async def test_async_thumbnail_approval_notifies_outbox_only_after_durable_outcome(tmp_path: Path):
+    service, _episode, _artifact, _ = _service(tmp_path)
+    notifications: list[str] = []
+
+    async def notify() -> None:
+        with sqlite3.connect(tmp_path / "external" / "deliveries.sqlite3") as connection:
+            assert connection.execute("SELECT COUNT(*) FROM video_delivery_outbox").fetchone() == (1,)
+        notifications.append("after-commit")
+
+    service.set_outbox_wakeup(notify)
+    result = await service.handle_webhook_async(_update(), SECRET)
+    await asyncio.sleep(0)
+
+    assert result.body["status"] == "approved"
+    assert notifications == ["after-commit"]
+
+
+@pytest.mark.asyncio
+async def test_async_thumbnail_ack_does_not_await_never_returning_notification(tmp_path: Path):
+    service, _episode, _artifact, _ = _service(tmp_path)
+    started = asyncio.Event()
+
+    async def notify() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    service.set_outbox_wakeup(notify)
+    result = await asyncio.wait_for(service.handle_webhook_async(_update(), SECRET), timeout=0.2)
+
+    assert result.body["status"] == "approved"
+    assert await asyncio.wait_for(started.wait(), timeout=0.2)
+    with sqlite3.connect(tmp_path / "external" / "deliveries.sqlite3") as connection:
+        assert connection.execute("SELECT status FROM video_delivery_outbox").fetchone() == ("PENDING",)
+
+
+@pytest.mark.asyncio
+async def test_sync_wakeup_cancelled_error_is_isolated_from_authenticated_ack(tmp_path: Path):
+    service, _episode, _artifact, _ = _service(tmp_path)
+
+    def notify() -> None:
+        raise asyncio.CancelledError("detached wakeup failure")
+
+    service.set_outbox_wakeup(notify)
+    result = await service.handle_webhook_async(_update(), SECRET)
+
+    assert result.body["status"] == "approved"
+
+
 @pytest.mark.parametrize("corruption", ["bad-outcome-mac", "wrong-source", "mutated-binding"])
 def test_legacy_outcome_repair_rejects_corruption_before_outbox_enqueue(tmp_path: Path, corruption: str):
     service, episode, artifact, _ = _service(tmp_path)

@@ -12,8 +12,10 @@ import hashlib
 import hmac
 import json
 import sqlite3
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +58,8 @@ class TelegramDirectorService:
         self._director = director
         self._settings = settings
         self._enabled = bool(settings.webhook_secret and director is not None)
+        self._outbox_wakeup: Callable[[], object] | None = None
+        self._outbox_notification_task: asyncio.Task[object] | None = None
         self._adapter = TelegramInboundAdapter(
             journal_path=settings.journal_path,
             expected_chat_id=settings.chat_id,
@@ -69,6 +73,48 @@ class TelegramDirectorService:
             self._reconcile_authenticated_outcomes()
             # Director receives transport authority only from this configured adapter.
             self._director.inbound_approval_source = self._adapter
+
+    def set_outbox_wakeup(self, wakeup: Callable[[], object] | None) -> None:
+        """Install the hosted post-commit hint; durable SQLite remains authoritative."""
+        self._outbox_wakeup = wakeup
+
+    def _notify_outbox_after_commit(self, result: WebhookResult) -> None:
+        """Best-effort post-commit hint: never put untrusted host work on the ACK path."""
+        if result.body.get("artifact_kind") != "thumbnail" or result.body.get("status") not in {
+            "approved", "recovered", "acknowledged",
+        }:
+            return
+        wakeup = self._outbox_wakeup
+        if wakeup is None:
+            return
+        try:
+            notified = wakeup()
+            if isawaitable(notified):
+                active = self._outbox_notification_task
+                if active is not None and not active.done():
+                    close = getattr(notified, "close", None)
+                    if callable(close):
+                        close()
+                    return
+                task = asyncio.ensure_future(notified)
+                self._outbox_notification_task = task
+                task.add_done_callback(self._consume_outbox_notification)
+        except asyncio.CancelledError:
+            # A synchronous callback may use cancellation as its own failure
+            # signal. It is detached host work, not cancellation of this
+            # authenticated request, whose durable transaction already committed.
+            return
+        except Exception:  # noqa: BLE001 - optional host notification cannot fail a durable acknowledgement
+            return
+
+    @staticmethod
+    def _consume_outbox_notification(task: asyncio.Task[object]) -> None:
+        """Retrieve isolated callback failures so they cannot become host-loop errors."""
+        if not task.cancelled():
+            try:
+                task.exception()
+            except Exception:  # noqa: BLE001 - notification remains strictly best effort
+                return
 
     @staticmethod
     def _json(value: dict[str, object]) -> bytes:
@@ -468,6 +514,7 @@ class TelegramDirectorService:
                 except asyncio.CancelledError:
                     cancelled = True
             result = task.result()
+            self._notify_outbox_after_commit(result)
             if cancelled:
                 raise asyncio.CancelledError
             return result
