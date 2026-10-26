@@ -329,6 +329,132 @@ def _load_guarded_manifest(path: Path, reject_path):
     return Manifest.load(path), sha256(path.read_bytes()).hexdigest()
 
 
+def _read_real_review_candidate(path: Path, source_sha256: str, script_sha256: str) -> dict[str, Any]:
+    """Read the fixed active review as evidence, never as executable authority."""
+    path = reject_reparse_path(path)
+    if not path.is_file():
+        raise ValueError("active independent review is not a regular local file")
+    raw = path.read_bytes()
+    try:
+        review = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("active independent review is invalid") from error
+    if not isinstance(review, dict):
+        raise TypeError("active independent review must be an object")
+    if review.get("schema") != "independent-editorial-review-record-v1":
+        raise ValueError("active independent review schema mismatch")
+    if review.get("review_type") != "independent_machine_review":
+        raise ValueError("active independent review type mismatch")
+    if not isinstance(review.get("reviewer"), str) or not review["reviewer"].strip():
+        raise ValueError("active independent review reviewer is required")
+    if review.get("editorial_verdict") != "NO_NARRATIVE_BLOCKER":
+        raise ValueError("active independent review verdict is not eligible")
+    if review.get("source_sha256") != source_sha256:
+        raise ValueError("review source hash does not bind active source")
+    if review.get("script_sha256") != script_sha256:
+        raise ValueError("review script hash does not bind active script")
+    return {
+        "file_present": True,
+        "path": "qa/independent-editorial-review-v4.json",
+        "sha256": sha256(raw).hexdigest(),
+        "source_sha256": source_sha256,
+        "script_sha256": script_sha256,
+        # This installation has no configured authenticated trust root.  A local
+        # file can be useful editorial evidence but is never authority by itself.
+        "authority": "NOT_QUALIFIED",
+        "reason": "CONFIGURED_AUTHENTICATED_TRUST_ROOT_REQUIRED",
+    }
+
+
+def build_real_handoff_preflight(workspace: Path, request_id: str) -> dict[str, Any]:
+    """Return a deterministic, read-only REAL preproduction handoff preflight.
+
+    This consumer only reads the active immutable revision.  It deliberately does
+    not open narration, timeline, or visual assets until independently rooted QA
+    exists; it neither promotes inputs nor constructs Director, executor, budget,
+    credential, provider, or delivery objects.
+    """
+    request = load_preproduction(workspace, request_id)
+    execution = request.get("execution")
+    if not isinstance(execution, dict) or execution.get("mode") != "PREPRODUCTION":
+        raise ValueError("real handoff requires explicit PREPRODUCTION execution")
+    if execution.get("paid_execution") != "BLOCKED" or execution.get("prices_usd") is not None or execution.get("providers_called") != []:
+        raise ValueError("real handoff requires blocked preproduction execution")
+    source_sha256 = execution.get("source_sha256")
+    active_revision = execution.get("active_revision")
+    if not isinstance(source_sha256, str) or len(source_sha256) != 64:
+        raise ValueError("real handoff requires source hash binding")
+    if active_revision != f"revisions/{source_sha256[:16]}":
+        raise ValueError("active revision pointer is not hash-bound")
+
+    root = reject_reparse_path(_root(workspace, request_id))
+    revision = reject_reparse_path(root / active_revision)
+    stages_path = reject_reparse_path(revision / "stages.json")
+    source_path = reject_reparse_path(revision / "inputs" / "source.json")
+    plan_path = reject_reparse_path(revision / "plan" / "editorial-plan.json")
+    script_path = reject_reparse_path(revision / "script" / "script.json")
+    script_qa_path = reject_reparse_path(revision / "qa" / "script-qa.json")
+    review_path = reject_reparse_path(revision / "qa" / "independent-editorial-review-v4.json")
+    for path in (stages_path, source_path, plan_path, script_path, script_qa_path):
+        if not path.is_file():
+            raise ValueError("active revision required artifact is missing")
+
+    try:
+        stages = json.loads(stages_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("active revision stages are invalid") from error
+    if not isinstance(stages, dict):
+        raise TypeError("active revision stages must be an object")
+    _verify_completed_stages(revision, stages, source_sha256, reject_path=reject_reparse_path)
+    source_raw = source_path.read_bytes()
+    script_raw = script_path.read_bytes()
+    plan_raw = plan_path.read_bytes()
+    qa_raw = script_qa_path.read_bytes()
+    if sha256(source_raw).hexdigest() != source_sha256:
+        raise ValueError("active source bytes do not match request binding")
+    hashes = {
+        "source_sha256": source_sha256,
+        "plan_sha256": sha256(plan_raw).hexdigest(),
+        "script_sha256": sha256(script_raw).hexdigest(),
+        "script_qa_sha256": sha256(qa_raw).hexdigest(),
+    }
+    for stage_name, binding_name in (("plan", "plan_sha256"), ("script", "script_sha256"), ("script_qa", "script_qa_sha256")):
+        if stages.get(stage_name, {}).get("sha256") != hashes[binding_name]:
+            raise ValueError(f"{stage_name} hash does not bind active artifact")
+
+    review = {"file_present": False, "authority": "NOT_QUALIFIED", "reason": "INDEPENDENT_REVIEW_REQUIRED"}
+    if review_path.exists():
+        review = _read_real_review_candidate(review_path, hashes["source_sha256"], hashes["script_sha256"])
+
+    dependencies = (
+        ("TTS_AUTHENTICATED_RECEIPT_REQUIRED", "A configured authenticated trust-root receipt must bind this request and narration."),
+        ("MEASURED_NON_SILENT_AUDIO_REQUIRED", "No qualified narration bytes were opened or promoted by this preflight."),
+        ("COMPLETE_TIMELINE_RECEIPT_REQUIRED", "No complete measured timing receipt is available."),
+        ("FROZEN_APPROVED_ASSET_MANIFEST_REQUIRED", "No frozen approved visual asset manifest is available."),
+        ("PROVIDER_QUALIFICATION_REQUIRED", "No provider route is qualified by this preproduction request."),
+        ("LIVE_PRICE_AND_OPERATION_AUTHORITY_REQUIRED", "No live price or operation authority exists; paid execution remains blocked."),
+        ("DIRECTOR_IMPORT_CONTRACT_REQUIRED", "No PREPRODUCTION-to-Director import contract has materialized an episode."),
+    )
+    return {
+        "mode": "PREPRODUCTION",
+        "request_id": request_id,
+        "status": "TTS_REQUIRED",
+        "next_required_action": "OBTAIN_TTS_AUTHENTICATED_RECEIPT",
+        "execution": {"paid_execution": "BLOCKED", "prices_usd": None, "providers_called": []},
+        "bindings": hashes,
+        "review": review,
+        "live_authority": "NOT_QUALIFIED",
+        "inventory": {
+            "narration": "MEASURED_NON_SILENT_AUDIO_REQUIRED",
+            "timing": "COMPLETE_TIMELINE_RECEIPT_REQUIRED",
+            "assets": "FROZEN_APPROVED_ASSET_MANIFEST_REQUIRED",
+        },
+        "dependencies": [{"code": code, "status": "REQUIRED", "reason": reason} for code, reason in dependencies],
+        "operations": {"provider_dispatch": "BLOCKED", "render": "BLOCKED", "telegram": "BLOCKED", "publication": "BLOCKED"},
+        "note": "Read-only readiness only; this report does not qualify review authority, authorize LIVE work, or complete production.",
+    }
+
+
 def advance_preproduction(
     workspace: Path,
     request_id: str,

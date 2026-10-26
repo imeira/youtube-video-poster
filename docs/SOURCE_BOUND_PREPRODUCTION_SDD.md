@@ -80,6 +80,14 @@ Each source SHA-256 creates a distinct revision directory. Existing scripts, QA 
 
 The return document binds the originating `request_id`, active revision, compile receipt/packet, compiled runner request ID, and the runner's TEST gate/state. Repeating an already completed handoff returns the same binding; it never creates a second compiled run or repeats completed work. A crash after compilation and before runner start resumes from the same immutable packet. The runner exposes only its existing two explicit TEST local gate decisions; neither deterministic QA nor this command claims human review. Publication remains blocked by this handoff.
 
+## REAL read-only handoff preflight
+
+`studio autonomous real-handoff-preflight --workspace <root> --request-id <id>` consumes only the existing active `PREPRODUCTION` revision. It first rejects reparse points on every request/revision/review path it will read, reopens the request through `load_preproduction`, and rejects TEST, LIVE, unbound active-revision pointers, unblocked execution, prices, or prior provider calls. It rehashes the source, plan, script, deterministic script-QA, and active review candidate against `stages.json` before inspecting any narration, timing, or visual asset.
+
+The fixed active review location is `qa/independent-editorial-review-v4.json`. A present `independent-editorial-review-record-v1` is reported only as a hash-bound candidate after its source and script bindings validate. In the absence of a configured authenticated trust root it remains `NOT_QUALIFIED`; it neither changes the pending deterministic QA state nor authorizes TTS, LIVE, a provider, cost, Director import, render, Telegram, or publication.
+
+The result is an ephemeral sanitized report with `TTS_REQUIRED`, a structured ordered dependency list, binding hashes, explicit missing narration/timing/assets, and `next_required_action: OBTAIN_TTS_AUTHENTICATED_RECEIPT`. It never writes request/stage/cache files, creates a database/directory/lock, opens unavailable media, or constructs a provider, Director, executor, reservation, or delivery service. It does not claim production is complete or that its own report enables LIVE work.
+
 ## Negative acceptance tests
 
 1. A source-bound narrative is emitted as complete, exact prose with no fixed target duration.

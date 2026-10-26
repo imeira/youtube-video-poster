@@ -532,7 +532,7 @@ def run_preproduction_test(workspace: Path, request_id: str, manifest_path: Path
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("start", "preproduce", "advance", "audio-preflight", "compile-preproduction", "run-preproduction-test", "status", "resume", "remediate", "heroes", "approve", "publish"))
+    p.add_argument("action", choices=("start", "preproduce", "advance", "audio-preflight", "real-handoff-preflight", "compile-preproduction", "run-preproduction-test", "status", "resume", "remediate", "heroes", "approve", "publish"))
     p.add_argument("--workspace", required=True, type=Path)
     p.add_argument("--prompt-file", type=Path)
     p.add_argument("--source-file", type=Path)
@@ -574,6 +574,14 @@ def main(argv=None):
             from src.hybrid.audio_preproduction import preflight_audio_execution
 
             result = preflight_audio_execution(a.workspace, a.request_id, a.review_file, a.audio_authorization_file)
+        elif a.action == "real-handoff-preflight":
+            if not a.request_id:
+                p.error("real-handoff-preflight requires --request-id")
+            if any(value is not None for value in (a.prompt_file, a.source_file, a.timeline_file, a.audio_file, a.review_file, a.audio_authorization_file, a.manifest_file, a.compiled_input)) or a.mode is not None or a.kind is not None or a.test_approval or a.test_publish or a.test_reject_scene is not None or a.correction:
+                p.error("real-handoff-preflight consumes only the existing active PREPRODUCTION revision")
+            from src.hybrid.preproduction import build_real_handoff_preflight
+
+            result = build_real_handoff_preflight(a.workspace, a.request_id)
         elif a.action == "run-preproduction-test":
             if not a.request_id or a.manifest_file is None:
                 p.error("run-preproduction-test requires --request-id and --manifest-file")
