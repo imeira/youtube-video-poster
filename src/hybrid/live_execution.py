@@ -11,12 +11,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 from src.hybrid.execution import Job
 from src.hybrid.external_trust_root import (
@@ -41,6 +42,7 @@ _SENSITIVE_VALUE = re.compile(r"(?:bearer|basic)\s+[a-z0-9._~+\-/=]{6,}|(?:api[_
 _MAX_EVIDENCE_BYTES = 4096
 _MAX_EVIDENCE_DEPTH = 4
 _MAX_QUOTE_SECONDS = 300
+_MAX_BILLING_SNAPSHOT_SECONDS = 300
 
 
 def _canonical(value: object) -> bytes:
@@ -151,6 +153,161 @@ class LivePriceResolver(Protocol):
     def quote(self, job: Job) -> dict[str, Any]: ...
 
 
+class BillingStatusSnapshot:
+    """Pinned JSON-only observation of existing local billing state.
+
+    This never opens the executor or ledger SQLite files: even read-only SQLite
+    access can interact with WAL/SHM state. A snapshot reports local coherence,
+    never authenticates a FAL billing event or qualifies LIVE execution.
+    """
+
+    _CONFIG_FIELDS: ClassVar[frozenset[str]] = frozenset({"path", "sha256"})
+    _FIELDS: ClassVar[frozenset[str]] = frozenset({"schema", "kind", "generated_at", "request_id", "endpoint_id", "mode", "executor_receipt", "ledger_claim", "settlement_receipt", "provenance", "snapshot_sha256"})
+    _RECEIPT_FIELDS: ClassVar[frozenset[str]] = frozenset({"receipt_schema", "settlement_binding", "request_id", "endpoint", "mode", "status"})
+    _BINDING_FIELDS: ClassVar[frozenset[str]] = frozenset({"schema", "local_request_id", "provider_request_id", "endpoint_id", "auth_scope", "authority_mode"})
+    _CLAIM_FIELDS: ClassVar[frozenset[str]] = frozenset({"request_id", "provider", "state", "settlement_mode", "auth_scope", "provider_request_id", "authority_mode"})
+
+    def __init__(self, path: Path, expected_sha256: str, *, clock=time.time) -> None:
+        self.path, self.expected_sha256, self.clock = Path(path), expected_sha256, clock
+
+    @classmethod
+    def from_app_config(cls, app_config: object, *, clock=time.time) -> BillingStatusSnapshot | None:
+        raw = getattr(app_config, "raw", None)
+        configured = raw.get("billing_status_snapshot") if isinstance(raw, dict) else None
+        if configured is None:
+            return None
+        if not isinstance(configured, dict) or set(configured) != cls._CONFIG_FIELDS:
+            raise LiveQualificationError("configured billing status snapshot is malformed")
+        path, digest = configured.get("path"), configured.get("sha256")
+        if not isinstance(path, str) or not Path(path).is_absolute() or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise LiveQualificationError("configured billing status snapshot must be an absolute pinned file")
+        return cls(Path(path), digest, clock=clock)
+
+    @staticmethod
+    def _report(status: str, provenance: str = "LOCAL_SNAPSHOT_UNAUTHENTICATED") -> dict[str, str]:
+        return {"billing_bridge": "LOCAL_SNAPSHOT", "billing_status": status,
+                "billing_provenance": provenance, "billing_readback": "READBACK_REQUIRED",
+                "actual_cost_usd": "UNKNOWN"}
+
+    def inspect(self, job: Job) -> dict[str, str]:
+        try:
+            document, digest = load_strict_json_snapshot(self.path, "configured billing status snapshot")
+        except TrustRootVerificationError:
+            return self._report("UNAUTHENTICATED")
+        if (digest != self.expected_sha256 or not isinstance(document, dict) or set(document) != self._FIELDS
+                or type(document.get("schema")) is not int or document.get("schema") != 1
+                or document.get("kind") != "FAL_BILLING_STATUS_SNAPSHOT"):
+            return self._report("MISMATCH")
+        supplied = document.get("snapshot_sha256")
+        body = {key: value for key, value in document.items() if key != "snapshot_sha256"}
+        if not isinstance(supplied, str) or not re.fullmatch(r"[a-f0-9]{64}", supplied) or supplied != _hash(body):
+            return self._report("MISMATCH")
+        generated_at, now = document.get("generated_at"), self.clock()
+        if (type(generated_at) is not int or type(now) not in (int, float)
+                or not isinstance(now, (int, float)) or generated_at > now
+                or now - generated_at > _MAX_BILLING_SNAPSHOT_SECONDS):
+            return self._report("STALE")
+        provenance = document.get("provenance")
+        if provenance != "LOCAL_SNAPSHOT_UNAUTHENTICATED":
+            return self._report("UNAUTHENTICATED")
+        if document.get("request_id") != job.request_id or document.get("endpoint_id") != job.endpoint or document.get("mode") != job.mode:
+            return self._report("MISMATCH", provenance)
+        receipt, claim = document.get("executor_receipt"), document.get("ledger_claim")
+        binding = receipt.get("settlement_binding") if isinstance(receipt, dict) else None
+        if (not isinstance(receipt, dict) or set(receipt) != self._RECEIPT_FIELDS
+                or not isinstance(claim, dict) or set(claim) != self._CLAIM_FIELDS
+                or receipt.get("receipt_schema") != 2
+                or receipt.get("request_id") != job.request_id or receipt.get("endpoint") != job.endpoint
+                or receipt.get("mode") != job.mode or receipt.get("status") not in {"INTENT", "PREPARED", "SUBMITTED", "COMPLETE"}
+                or not isinstance(binding, dict) or set(binding) != self._BINDING_FIELDS
+                or binding.get("schema") != 2
+                or binding.get("local_request_id") != job.request_id or binding.get("endpoint_id") != job.endpoint
+                or binding.get("authority_mode") != job.mode or claim.get("request_id") != job.request_id
+                or claim.get("provider") != job.endpoint or claim.get("authority_mode") != job.mode
+                or claim.get("auth_scope") != binding.get("auth_scope")
+                or claim.get("provider_request_id") != binding.get("provider_request_id")
+                or claim.get("settlement_mode") != "FAL_READBACK_V2"
+                or claim.get("state") not in {"RESERVED", "UNKNOWN", "SETTLED"}):
+            return self._report("MISMATCH", provenance)
+        # This revision deliberately publishes only un-settled projections.  A
+        # non-null receipt is rejected rather than treating a caller-created
+        # digest as evidence until the reconciler exposes its canonical receipt.
+        if document.get("settlement_receipt") is not None:
+            return self._report("MISMATCH", provenance)
+        if job.mode == "TEST":
+            return self._report("TEST", provenance)
+        if document.get("settlement_receipt") is None or claim.get("state") in {"RESERVED", "UNKNOWN"}:
+            return self._report("PENDING", provenance)
+        return self._report("UNAUTHENTICATED", provenance)
+
+
+class BillingStatusSnapshotPublisher:
+    """Atomically publish a closed projection captured by the real writer path.
+
+    Inputs are captured receipts/claims, not database paths.  This deliberately
+    cannot open or copy SQLite/WAL/SHM, and callers must invoke it while their
+    executor/ledger writer context still owns the coherent state.
+    """
+
+    def __init__(self, path: Path, *, clock=time.time) -> None:
+        self.path, self.clock = Path(path), clock
+
+    @staticmethod
+    def _projection(job: Job, executor_receipt: object, ledger_claim: object,
+                    settlement_receipt: object) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not isinstance(executor_receipt, dict) or not isinstance(ledger_claim, dict):
+            raise LiveQualificationError("writer-owned executor receipt and ledger claim are required")
+        binding = executor_receipt.get("settlement_binding")
+        required_binding = BillingStatusSnapshot._BINDING_FIELDS
+        required_receipt = BillingStatusSnapshot._RECEIPT_FIELDS
+        required_claim = BillingStatusSnapshot._CLAIM_FIELDS
+        if not isinstance(binding, dict) or set(binding) != required_binding:
+            raise LiveQualificationError("executor settlement binding is not closed")
+        receipt = {key: executor_receipt.get(key) for key in required_receipt}
+        claim = {key: ledger_claim.get(key) for key in required_claim}
+        if set(receipt) != required_receipt or set(claim) != required_claim:
+            raise LiveQualificationError("billing projection schema is not closed")
+        if settlement_receipt is not None:
+            raise LiveQualificationError("settled snapshot publication requires canonical receipt integration")
+        if (receipt["receipt_schema"] != 2 or receipt["request_id"] != job.request_id
+                or receipt["endpoint"] != job.endpoint or receipt["mode"] != job.mode
+                or binding.get("schema") != 2 or binding.get("local_request_id") != job.request_id
+                or binding.get("endpoint_id") != job.endpoint or binding.get("authority_mode") != job.mode
+                or claim.get("request_id") != job.request_id or claim.get("provider") != job.endpoint
+                or claim.get("authority_mode") != job.mode or claim.get("auth_scope") != binding.get("auth_scope")
+                or claim.get("provider_request_id") != binding.get("provider_request_id")
+                or claim.get("settlement_mode") != "FAL_READBACK_V2"):
+            raise LiveQualificationError("writer billing records do not form a coherent binding")
+        return receipt, claim
+
+    def publish(self, job: Job, *, executor_receipt: object, ledger_claim: object,
+                settlement_receipt: object) -> str:
+        receipt, claim = self._projection(job, executor_receipt, ledger_claim, settlement_receipt)
+        generated_at = self.clock()
+        if type(generated_at) is not int:
+            raise LiveQualificationError("snapshot publisher requires integer UTC clock")
+        body = {
+            "schema": 1, "kind": "FAL_BILLING_STATUS_SNAPSHOT", "generated_at": generated_at,
+            "request_id": job.request_id, "endpoint_id": job.endpoint, "mode": job.mode,
+            "executor_receipt": receipt, "ledger_claim": claim, "settlement_receipt": None,
+            "provenance": "LOCAL_SNAPSHOT_UNAUTHENTICATED",
+        }
+        document = {**body, "snapshot_sha256": _hash(body)}
+        encoded = _canonical(document)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return sha256(encoded).hexdigest()
+
+
 class LiveExecutionService:
     """Validate offline inputs and produce a write-once, blocked preflight report.
 
@@ -161,7 +318,8 @@ class LiveExecutionService:
     def __init__(self, *, executor: object, ledger: object, policy: LiveExecutionPolicy,
                  quote_resolver: LivePriceResolver, trust_root: Path, clock=time.time,
                  external_trust_verifier: ExternalTrustRootVerifier | None = None,
-                 external_trust_state: str = "NOT_CONFIGURED"):
+                 external_trust_state: str = "NOT_CONFIGURED",
+                 billing_status_snapshot: BillingStatusSnapshot | None = None):
         self.executor = executor
         self.ledger = ledger
         self.policy = policy
@@ -169,6 +327,7 @@ class LiveExecutionService:
         self.clock = clock
         self.external_trust_verifier = external_trust_verifier
         self.external_trust_state = external_trust_state
+        self.billing_status_snapshot = billing_status_snapshot
         self.trust_root = Path(trust_root)
         if not self.trust_root.is_absolute():
             raise LiveQualificationError("external trust root must be an absolute non-link directory")
@@ -202,10 +361,11 @@ class LiveExecutionService:
             state = "NOT_CONFIGURED" if "NOT_CONFIGURED" in str(error) else "UNAUTHENTICATED"
         else:
             state = "CONFIGURED"
+        billing_snapshot = BillingStatusSnapshot.from_app_config(app_config, clock=clock)
         return cls(
             executor=executor, ledger=ledger, policy=policy, quote_resolver=quote_resolver,
             trust_root=trust_root, clock=clock, external_trust_verifier=verifier,
-            external_trust_state=state,
+            external_trust_state=state, billing_status_snapshot=billing_snapshot,
         )
 
     def _trusted_receipt(self, value: object, *, kind: str, job: Job) -> tuple[dict[str, Any], str]:
@@ -322,6 +482,15 @@ class LiveExecutionService:
                 "signer_id": evidence.signer_id,
                 "role": evidence.role,
             }
+        billing = (
+            self.billing_status_snapshot.inspect(job)
+            if self.billing_status_snapshot is not None
+            else {
+                "billing_bridge": "NOT_CONNECTED", "billing_status": "NOT_AUTHENTICATED",
+                "billing_provenance": "UNAUTHENTICATED", "billing_readback": "READBACK_REQUIRED",
+                "actual_cost_usd": "UNKNOWN",
+            }
+        )
         body = {
             "schema": 2, "kind": "LIVE_EXECUTION_PREFLIGHT", "execution_state": "BLOCKED_NOT_QUALIFIED",
             "block_reason": "external provenance authority and authenticated billing bridge are unavailable",
@@ -330,10 +499,9 @@ class LiveExecutionService:
             "job_sha256": _hash({"request_id": job.request_id, "endpoint": job.endpoint, "manifest": job.manifest.checksum}),
             "manifest_sha256": job.manifest.checksum, "adapter": adapter,
             "identity_qa_sha256": identity_sha256, "assets_qa_sha256": assets_sha256,
-            "signed_qa_evidence": signed_qa_evidence,
-            "billing_bridge": "NOT_CONNECTED", "endpoint": job.endpoint,
-            "reserved_maximum_cost_usd": "UNKNOWN", "actual_cost_usd": "UNKNOWN",
-            "billing_status": "NOT_AUTHENTICATED", "publication_enabled": self.policy.publication_enabled,
+            "signed_qa_evidence": signed_qa_evidence, "endpoint": job.endpoint,
+            "reserved_maximum_cost_usd": "UNKNOWN", "publication_enabled": self.policy.publication_enabled,
+            **billing,
         }
         document = {**body, "document_sha256": _hash(body)}
         self._write_once(Path(receipt_path), document)

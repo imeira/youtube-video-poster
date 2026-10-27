@@ -16,6 +16,7 @@ import json
 import os
 import stat
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,21 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object
 
 def _reject_json_constant(value: str) -> None:
     raise TrustRootVerificationError(f"JSON non-finite number is forbidden: {value}")
+
+
+def _finite_json_float(value: str) -> Decimal:
+    """Reject exponent overflow before it can become an accepted JSON value."""
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise TrustRootVerificationError("JSON non-finite number is forbidden") from error
+    # Keep a finite JSON token from becoming an unbounded Decimal that later
+    # serializes or coerces as an infinity in a consumer.  The accepted range
+    # deliberately matches IEEE-754 finite magnitude even though we retain
+    # Decimal for exact validation downstream.
+    if not parsed.is_finite() or parsed.adjusted() > 308:
+        raise TrustRootVerificationError("JSON non-finite number is forbidden")
+    return parsed
 
 
 def load_strict_json_snapshot(path: Path | str, label: str, *, contained_by: Path | None = None) -> tuple[dict[str, Any], str]:
@@ -106,6 +122,7 @@ def load_strict_json_snapshot(path: Path | str, label: str, *, contained_by: Pat
             raw_bytes.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_pairs,
             parse_constant=_reject_json_constant,
+            parse_float=_finite_json_float,
         )
     except TrustRootVerificationError:
         raise
