@@ -38,6 +38,7 @@ _PACKET_FIELDS = {
 }
 _BINDINGS = {"request_id", "episode", "source_sha256", "assets_sha256", "policy_sha256"}
 _HEX = frozenset("0123456789abcdef")
+_TRUSTED_CONFIGURATION_FIELDS = {"root_path", "root_sha256", "evidence_root", "environment"}
 
 
 def canonical_json(value: object) -> bytes:
@@ -88,12 +89,19 @@ def load_strict_json_snapshot(path: Path | str, label: str, *, contained_by: Pat
         raise TrustRootVerificationError(f"{label} is missing or not a regular file")
     descriptor = None
     try:
+        before = os.stat(candidate, follow_symlinks=False)
         descriptor = os.open(candidate, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
             raise TrustRootVerificationError(f"{label} is missing or not a regular file")
+        if not os.path.samestat(before, opened):
+            raise TrustRootVerificationError(f"{label} file identity changed before open")
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = None
             raw_bytes = stream.read()
+        after = os.stat(candidate, follow_symlinks=False)
+        if not os.path.samestat(opened, after):
+            raise TrustRootVerificationError(f"{label} file identity changed during read")
         raw = json.loads(
             raw_bytes.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_pairs,
@@ -143,7 +151,8 @@ def _strict_b64(value: object, label: str) -> bytes:
         raise TrustRootVerificationError(f"{label} is invalid base64") from error
 
 
-def _load_root(path: Path) -> dict[str, Any]:
+def _load_root(path: Path) -> tuple[dict[str, Any], str]:
+    """Validate a root and retain the digest of those exact parsed bytes."""
     path = Path(path)
     package_root = Path(__file__).absolute().parents[2]
     if not path.is_absolute():
@@ -152,15 +161,13 @@ def _load_root(path: Path) -> dict[str, Any]:
         path = reject_reparse_path(path)
     except ValueError as error:
         raise TrustRootVerificationError("external trust root rejects symlink or reparse-point paths") from error
-    if not path.is_file():
-        raise TrustRootVerificationError("external trust root configuration is missing or not a regular file")
     try:
         path.relative_to(package_root)
     except ValueError:
         pass
     else:
         raise TrustRootVerificationError("external trust root must be configured outside this package")
-    raw = load_strict_json(path, "external trust root")
+    raw, digest = load_strict_json_snapshot(path, "external trust root")
     if not isinstance(raw, dict) or set(raw) != _ROOT_FIELDS:
         raise TrustRootVerificationError("external trust root must use the closed schema")
     if type(raw.get("schema")) is not int or raw.get("schema") != 1 or raw.get("kind") != "EXTERNAL_SIGNER_TRUST_ROOT":
@@ -201,7 +208,7 @@ def _load_root(path: Path) -> dict[str, Any]:
         or len(revoked) != len(set(revoked))
     ):
         raise TrustRootVerificationError("revoked_signers must be a unique string list")
-    return raw
+    return raw, digest
 
 
 @dataclass(frozen=True)
@@ -212,6 +219,33 @@ class VerifiedEvidence:
     root_version: str
     provenance: str
     live_authority: bool = False
+
+
+@dataclass(frozen=True)
+class TrustedExternalTrustConfiguration:
+    """Deployment configuration, supplied only by the application composition.
+
+    The pin protects the configured root bytes after the deployment has chosen
+    the source. It is not evidence that this process owns the configuration.
+    """
+
+    root_path: Path
+    root_sha256: str
+    evidence_root: Path
+    environment: str
+
+    @classmethod
+    def from_mapping(cls, raw: object) -> TrustedExternalTrustConfiguration:
+        if not isinstance(raw, dict) or set(raw) != _TRUSTED_CONFIGURATION_FIELDS:
+            raise TrustRootVerificationError("trusted external trust configuration must use the closed schema")
+        root_path, evidence_root = Path(raw["root_path"]), Path(raw["evidence_root"])
+        if not root_path.is_absolute() or not evidence_root.is_absolute():
+            raise TrustRootVerificationError("trusted external trust configuration requires absolute paths")
+        root_sha256 = _require_hash(raw["root_sha256"], "trusted root SHA-256")
+        environment = raw.get("environment")
+        if environment not in {"TEST", "PRODUCTION"}:
+            raise TrustRootVerificationError("trusted external trust configuration environment is unsupported")
+        return cls(root_path, root_sha256, evidence_root, environment)
 
 
 class EvidenceReplayGuard:
@@ -230,22 +264,67 @@ class EvidenceReplayGuard:
 class ExternalTrustRootVerifier:
     """Verify signed QA evidence against a preconfigured external public-key root."""
 
-    def __init__(self, root_path: Path | str, *, clock) -> None:
+    def __init__(self, root_path: Path | str, *, clock, trusted_configuration: TrustedExternalTrustConfiguration | None = None) -> None:
         self.root_path = Path(root_path)
-        self.root = _load_root(self.root_path)
         self.clock = clock
+        self.trusted_configuration = trusted_configuration
+        self.root = self._load_current_root()
+
+    @classmethod
+    def from_trusted_app_configuration(cls, configuration: TrustedExternalTrustConfiguration, *, clock) -> ExternalTrustRootVerifier:
+        """Compose verification from deployment configuration, never packet data."""
+        if not isinstance(configuration, TrustedExternalTrustConfiguration):
+            raise TrustRootVerificationError("trusted external trust configuration object is required")
+        return cls(configuration.root_path, clock=clock, trusted_configuration=configuration)
+
+    @classmethod
+    def from_app_config(cls, app_config: object, *, clock) -> ExternalTrustRootVerifier:
+        """Read the deployment-owned configuration channel used by the app."""
+        raw = getattr(app_config, "raw", None)
+        if not isinstance(raw, dict) or "external_trust_root" not in raw:
+            raise TrustRootVerificationError("external trust root is NOT_CONFIGURED")
+        return cls.from_trusted_app_configuration(
+            TrustedExternalTrustConfiguration.from_mapping(raw["external_trust_root"]), clock=clock
+        )
+
+    def _load_current_root(self) -> dict[str, Any]:
+        root, digest = _load_root(self.root_path)
+        configured = self.trusted_configuration
+        if configured is None:
+            return root
+        if root["environment"] != configured.environment:
+            raise TrustRootVerificationError(
+                f"configured root environment {root['environment']} does not match trusted configuration"
+            )
+        try:
+            evidence_root = reject_reparse_path(configured.evidence_root)
+        except ValueError as error:
+            raise TrustRootVerificationError("configured evidence scope rejects symlink or reparse-point paths") from error
+        if not evidence_root.is_dir():
+            raise TrustRootVerificationError("configured evidence scope is not a directory")
+        package_root = Path(__file__).absolute().parents[2]
+        try:
+            evidence_root.relative_to(package_root)
+        except ValueError:
+            pass
+        else:
+            raise TrustRootVerificationError("configured evidence scope must be outside this package")
+        if digest != configured.root_sha256:
+            raise TrustRootVerificationError("configured root pin mismatch")
+        return root
 
     def verify(self, packet: object, *, expected: dict[str, str], replay_guard: EvidenceReplayGuard | None = None) -> VerifiedEvidence:
+        root = self._load_current_root()
         if not isinstance(packet, dict) or set(packet) != _PACKET_FIELDS:
             raise TrustRootVerificationError("signed evidence must use the closed schema")
         if type(packet.get("schema")) is not int or packet.get("schema") != 1 or packet.get("kind") != "SIGNED_QA_EVIDENCE":
             raise TrustRootVerificationError("unsupported signed evidence schema")
         _require_text(packet.get("version"), "evidence version")
         signer_id = _require_text(packet.get("signer_id"), "signer_id")
-        signer = next((item for item in self.root["keys"] if item["signer_id"] == signer_id), None)
+        signer = next((item for item in root["keys"] if item["signer_id"] == signer_id), None)
         if signer is None:
             raise TrustRootVerificationError("unknown signer")
-        if signer_id in self.root["revoked_signers"]:
+        if signer_id in root["revoked_signers"]:
             raise TrustRootVerificationError("signer is revoked")
         if packet.get("role") != "QA" or packet["role"] != signer["role"]:
             raise TrustRootVerificationError("evidence role is not authorized")
@@ -279,10 +358,10 @@ class ExternalTrustRootVerifier:
             raise TrustRootVerificationError("evidence signature is invalid") from error
         if replay_guard is not None:
             replay_guard.consume(signer_id, nonce)
-        # This repository has no independently provisioned/pinned production
-        # configuration channel. A caller-selected root is therefore only a
-        # cryptographic check, never provenance authority.
+        provenance = "CRYPTOGRAPHICALLY_VALID_UNAUTHENTICATED_ROOT"
+        if self.trusted_configuration is not None:
+            provenance = "EXTERNAL_CONFIGURATION_VALIDATED"
+        # QA evidence remains non-financial and never enables LIVE dispatch.
         return VerifiedEvidence(
-            signer_id, "QA", "EVIDENCE:QA", self.root["version"],
-            "CRYPTOGRAPHICALLY_VALID_UNAUTHENTICATED_ROOT",
+            signer_id, "QA", "EVIDENCE:QA", root["version"], provenance,
         )

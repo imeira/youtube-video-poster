@@ -299,3 +299,79 @@ def test_preflight_records_verified_external_qa_evidence_without_live_authority(
 
     assert result.execution_state == "BLOCKED_NOT_QUALIFIED"
     assert result.document["signed_qa_evidence"] == {"role": "QA", "signer_id": "test-qa", "state": "CRYPTOGRAPHICALLY_VALID_UNAUTHENTICATED_ROOT"}
+
+
+def test_app_config_composition_uses_pinned_external_root_but_keeps_live_blocked(tmp_path):
+    from types import SimpleNamespace
+
+    from src.hybrid.live_execution import LiveExecutionPolicy, LiveExecutionService
+
+    _service, _executor, _ledger, trust_root = service(tmp_path)
+    job = live_job(tmp_path)
+    identity = persisted_qa(trust_root / "identity.json", job, "IDENTITY_QA")
+    assets = persisted_qa(trust_root / "assets.json", job, "ASSETS_QA")
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    root = {
+        "schema": 1, "kind": "EXTERNAL_SIGNER_TRUST_ROOT", "environment": "PRODUCTION",
+        "algorithm": "Ed25519", "version": "production-test-root", "revoked_signers": [],
+        "keys": [{"signer_id": "configured-qa", "role": "QA", "scopes": ["EVIDENCE:QA"],
+                  "public_key_b64": base64.b64encode(public).decode("ascii"),
+                  "not_before": 4_102_443_000, "not_after": 4_102_445_000}],
+    }
+    root_path = trust_root / "external-trust-root.json"
+    root_path.write_text(json.dumps(root), encoding="utf-8")
+    app_config = SimpleNamespace(raw={"external_trust_root": {
+        "root_path": str(root_path), "root_sha256": sha256(root_path.read_bytes()).hexdigest(),
+        "evidence_root": str(trust_root), "environment": "PRODUCTION",
+    }})
+    executor, ledger, resolver = ForbiddenExecutor(), ForbiddenLedger(), QuoteResolver()
+    instance = LiveExecutionService.from_app_config(
+        app_config, executor=executor, ledger=ledger,
+        policy=LiveExecutionPolicy.from_dict(policy()), quote_resolver=resolver,
+        trust_root=trust_root, clock=lambda: 4_102_444_000,
+    )
+    evidence = {"schema": 1, "kind": "SIGNED_QA_EVIDENCE", "version": "evidence-v1",
+                "signer_id": "configured-qa", "role": "QA", "scope": "EVIDENCE:QA",
+                "request_id": job.request_id, "episode": job.scene,
+                "source_sha256": sha256(json.dumps(job.payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest(),
+                "assets_sha256": job.manifest.checksum, "policy_sha256": instance.policy.digest,
+                "issued_at": 4_102_444_000, "expires_at": 4_102_444_120, "nonce": "configured-service-test"}
+    evidence["signature_b64"] = base64.b64encode(private.sign(json.dumps(
+        evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode())).decode("ascii")
+    evidence_path = trust_root / "configured-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    result = instance.preflight(job, adapter="fal_flux", identity_qa_path=identity,
+                                assets_qa_path=assets, receipt_path=tmp_path / "p.json",
+                                signed_qa_evidence_path=evidence_path)
+
+    assert result.execution_state == "BLOCKED_NOT_QUALIFIED"
+    assert result.document["signed_qa_evidence"]["state"] == "EXTERNAL_CONFIGURATION_VALIDATED"
+    assert result.document["billing_status"] == "NOT_AUTHENTICATED"
+    assert executor.calls == 0 and ledger.calls == [] and resolver.calls == 0
+
+
+def test_missing_app_trust_configuration_reports_not_configured_without_provider_work(tmp_path):
+    from types import SimpleNamespace
+
+    from src.hybrid.live_execution import LiveExecutionPolicy, LiveExecutionService
+
+    _service, _executor, _ledger, trust_root = service(tmp_path)
+    job = live_job(tmp_path)
+    identity = persisted_qa(trust_root / "identity.json", job, "IDENTITY_QA")
+    assets = persisted_qa(trust_root / "assets.json", job, "ASSETS_QA")
+    executor, ledger, resolver = ForbiddenExecutor(), ForbiddenLedger(), QuoteResolver()
+    instance = LiveExecutionService.from_app_config(
+        SimpleNamespace(raw={}), executor=executor, ledger=ledger,
+        policy=LiveExecutionPolicy.from_dict(policy()), quote_resolver=resolver,
+        trust_root=trust_root, clock=lambda: 4_102_444_000,
+    )
+
+    result = instance.preflight(job, adapter="fal_flux", identity_qa_path=identity,
+                                assets_qa_path=assets, receipt_path=tmp_path / "p.json")
+
+    assert result.document["signed_qa_evidence"] == {"state": "NOT_CONFIGURED"}
+    assert result.document["billing_status"] == "NOT_AUTHENTICATED"
+    assert executor.calls == 0 and ledger.calls == [] and resolver.calls == 0

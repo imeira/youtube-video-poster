@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from copy import deepcopy
+from hashlib import sha256
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -186,3 +187,143 @@ def test_rejects_boolean_schema_values_in_root_and_evidence(signed_fixture):
     packet["schema"] = True
     with pytest.raises(TrustRootVerificationError, match="schema"):
         ExternalTrustRootVerifier(root_path, clock=lambda: 4_102_444_010).verify(packet, expected=expected)
+
+
+def test_trusted_app_configuration_revalidates_pinned_production_root_without_live_authority(
+    signed_fixture, tmp_path
+):
+    from src.hybrid.external_trust_root import (
+        ExternalTrustRootVerifier,
+        TrustedExternalTrustConfiguration,
+        TrustRootVerificationError,
+    )
+
+    root_path, packet, expected = signed_fixture
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["environment"] = "PRODUCTION"
+    root_path.write_bytes(canonical(root))
+    configuration = TrustedExternalTrustConfiguration(
+        root_path=root_path,
+        root_sha256=__import__("hashlib").sha256(root_path.read_bytes()).hexdigest(),
+        evidence_root=tmp_path,
+        environment="PRODUCTION",
+    )
+    verifier = ExternalTrustRootVerifier.from_trusted_app_configuration(
+        configuration, clock=lambda: 4_102_444_010
+    )
+
+    verified = verifier.verify(packet, expected=expected)
+
+    assert verified.provenance == "EXTERNAL_CONFIGURATION_VALIDATED"
+    assert verified.live_authority is False
+
+    root["version"] = "substituted-root-v2"
+    root_path.write_bytes(canonical(root))
+    with pytest.raises(TrustRootVerificationError, match="pin mismatch"):
+        verifier.verify(packet, expected=expected)
+
+
+def test_configured_root_rejects_attacker_snapshot_swapped_back_before_pin_digest(
+    signed_fixture, tmp_path, monkeypatch
+):
+    from src.hybrid import external_trust_root
+    from src.hybrid.external_trust_root import (
+        EvidenceReplayGuard,
+        ExternalTrustRootVerifier,
+        TrustedExternalTrustConfiguration,
+        TrustRootVerificationError,
+    )
+
+    root_path, packet, expected = signed_fixture
+    pinned_bytes = root_path.read_bytes()
+    attacker_private = Ed25519PrivateKey.generate()
+    attacker_root = json.loads(pinned_bytes)
+    attacker_root["version"] = "attacker-root"
+    attacker_root["keys"][0]["public_key_b64"] = base64.b64encode(
+        attacker_private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ).decode("ascii")
+    attacker_payload = {key: value for key, value in packet.items() if key != "signature_b64"}
+    attacker_packet = {
+        **attacker_payload,
+        "signature_b64": base64.b64encode(attacker_private.sign(canonical(attacker_payload))).decode("ascii"),
+    }
+    configuration = TrustedExternalTrustConfiguration(
+        root_path=root_path,
+        root_sha256=sha256(pinned_bytes).hexdigest(),
+        evidence_root=tmp_path,
+        environment="TEST",
+    )
+    verifier = ExternalTrustRootVerifier.from_trusted_app_configuration(
+        configuration, clock=lambda: 4_102_444_010
+    )
+    root_path.write_bytes(canonical(attacker_root))
+    original_snapshot = external_trust_root.load_strict_json_snapshot
+    calls = 0
+
+    def snapshot_then_restore(path, label, **kwargs):
+        nonlocal calls
+        calls += 1
+        document, digest = original_snapshot(path, label, **kwargs)
+        if calls == 1:
+            root_path.write_bytes(pinned_bytes)
+        return document, digest
+
+    monkeypatch.setattr(external_trust_root, "load_strict_json_snapshot", snapshot_then_restore)
+    replay_guard = EvidenceReplayGuard()
+
+    with pytest.raises(TrustRootVerificationError, match="pin mismatch"):
+        verifier.verify(attacker_packet, expected=expected, replay_guard=replay_guard)
+
+    assert calls == 1
+    # The rejected attacker packet must not consume a replay token; the original
+    # pinned-root packet still verifies against the restored bytes.
+    verifier.verify(packet, expected=expected, replay_guard=replay_guard)
+
+
+@pytest.mark.parametrize(
+    ("configuration", "error"),
+    [
+        (lambda path, digest, scope: {"root_path": str(path), "root_sha256": digest, "evidence_root": str(scope), "environment": "PRODUCTION"}, "TEST"),
+        (lambda path, digest, scope: {"root_path": str(path), "root_sha256": "0" * 64, "evidence_root": str(scope), "environment": "TEST"}, "pin mismatch"),
+        (lambda path, digest, scope: {"root_path": str(path), "root_sha256": digest, "evidence_root": str(scope), "environment": "TEST", "packet": {}}, "closed"),
+    ],
+)
+def test_trusted_configuration_rejects_test_root_pin_mismatch_and_packet_override(
+    signed_fixture, configuration, error
+):
+    from src.hybrid.external_trust_root import (
+        ExternalTrustRootVerifier,
+        TrustedExternalTrustConfiguration,
+        TrustRootVerificationError,
+    )
+
+    root_path, _packet, _expected = signed_fixture
+    raw = configuration(root_path, __import__("hashlib").sha256(root_path.read_bytes()).hexdigest(), root_path.parent)
+    with pytest.raises(TrustRootVerificationError, match=error):
+        verifier = ExternalTrustRootVerifier.from_trusted_app_configuration(
+            TrustedExternalTrustConfiguration.from_mapping(raw), clock=lambda: 4_102_444_010
+        )
+        verifier.verify({}, expected={})
+
+
+def test_trusted_configuration_rejects_reparse_root_before_parsing(signed_fixture, tmp_path):
+    from src.hybrid.external_trust_root import (
+        ExternalTrustRootVerifier,
+        TrustedExternalTrustConfiguration,
+        TrustRootVerificationError,
+    )
+
+    root_path, _packet, _expected = signed_fixture
+    linked_root = tmp_path / "linked-root.json"
+    linked_root.symlink_to(root_path)
+    configuration = TrustedExternalTrustConfiguration(
+        root_path=linked_root,
+        root_sha256=__import__("hashlib").sha256(root_path.read_bytes()).hexdigest(),
+        evidence_root=tmp_path,
+        environment="TEST",
+    )
+
+    with pytest.raises(TrustRootVerificationError, match="reparse"):
+        ExternalTrustRootVerifier.from_trusted_app_configuration(
+            configuration, clock=lambda: 4_102_444_010
+        )

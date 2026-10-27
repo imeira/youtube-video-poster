@@ -159,12 +159,16 @@ class LiveExecutionService:
     """
 
     def __init__(self, *, executor: object, ledger: object, policy: LiveExecutionPolicy,
-                 quote_resolver: LivePriceResolver, trust_root: Path, clock=time.time):
+                 quote_resolver: LivePriceResolver, trust_root: Path, clock=time.time,
+                 external_trust_verifier: ExternalTrustRootVerifier | None = None,
+                 external_trust_state: str = "NOT_CONFIGURED"):
         self.executor = executor
         self.ledger = ledger
         self.policy = policy
         self.quote_resolver = quote_resolver
         self.clock = clock
+        self.external_trust_verifier = external_trust_verifier
+        self.external_trust_state = external_trust_state
         self.trust_root = Path(trust_root)
         if not self.trust_root.is_absolute():
             raise LiveQualificationError("external trust root must be an absolute non-link directory")
@@ -185,6 +189,24 @@ class LiveExecutionService:
         if set(root) != _TRUST_ROOT_FIELDS or type(root.get("schema")) is not int or root.get("schema") != 1 or root.get("kind") != "LIVE_TRUST_ROOT" or not isinstance(root.get("issuer"), str) or not root["issuer"].strip() or root.get("verification") != "UNAVAILABLE":
             raise LiveQualificationError("unsupported external trust root contract")
         self.trust_root_sha256 = _hash(root)
+
+    @classmethod
+    def from_app_config(cls, app_config: object, *, executor: object, ledger: object,
+                        policy: LiveExecutionPolicy, quote_resolver: LivePriceResolver,
+                        trust_root: Path, clock=time.time) -> LiveExecutionService:
+        """Compose optional root verification from the deployment app config only."""
+        try:
+            verifier = ExternalTrustRootVerifier.from_app_config(app_config, clock=clock)
+        except TrustRootVerificationError as error:
+            verifier = None
+            state = "NOT_CONFIGURED" if "NOT_CONFIGURED" in str(error) else "UNAUTHENTICATED"
+        else:
+            state = "CONFIGURED"
+        return cls(
+            executor=executor, ledger=ledger, policy=policy, quote_resolver=quote_resolver,
+            trust_root=trust_root, clock=clock, external_trust_verifier=verifier,
+            external_trust_state=state,
+        )
 
     def _trusted_receipt(self, value: object, *, kind: str, job: Job) -> tuple[dict[str, Any], str]:
         if not isinstance(value, (str, Path)):
@@ -268,12 +290,27 @@ class LiveExecutionService:
         assets, assets_sha256 = self._trusted_receipt(assets_qa_path, kind="ASSETS_QA", job=job)
         if identity["reviewer"] == assets["reviewer"]:
             raise LiveQualificationError("independent QA reviewers must be distinct")
-        signed_qa_evidence = {"state": "UNAVAILABLE"}
+        signed_qa_evidence = {"state": self.external_trust_state}
         if signed_qa_evidence_path is not None:
-            packet = _load_json(Path(signed_qa_evidence_path), "signed QA evidence", contained_by=self.trust_root)
-            evidence = ExternalTrustRootVerifier(
-                self.trust_root / "external-trust-root.json", clock=self.clock,
-            ).verify(packet, expected={
+            if self.external_trust_verifier is None:
+                packet = _load_json(Path(signed_qa_evidence_path), "signed QA evidence", contained_by=self.trust_root)
+                evidence = ExternalTrustRootVerifier(
+                    self.trust_root / "external-trust-root.json", clock=self.clock,
+                ).verify(packet, expected={
+                    "request_id": job.request_id,
+                    "episode": job.scene,
+                    "source_sha256": _hash(job.payload),
+                    "assets_sha256": job.manifest.checksum,
+                    "policy_sha256": self.policy.digest,
+                })
+            else:
+                configured = self.external_trust_verifier.trusted_configuration
+                assert configured is not None
+                packet = _load_json(
+                    Path(signed_qa_evidence_path), "signed QA evidence",
+                    contained_by=configured.evidence_root,
+                )
+                evidence = self.external_trust_verifier.verify(packet, expected={
                 "request_id": job.request_id,
                 "episode": job.scene,
                 "source_sha256": _hash(job.payload),
