@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from PIL import Image
 
 from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
@@ -51,8 +55,10 @@ def persisted_qa(path: Path, job: Job, kind: str, *, evidence: dict | None = Non
 class QuoteResolver:
     def __init__(self, *, valid_until: float = 4_102_444_120):
         self.valid_until = valid_until
+        self.calls = 0
 
     def quote(self, job: Job) -> dict:
+        self.calls += 1
         return {
             "endpoint": job.endpoint, "amount": str(job.cost),
             "valid_until": self.valid_until,
@@ -102,7 +108,8 @@ def service(tmp_path: Path, *, resolver: QuoteResolver | None = None):
 
 
 def test_preflight_is_write_once_and_explicitly_not_qualified(tmp_path):
-    service_, _executor, _ledger, trust_root = service(tmp_path)
+    resolver = QuoteResolver()
+    service_, _executor, _ledger, trust_root = service(tmp_path, resolver=resolver)
     job = live_job(tmp_path)
     identity = persisted_qa(trust_root / "identity.json", job, "IDENTITY_QA")
     assets = persisted_qa(trust_root / "assets.json", job, "ASSETS_QA")
@@ -118,7 +125,9 @@ def test_preflight_is_write_once_and_explicitly_not_qualified(tmp_path):
     persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert persisted["execution_state"] == "BLOCKED_NOT_QUALIFIED"
     assert persisted["trust_root_verification"] == "UNAVAILABLE"
-    assert "authenticated-billing-export" in json.dumps(persisted)
+    assert persisted["billing_bridge"] == "NOT_CONNECTED"
+    assert persisted["billing_status"] == "NOT_AUTHENTICATED"
+    assert resolver.calls == 0
     assert service_.preflight(
         job, adapter="fal_flux", identity_qa_path=identity, assets_qa_path=assets,
         receipt_path=receipt_path,
@@ -190,20 +199,103 @@ def test_inline_self_attested_qa_and_bearer_evidence_are_rejected(tmp_path):
                            assets_qa_path=assets, receipt_path=tmp_path / "p.json")
 
 
-def test_closed_policy_and_quote_expiry_window_reject_before_preflight_write(tmp_path):
+def test_qa_receipt_rejects_integer_instead_of_boolean_approval(tmp_path):
+    service_, _executor, _ledger, trust_root = service(tmp_path)
+    job = live_job(tmp_path)
+    identity = persisted_qa(trust_root / "identity.json", job, "IDENTITY_QA")
+    receipt = json.loads(identity.read_text(encoding="utf-8"))
+    receipt["approved"] = 1
+    identity.write_text(json.dumps(receipt), encoding="utf-8")
+    assets = persisted_qa(trust_root / "assets.json", job, "ASSETS_QA")
+
+    with pytest.raises(ValueError, match="does not bind"):
+        service_.preflight(job, adapter="fal_flux", identity_qa_path=identity,
+                           assets_qa_path=assets, receipt_path=tmp_path / "p.json")
+
+
+def test_preflight_hashes_the_same_qa_bytes_it_strictly_validates_after_path_swap(tmp_path, monkeypatch):
+    from src.hybrid import live_execution
+
+    service_, _executor, _ledger, trust_root = service(tmp_path)
+    job = live_job(tmp_path)
+    identity = persisted_qa(trust_root / "identity.json", job, "IDENTITY_QA")
+    assets = persisted_qa(trust_root / "assets.json", job, "ASSETS_QA")
+    accepted_bytes = identity.read_bytes()
+    outside = tmp_path / "outside.json"
+    persisted_qa(outside, job, "IDENTITY_QA", evidence={"method": "outside", "result": "FAIL"})
+    original_load_json = live_execution._load_json
+    original_read_bytes = Path.read_bytes
+    swapped = False
+
+    def swap_identity_after_parse(path, label, **kwargs):
+        nonlocal swapped
+        parsed = original_load_json(path, label, **kwargs)
+        if not swapped and label == "IDENTITY_QA receipt":
+            swapped = True
+            identity.unlink()
+            identity.symlink_to(outside)
+        return parsed
+
+    def forbid_reopened_identity(self, *args, **kwargs):
+        if self == identity:
+            raise AssertionError("outside QA bytes must not be reopened")
+        return original_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(live_execution, "_load_json", swap_identity_after_parse)
+    monkeypatch.setattr(Path, "read_bytes", forbid_reopened_identity)
+
+    result = service_.preflight(job, adapter="fal_flux", identity_qa_path=identity,
+                                assets_qa_path=assets, receipt_path=tmp_path / "p.json")
+
+    assert swapped
+    assert result.document["identity_qa_sha256"] == sha256(accepted_bytes).hexdigest()
+
+
+def test_closed_policy_and_unconnected_quote_resolver_does_not_gate_preflight(tmp_path):
     from src.hybrid.live_execution import LiveExecutionPolicy
 
     extra = policy() | {"bypass_live_block": True}
     with pytest.raises(ValueError, match="closed"):
         LiveExecutionPolicy.from_dict(extra)
 
-    service_, _executor, _ledger, trust_root = service(
-        tmp_path, resolver=QuoteResolver(valid_until=4_102_444_800)
-    )
+    resolver = QuoteResolver(valid_until=4_102_444_800)
+    service_, _executor, _ledger, trust_root = service(tmp_path, resolver=resolver)
     job = live_job(tmp_path)
     identity = persisted_qa(trust_root / "identity.json", job, "IDENTITY_QA")
     assets = persisted_qa(trust_root / "assets.json", job, "ASSETS_QA")
-    with pytest.raises(ValueError, match="maximum window"):
-        service_.preflight(job, adapter="fal_flux", identity_qa_path=identity,
-                           assets_qa_path=assets, receipt_path=tmp_path / "p.json")
-    assert not (tmp_path / "p.json").exists()
+    service_.preflight(job, adapter="fal_flux", identity_qa_path=identity,
+                       assets_qa_path=assets, receipt_path=tmp_path / "p.json")
+    assert resolver.calls == 0
+
+
+def test_preflight_records_verified_external_qa_evidence_without_live_authority(tmp_path):
+    service_, _executor, _ledger, trust_root = service(tmp_path)
+    job = live_job(tmp_path)
+    identity = persisted_qa(trust_root / "identity.json", job, "IDENTITY_QA")
+    assets = persisted_qa(trust_root / "assets.json", job, "ASSETS_QA")
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    trust_root.joinpath("external-trust-root.json").write_text(json.dumps({
+        "schema": 1, "kind": "EXTERNAL_SIGNER_TRUST_ROOT", "environment": "TEST",
+        "algorithm": "Ed25519", "version": "test-root-v1", "revoked_signers": [],
+        "keys": [{"signer_id": "test-qa", "role": "QA", "scopes": ["EVIDENCE:QA"],
+                  "public_key_b64": base64.b64encode(public).decode("ascii"),
+                  "not_before": 4_102_443_000, "not_after": 4_102_445_000}],
+    }), encoding="utf-8")
+    source_sha256 = sha256(json.dumps(job.payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    evidence = {"schema": 1, "kind": "SIGNED_QA_EVIDENCE", "version": "evidence-v1",
+                "signer_id": "test-qa", "role": "QA", "scope": "EVIDENCE:QA",
+                "request_id": job.request_id, "episode": job.scene, "source_sha256": source_sha256,
+                "assets_sha256": job.manifest.checksum, "policy_sha256": service_.policy.digest,
+                "issued_at": 4_102_444_000, "expires_at": 4_102_444_120, "nonce": "service-test-1"}
+    canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    evidence["signature_b64"] = base64.b64encode(private.sign(canonical)).decode("ascii")
+    evidence_path = trust_root / "signed-qa-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    result = service_.preflight(job, adapter="fal_flux", identity_qa_path=identity,
+                                assets_qa_path=assets, receipt_path=tmp_path / "p.json",
+                                signed_qa_evidence_path=evidence_path)
+
+    assert result.execution_state == "BLOCKED_NOT_QUALIFIED"
+    assert result.document["signed_qa_evidence"] == {"role": "QA", "signer_id": "test-qa", "state": "CRYPTOGRAPHICALLY_VALID_UNAUTHENTICATED_ROOT"}

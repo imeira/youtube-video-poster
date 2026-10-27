@@ -19,6 +19,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from src.hybrid.execution import Job
+from src.hybrid.external_trust_root import (
+    ExternalTrustRootVerifier,
+    TrustRootVerificationError,
+    load_strict_json_snapshot,
+)
+from src.hybrid.locks import reject_reparse_path
 
 
 class LiveQualificationError(ValueError):
@@ -89,14 +95,20 @@ def _safe_evidence(value: object, field: str) -> dict[str, Any]:
     return value
 
 
-def _load_json(path: Path, label: str) -> dict[str, Any]:
+class _JsonSnapshot(dict[str, Any]):
+    """A strict JSON document bound to the SHA-256 of its parsed bytes."""
+
+    def __init__(self, document: dict[str, Any], sha256_digest: str) -> None:
+        super().__init__(document)
+        self.sha256_digest = sha256_digest
+
+
+def _load_json(path: Path, label: str, *, contained_by: Path | None = None) -> _JsonSnapshot:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise LiveQualificationError(f"{label} is not readable JSON") from error
-    if not isinstance(data, dict):
-        raise LiveQualificationError(f"{label} must be an object")
-    return data
+        document, digest = load_strict_json_snapshot(path, label, contained_by=contained_by)
+    except TrustRootVerificationError as error:
+        raise LiveQualificationError(str(error)) from error
+    return _JsonSnapshot(document, digest)
 
 
 @dataclass(frozen=True)
@@ -154,17 +166,23 @@ class LiveExecutionService:
         self.quote_resolver = quote_resolver
         self.clock = clock
         self.trust_root = Path(trust_root)
-        if not self.trust_root.is_absolute() or not self.trust_root.is_dir() or self.trust_root.is_symlink():
+        if not self.trust_root.is_absolute():
             raise LiveQualificationError("external trust root must be an absolute non-link directory")
-        package_root = Path(__file__).resolve().parents[2]
         try:
-            self.trust_root.resolve().relative_to(package_root)
+            self.trust_root = reject_reparse_path(self.trust_root)
+        except ValueError as error:
+            raise LiveQualificationError("external trust root rejects symlink or reparse-point paths") from error
+        if not self.trust_root.is_dir():
+            raise LiveQualificationError("external trust root must be an absolute non-link directory")
+        package_root = Path(__file__).absolute().parents[2]
+        try:
+            self.trust_root.relative_to(package_root)
         except ValueError:
             pass
         else:
             raise LiveQualificationError("trust root must be configured outside this package")
-        root = _load_json(self.trust_root / "live-trust-root.json", "external trust root")
-        if set(root) != _TRUST_ROOT_FIELDS or root.get("schema") != 1 or root.get("kind") != "LIVE_TRUST_ROOT" or not isinstance(root.get("issuer"), str) or not root["issuer"].strip() or root.get("verification") != "UNAVAILABLE":
+        root = _load_json(self.trust_root / "live-trust-root.json", "external trust root", contained_by=self.trust_root)
+        if set(root) != _TRUST_ROOT_FIELDS or type(root.get("schema")) is not int or root.get("schema") != 1 or root.get("kind") != "LIVE_TRUST_ROOT" or not isinstance(root.get("issuer"), str) or not root["issuer"].strip() or root.get("verification") != "UNAVAILABLE":
             raise LiveQualificationError("unsupported external trust root contract")
         self.trust_root_sha256 = _hash(root)
 
@@ -172,22 +190,36 @@ class LiveExecutionService:
         if not isinstance(value, (str, Path)):
             raise LiveQualificationError("persisted QA receipt path is required; inline QA is not trusted")
         path = Path(value)
-        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        if not path.is_absolute():
             raise LiveQualificationError("persisted QA receipt must be a regular absolute file")
         try:
-            path.resolve().relative_to(self.trust_root.resolve())
+            path = reject_reparse_path(path)
+        except ValueError as error:
+            raise LiveQualificationError("persisted QA receipt rejects symlink or reparse-point paths") from error
+        if not path.is_file():
+            raise LiveQualificationError("persisted QA receipt must be a regular absolute file")
+        try:
+            path.relative_to(self.trust_root)
         except ValueError as error:
             raise LiveQualificationError("persisted QA receipt must live below external trust root") from error
-        receipt = _load_json(path, f"{kind} receipt")
+        receipt = _load_json(path, f"{kind} receipt", contained_by=self.trust_root)
         if set(receipt) != _QA_FIELDS:
             raise LiveQualificationError("QA receipt must use the closed schema")
-        if (receipt.get("schema"), receipt.get("kind"), receipt.get("approved"), receipt.get("request_id"), receipt.get("manifest_sha256")) != (1, kind, True, job.request_id, job.manifest.checksum):
+        if (
+            type(receipt.get("schema")) is not int
+            or receipt.get("schema") != 1
+            or receipt.get("kind") != kind
+            or type(receipt.get("approved")) is not bool
+            or receipt.get("approved") is not True
+            or receipt.get("request_id") != job.request_id
+            or receipt.get("manifest_sha256") != job.manifest.checksum
+        ):
             raise LiveQualificationError("QA receipt does not bind this LIVE job")
         reviewer = receipt.get("reviewer")
         if not isinstance(reviewer, str) or not reviewer.strip() or len(reviewer) > 128:
             raise LiveQualificationError("QA receipt reviewer is required")
         _safe_evidence(receipt["evidence"], "QA evidence")
-        return receipt, sha256(path.read_bytes()).hexdigest()
+        return receipt, receipt.sha256_digest
 
     def _quote(self, job: Job) -> tuple[dict[str, Any], Decimal]:
         quote = self.quote_resolver.quote(job)
@@ -227,7 +259,8 @@ class LiveExecutionService:
             raise LiveQualificationError("preflight receipt readback mismatch")
 
     def preflight(self, job: Job, *, adapter: str, identity_qa_path: Path,
-                  assets_qa_path: Path, receipt_path: Path) -> LiveQualification:
+                  assets_qa_path: Path, receipt_path: Path,
+                  signed_qa_evidence_path: Path | None = None) -> LiveQualification:
         if job.mode != "LIVE" or adapter not in self.policy.allowed_adapters or job.endpoint != _ADAPTER_ENDPOINTS.get(adapter):
             raise LiveQualificationError("LIVE adapter is not allowed by policy")
         job.manifest.verify("LIVE")
@@ -235,19 +268,35 @@ class LiveExecutionService:
         assets, assets_sha256 = self._trusted_receipt(assets_qa_path, kind="ASSETS_QA", job=job)
         if identity["reviewer"] == assets["reviewer"]:
             raise LiveQualificationError("independent QA reviewers must be distinct")
-        quote, maximum = self._quote(job)
+        signed_qa_evidence = {"state": "UNAVAILABLE"}
+        if signed_qa_evidence_path is not None:
+            packet = _load_json(Path(signed_qa_evidence_path), "signed QA evidence", contained_by=self.trust_root)
+            evidence = ExternalTrustRootVerifier(
+                self.trust_root / "external-trust-root.json", clock=self.clock,
+            ).verify(packet, expected={
+                "request_id": job.request_id,
+                "episode": job.scene,
+                "source_sha256": _hash(job.payload),
+                "assets_sha256": job.manifest.checksum,
+                "policy_sha256": self.policy.digest,
+            })
+            signed_qa_evidence = {
+                "state": evidence.provenance,
+                "signer_id": evidence.signer_id,
+                "role": evidence.role,
+            }
         body = {
             "schema": 2, "kind": "LIVE_EXECUTION_PREFLIGHT", "execution_state": "BLOCKED_NOT_QUALIFIED",
-            "block_reason": "external trust verification and authenticated billing settlement are unavailable",
+            "block_reason": "external provenance authority and authenticated billing bridge are unavailable",
             "trust_root_sha256": self.trust_root_sha256, "trust_root_verification": "UNAVAILABLE",
             "policy_sha256": self.policy.digest, "request_id": job.request_id,
             "job_sha256": _hash({"request_id": job.request_id, "endpoint": job.endpoint, "manifest": job.manifest.checksum}),
             "manifest_sha256": job.manifest.checksum, "adapter": adapter,
             "identity_qa_sha256": identity_sha256, "assets_qa_sha256": assets_sha256,
-            "quote_sha256": _hash(quote), "quote_evidence": quote["evidence"],
-            "endpoint": job.endpoint, "reserved_maximum_cost_usd": str(maximum),
-            "actual_cost_usd": "UNKNOWN", "billing_status": "UNAUTHENTICATED",
-            "valid_until": quote["valid_until"], "publication_enabled": self.policy.publication_enabled,
+            "signed_qa_evidence": signed_qa_evidence,
+            "billing_bridge": "NOT_CONNECTED", "endpoint": job.endpoint,
+            "reserved_maximum_cost_usd": "UNKNOWN", "actual_cost_usd": "UNKNOWN",
+            "billing_status": "NOT_AUTHENTICATED", "publication_enabled": self.policy.publication_enabled,
         }
         document = {**body, "document_sha256": _hash(body)}
         self._write_once(Path(receipt_path), document)

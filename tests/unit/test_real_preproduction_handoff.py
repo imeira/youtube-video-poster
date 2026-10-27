@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import shutil
+import socket
+import subprocess
+import sys
 from hashlib import sha256
 from pathlib import Path
 
@@ -521,3 +524,119 @@ def test_real_handoff_rejects_reparse_review_path_before_read(tmp_path, monkeypa
     monkeypatch.setattr(Path, "read_bytes", forbid_linked_review)
     with pytest.raises(ValueError, match="reparse"):
         build_real_handoff_preflight(tmp_path, created["request_id"])
+
+
+def test_fresh_processes_concurrently_materialize_one_real_import_and_one_verified_replay(tmp_path):
+    """The OS lock serializes two fresh-process imports without test doubles."""
+    created, revision, manifest_path = _director_import_inputs(tmp_path)
+    packet = revision / "director-import"
+    audit = tmp_path / "replace-audit"
+    audit.mkdir()
+    child = '''
+import json
+import os
+import socket
+import sys
+from pathlib import Path
+from src.hybrid import preproduction
+
+workspace, request_id, manifest, port, audit_dir, published_packet = sys.argv[1:]
+audit_dir = Path(audit_dir)
+published_packet = Path(published_packet)
+original_replace = preproduction.os.replace
+publication_count = 0
+
+def audited_replace(source, destination):
+    global publication_count
+    result = original_replace(source, destination)
+    if Path(destination) == published_packet:
+        publication_count += 1
+        marker = audit_dir / f"{os.getpid()}-{publication_count}.replace"
+        with open(marker, "xb"):
+            pass
+    return result
+
+preproduction.os.replace = audited_replace
+with socket.create_connection(("127.0.0.1", int(port)), timeout=20) as barrier:
+    barrier.settimeout(20)
+    barrier.sendall(b"ready")
+    if barrier.recv(2) != b"go":
+        raise RuntimeError("barrier release failed")
+result = preproduction.import_real_preproduction_handoff(Path(workspace), request_id, Path(manifest))
+print(json.dumps({
+    "mode": result["mode"],
+    "receipt_sha256": result["receipt_sha256"],
+    "qualification_status": result["qualification_status"],
+}, sort_keys=True))
+'''
+    children = []
+    peers = []
+    outputs = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(2)
+            listener.settimeout(30)
+            port = listener.getsockname()[1]
+            command = [
+                sys.executable, "-c", child, str(tmp_path), created["request_id"],
+                str(manifest_path), str(port), str(audit), str(packet),
+            ]
+            children = [
+                subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for _ in range(2)
+            ]
+            for _ in children:
+                peer, _address = listener.accept()
+                peer.settimeout(20)
+                peers.append(peer)
+            for peer in peers:
+                assert peer.recv(5) == b"ready"
+            for peer in peers:
+                peer.sendall(b"go")
+
+        for process in children:
+            stdout, stderr = process.communicate(timeout=30)
+            # Do not expose a child traceback (which could carry a filesystem path or
+            # provider-derived data) if this assertion fails.
+            assert process.returncode == 0, (
+                f"import child failed: exit={process.returncode}, "
+                f"stdout_sha256={sha256(stdout.encode()).hexdigest()}, "
+                f"stderr_sha256={sha256(stderr.encode()).hexdigest()}"
+            )
+            assert stderr == ""
+            assert "independent-fixture" not in stdout
+            assert str(tmp_path) not in stdout
+            outputs.append(json.loads(stdout))
+    finally:
+        for peer in peers:
+            try:
+                peer.close()
+            except OSError:
+                pass
+        for process in children:
+            if process.poll() is None:
+                process.kill()
+        for process in children:
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+
+    assert all(output["mode"] == "PREPRODUCTION" for output in outputs)
+    assert all(output["qualification_status"] == "NOT_QUALIFIED" for output in outputs)
+    assert len({output["receipt_sha256"] for output in outputs}) == 1
+    # The pass-through audit records each successful production os.replace only
+    # when its destination is the published director-import directory.
+    assert len(list(audit.glob("*.replace"))) == 1
+    assert packet.is_dir()
+    assert [path.name for path in revision.iterdir() if path.name == "director-import"] == ["director-import"]
+    assert not list(revision.glob(".di-*"))
+    receipt = json.loads((packet / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["receipt_sha256"] == outputs[0]["receipt_sha256"]
+    # Both child outcomes are independently replayed from the published bytes.
+    from src.hybrid.preproduction import verify_real_preproduction_import
+
+    assert verify_real_preproduction_import(packet, created["request_id"])["receipt_sha256"] == outputs[0]["receipt_sha256"]
