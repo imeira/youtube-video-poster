@@ -15,6 +15,8 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
 
+from src.hybrid._billing_coordinator_guard import _require_coordinator_write
+
 
 class BudgetDenied(ValueError):
     """An operation cannot reserve funds under the standing policy."""
@@ -35,6 +37,41 @@ def _units(value):
 
 def _usd(units):
     return f'{Decimal(units) / 1000000:.6f}'
+
+
+def validate_canonical_settlement_receipt(receipt_body: str) -> tuple[dict, int, str]:
+    """Validate the one closed FAL settlement representation without mutating.
+
+    Snapshot consumers use this same validator; a recomputed envelope digest is
+    not a substitute for the ledger's canonical financial receipt contract.
+    """
+    if not isinstance(receipt_body, str):
+        raise BudgetDenied('canonical receipt body required')
+    try:
+        receipt = json.loads(receipt_body)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise BudgetDenied('canonical receipt JSON required') from exc
+    required = {
+        'schema', 'authority', 'local_request_id', 'provider_request_id',
+        'endpoint_id', 'auth_scope', 'authority_mode', 'currency',
+        'cost_total_micro_usd', 'evidence_hash', 'provenance',
+    }
+    if not isinstance(receipt, dict) or set(receipt) != required or receipt['schema'] != 2:
+        raise BudgetDenied('closed settlement receipt schema-v2 required')
+    if receipt['authority'] not in {'TRANSPORT_AUTHENTICATED_FAL_READBACK', 'TEST_NOT_AUTHORITY'} or receipt['provenance'] != 'FAL_BILLING_READBACK':
+        raise BudgetDenied('authenticated FAL receipt provenance required')
+    if receipt['currency'] != 'USD' or not isinstance(receipt['cost_total_micro_usd'], str) or not re.fullmatch(r'0|[1-9][0-9]*', receipt['cost_total_micro_usd']):
+        raise BudgetDenied('canonical USD micro amount required')
+    actual = _units(Decimal(receipt['cost_total_micro_usd']) / Decimal(1_000_000))
+    for key in ('local_request_id', 'provider_request_id', 'endpoint_id', 'auth_scope', 'authority_mode'):
+        if not isinstance(receipt[key], str) or not receipt[key] or len(receipt[key]) > 512:
+            raise BudgetDenied('settlement receipt binding is malformed')
+    if receipt['authority_mode'] not in {'TEST', 'LIVE'} or not isinstance(receipt['evidence_hash'], str) or not re.fullmatch('[a-f0-9]{64}', receipt['evidence_hash']):
+        raise BudgetDenied('settlement receipt evidence is malformed')
+    canonical_body = json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    if receipt_body != canonical_body:
+        raise BudgetDenied('settlement receipt is not canonical')
+    return receipt, actual, sha256(canonical_body.encode('utf-8')).hexdigest()
 
 
 class StandingBudgetLedger:
@@ -99,7 +136,8 @@ class StandingBudgetLedger:
                   settlement_mode TEXT NOT NULL DEFAULT 'LEGACY_TEST_UNBOUND',
                   auth_scope TEXT NOT NULL DEFAULT 'TEST_UNBOUND_LEGACY',
                   provider_request_id TEXT NOT NULL DEFAULT 'UNASSIGNED',
-                  authority_mode TEXT NOT NULL DEFAULT 'TEST');
+                  authority_mode TEXT NOT NULL DEFAULT 'TEST',
+                  billing_snapshot_generation INTEGER);
                 CREATE TABLE IF NOT EXISTS settlement_receipts (
                   request_id TEXT PRIMARY KEY REFERENCES claims(request_id),
                   receipt_sha256 TEXT NOT NULL UNIQUE, actual INTEGER NOT NULL CHECK(actual>=0),
@@ -114,6 +152,8 @@ class StandingBudgetLedger:
                 db.execute("ALTER TABLE claims ADD COLUMN provider_request_id TEXT NOT NULL DEFAULT 'UNASSIGNED'")
             if 'authority_mode' not in columns:
                 db.execute("ALTER TABLE claims ADD COLUMN authority_mode TEXT NOT NULL DEFAULT 'TEST'")
+            if 'billing_snapshot_generation' not in columns:
+                db.execute("ALTER TABLE claims ADD COLUMN billing_snapshot_generation INTEGER")
             db.execute('BEGIN IMMEDIATE')
             stored = db.execute('SELECT binding FROM policy WHERE id=1').fetchone()
             if stored and json.loads(stored[0]) != self.binding:
@@ -157,15 +197,23 @@ class StandingBudgetLedger:
                 'experiment': bool(row['experiment']), 'settlement_mode': row['settlement_mode'],
                 'auth_scope': row['auth_scope'],
                 'provider_request_id': row['provider_request_id'],
-                'authority_mode': row['authority_mode']}
+                'authority_mode': row['authority_mode'],
+                'billing_snapshot_generation': row['billing_snapshot_generation']}
 
     def reserve(self, request_id, episode_id, provider, quoted_cap_usd, *, experiment=False,
                 settlement_mode='LEGACY_TEST_UNBOUND', auth_scope='TEST_UNBOUND_LEGACY',
-                provider_request_id='UNASSIGNED', authority_mode=None):
+                provider_request_id='UNASSIGNED', authority_mode=None,
+                billing_snapshot_generation=None):
         if not all(isinstance(x, str) and x.strip() for x in (request_id, episode_id, provider)):
             raise BudgetDenied('request, episode and provider required')
         if type(experiment) is not bool:
             raise BudgetDenied('experiment flag must be boolean')
+        if billing_snapshot_generation is not None and (type(billing_snapshot_generation) is not int or billing_snapshot_generation < 1):
+            raise BudgetDenied('billing snapshot generation must be a positive integer')
+        try:
+            _require_coordinator_write(billing_snapshot_generation)
+        except PermissionError as error:
+            raise BudgetDenied(str(error)) from error
         if settlement_mode not in {'LEGACY_TEST_UNBOUND', 'FAL_READBACK_V2'}:
             raise BudgetDenied('explicit settlement mode required')
         if not isinstance(auth_scope, str) or not auth_scope or len(auth_scope) > 512:
@@ -206,35 +254,63 @@ class StandingBudgetLedger:
                     raise BudgetDenied(f'{kind} budget exhausted')
             if experiment and experiment_total + cap > self.limits['experiment']:
                 raise BudgetDenied('experiment budget exhausted')
-            db.execute('INSERT INTO claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-                       (request_id, episode_id, provider, month, cap, int(experiment), 'RESERVED', None, settlement_mode, auth_scope, provider_request_id, authority_mode))
+            db.execute('INSERT INTO claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (request_id, episode_id, provider, month, cap, int(experiment), 'RESERVED', None, settlement_mode, auth_scope, provider_request_id, authority_mode, billing_snapshot_generation))
             return self._claim(db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone())
 
-    def bind_provider_request_id(self, request_id, provider_request_id):
+    def bind_provider_request_id(self, request_id, provider_request_id, *, billing_snapshot_generation=None):
         """Attach the one remote ID after the executor checkpoint has fsynced."""
         if (not isinstance(request_id, str) or not request_id or not isinstance(provider_request_id, str)
                 or not provider_request_id or provider_request_id == 'UNASSIGNED' or len(provider_request_id) > 512):
             raise BudgetDenied('durable provider request id required')
+        if billing_snapshot_generation is not None and (
+            type(billing_snapshot_generation) is not int or billing_snapshot_generation < 1
+        ):
+            raise BudgetDenied('billing snapshot generation must be a positive integer')
+        try:
+            _require_coordinator_write(billing_snapshot_generation)
+        except PermissionError as error:
+            raise BudgetDenied(str(error)) from error
         with self._transaction() as db:
             row = db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone()
             if row is None or row['settlement_mode'] != 'FAL_READBACK_V2':
                 raise BudgetDenied('FAL-bound reservation required')
+            if row['billing_snapshot_generation'] is not None and billing_snapshot_generation is None:
+                raise BudgetDenied('generation-pinned FAL claim requires coordinator capability')
             prior = row['provider_request_id']
             if prior == provider_request_id:
                 return self._claim(row)
             if prior != 'UNASSIGNED':
                 raise BudgetDenied('provider request id is immutable')
-            db.execute('UPDATE claims SET provider_request_id=? WHERE request_id=?', (provider_request_id, request_id))
+            if billing_snapshot_generation is None:
+                db.execute('UPDATE claims SET provider_request_id=? WHERE request_id=?', (provider_request_id, request_id))
+            else:
+                db.execute('UPDATE claims SET provider_request_id=?, billing_snapshot_generation=? WHERE request_id=?',
+                           (provider_request_id, billing_snapshot_generation, request_id))
             return self._claim(db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone())
 
-    def mark_unknown(self, request_id):
+    def mark_unknown(self, request_id, *, billing_snapshot_generation=None):
+        if billing_snapshot_generation is not None and (
+            type(billing_snapshot_generation) is not int or billing_snapshot_generation < 1
+        ):
+            raise BudgetDenied('billing snapshot generation must be a positive integer')
+        try:
+            _require_coordinator_write(billing_snapshot_generation)
+        except PermissionError as error:
+            raise BudgetDenied(str(error)) from error
         with self._transaction() as db:
             row = db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone()
             if row is None:
                 raise BudgetDenied('reservation does not exist')
+            if row['billing_snapshot_generation'] is not None and billing_snapshot_generation is None:
+                raise BudgetDenied('generation-pinned FAL claim requires coordinator capability')
             if row['actual'] is not None:
                 raise BudgetDenied('settled actual is immutable')
-            db.execute("UPDATE claims SET state='UNKNOWN' WHERE request_id=?", (request_id,))
+            if billing_snapshot_generation is None:
+                db.execute("UPDATE claims SET state='UNKNOWN' WHERE request_id=?", (request_id,))
+            else:
+                db.execute("UPDATE claims SET state='UNKNOWN', billing_snapshot_generation=? WHERE request_id=?",
+                           (billing_snapshot_generation, request_id))
             return self._claim(db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone())
 
     def settle(self, request_id, actual_usd):
@@ -261,7 +337,22 @@ class StandingBudgetLedger:
                 raise BudgetDenied('reservation does not exist')
             return self._claim(row)
 
-    def _settle_verified_receipt(self, receipt_body):
+    def _set_billing_snapshot_generation(self, request_id, generation):
+        if type(generation) is not int or generation < 1:
+            raise BudgetDenied('billing snapshot generation must be a positive integer')
+        try:
+            _require_coordinator_write(generation)
+        except PermissionError as error:
+            raise BudgetDenied(str(error)) from error
+        with self._transaction() as db:
+            row = db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone()
+            if row is None:
+                raise BudgetDenied('reservation does not exist')
+            db.execute('UPDATE claims SET billing_snapshot_generation=? WHERE request_id=?',
+                       (generation, request_id))
+            return self._claim(db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone())
+
+    def _settle_verified_receipt(self, receipt_body, *, billing_snapshot_generation=None):
         """Parse and settle the closed readback receipt produced by the bridge.
 
         The leading underscore is intentional: Python modules are a trusted
@@ -271,6 +362,14 @@ class StandingBudgetLedger:
         """
         if not isinstance(receipt_body, str):
             raise BudgetDenied('canonical receipt body required')
+        if billing_snapshot_generation is not None and (
+            type(billing_snapshot_generation) is not int or billing_snapshot_generation < 1
+        ):
+            raise BudgetDenied('billing snapshot generation must be a positive integer')
+        try:
+            _require_coordinator_write(billing_snapshot_generation)
+        except PermissionError as error:
+            raise BudgetDenied(str(error)) from error
         try:
             receipt = json.loads(receipt_body)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -301,6 +400,8 @@ class StandingBudgetLedger:
             row = db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone()
             if row is None:
                 raise BudgetDenied('reservation does not exist')
+            if row['billing_snapshot_generation'] is not None and billing_snapshot_generation is None:
+                raise BudgetDenied('generation-pinned FAL claim requires coordinator capability')
             if row['settlement_mode'] != 'FAL_READBACK_V2':
                 raise BudgetDenied('claim is not FAL-bound')
             if (row['provider'], row['provider_request_id'], row['auth_scope'], row['authority_mode']) != (
@@ -322,7 +423,11 @@ class StandingBudgetLedger:
             if row['actual'] is not None:
                 raise BudgetDenied('legacy settlement lacks authenticated receipt')
             db.execute('INSERT INTO settlement_receipts VALUES(?,?,?,?,?)', (request_id, receipt_sha256, actual, canonical_body, receipt['provenance']))
-            db.execute("UPDATE claims SET state='SETTLED', actual=? WHERE request_id=?", (actual, request_id))
+            if billing_snapshot_generation is None:
+                db.execute("UPDATE claims SET state='SETTLED', actual=? WHERE request_id=?", (actual, request_id))
+            else:
+                db.execute("UPDATE claims SET state='SETTLED', actual=?, billing_snapshot_generation=? WHERE request_id=?",
+                           (actual, billing_snapshot_generation, request_id))
             return self._claim(db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone())
 
     def exposure(self):

@@ -47,11 +47,14 @@ def _utc(value: object, label: str) -> datetime:
     return value
 
 
-def _unknown(ledger: StandingBudgetLedger, request_id: str, reason: str) -> dict:
+def _unknown(ledger: StandingBudgetLedger, request_id: str, reason: str, *, coordinator=None) -> dict:
     try:
         claim = ledger.claim(request_id)
         if claim["actual_usd"] is None:
-            claim = ledger.mark_unknown(request_id)
+            if coordinator is None:
+                claim = ledger.mark_unknown(request_id)
+            else:
+                return coordinator.mark_unknown(request_id, reason)
     except BudgetDenied as exc:
         raise SettlementDenied("reservation cannot be preserved as UNKNOWN") from exc
     return {
@@ -73,6 +76,7 @@ class FalLedgerSettlementService:
         *,
         clock: Callable[[], datetime] | None = None,
         max_fresh_seconds: int = _MAX_FRESH_SECONDS,
+        coordinator=None,
     ) -> None:
         if (
             not isinstance(ledger, StandingBudgetLedger)
@@ -91,6 +95,28 @@ class FalLedgerSettlementService:
         self.consumer = consumer
         self.clock = clock or (lambda: datetime.now(UTC))
         self.max_fresh_seconds = max_fresh_seconds
+        if coordinator is not None:
+            from src.hybrid.billing_snapshot import BillingSnapshotCoordinator
+            if not isinstance(coordinator, BillingSnapshotCoordinator):
+                raise TypeError("billing snapshot coordinator must be trusted composition")
+            if coordinator.executor is not executor or coordinator.ledger is not ledger:
+                raise ValueError("billing snapshot coordinator must bind this executor and ledger")
+        self.coordinator = coordinator
+
+    def admit(self, job, *, episode_id: str, experiment: bool = False) -> dict:
+        """The configured coordinator is the only FAL admission writer path."""
+        if self.coordinator is None:
+            raise SettlementDenied("configured billing snapshot coordinator required for admission")
+        return self.coordinator.prepare_and_reserve(job, episode_id=episode_id, experiment=experiment)
+
+    async def run_admitted(self, job, provider, *, authorization=None, price=None) -> dict:
+        """Factory-owned wiring; callers cannot supply a checkpoint callback."""
+        if self.coordinator is None:
+            raise SettlementDenied("configured billing snapshot coordinator required for FAL submit")
+        return await self.executor.run(
+            job, provider, authorization=authorization, price=price,
+            settlement_checkpoint=self.coordinator.execution_capability(job.request_id), submit_prepared=True,
+        )
 
     def _binding(self, local_request_id: str, *, require_provider_id: bool = True) -> tuple[dict, dict]:
         if not isinstance(local_request_id, str) or not local_request_id:
@@ -177,14 +203,14 @@ class FalLedgerSettlementService:
                 _utc(self.clock(), "clock"),
             )
         except SettlementDenied:
-            return _unknown(self.ledger, local_request_id, "invalid readback window")
+            return _unknown(self.ledger, local_request_id, "invalid readback window", coordinator=self.coordinator)
         if (
             window_start >= window_end
             or window_end > now
             or (now - window_end).total_seconds() > self.max_fresh_seconds
         ):
             return _unknown(
-                self.ledger, local_request_id, "readback window is not fresh"
+                self.ledger, local_request_id, "readback window is not fresh", coordinator=self.coordinator
             )
 
         readback = await self.consumer.readback(
@@ -200,6 +226,7 @@ class FalLedgerSettlementService:
                 self.ledger,
                 local_request_id,
                 "billing readback is not one complete billed event",
+                coordinator=self.coordinator,
             )
         if (
             readback.authority != transport_authority
@@ -207,12 +234,12 @@ class FalLedgerSettlementService:
             or readback.endpoint_id != binding["endpoint_id"]
         ):
             return _unknown(
-                self.ledger, local_request_id, "billing readback binding mismatch"
+                self.ledger, local_request_id, "billing readback binding mismatch", coordinator=self.coordinator
             )
         actual = readback.actual_cost_usd
         if not isinstance(actual, Decimal):
             return _unknown(
-                self.ledger, local_request_id, "billing money is not exact micro-USD"
+                self.ledger, local_request_id, "billing money is not exact micro-USD", coordinator=self.coordinator
             )
         try:
             micros = actual * Decimal(1_000_000)
@@ -225,7 +252,7 @@ class FalLedgerSettlementService:
                 raise ValueError
         except (InvalidOperation, ValueError):
             return _unknown(
-                self.ledger, local_request_id, "billing money is not exact micro-USD"
+                self.ledger, local_request_id, "billing money is not exact micro-USD", coordinator=self.coordinator
             )
 
         settlement_receipt = {
@@ -247,7 +274,10 @@ class FalLedgerSettlementService:
         receipt_body = json.dumps(settlement_receipt, sort_keys=True, separators=(",", ":"), allow_nan=False)
         receipt_hash = sha256(receipt_body.encode("utf-8")).hexdigest()
         try:
-            settled = self.ledger._settle_verified_receipt(receipt_body)
+            if self.coordinator is None:
+                settled = self.ledger._settle_verified_receipt(receipt_body)
+            else:
+                settled = self.coordinator.settle_verified_receipt(receipt_body, settlement_receipt)["claim"]
         except BudgetDenied as exc:
             raise SettlementDenied("authenticated ledger settlement rejected") from exc
         return {

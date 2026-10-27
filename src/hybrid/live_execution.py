@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -26,6 +25,10 @@ from src.hybrid.external_trust_root import (
     load_strict_json_snapshot,
 )
 from src.hybrid.locks import reject_reparse_path
+from src.hybrid.standing_budget import (
+    BudgetDenied,
+    validate_canonical_settlement_receipt,
+)
 
 
 class LiveQualificationError(ValueError):
@@ -194,7 +197,54 @@ class BillingStatusSnapshot:
             document, digest = load_strict_json_snapshot(self.path, "configured billing status snapshot")
         except TrustRootVerificationError:
             return self._report("UNAUTHENTICATED")
-        if (digest != self.expected_sha256 or not isinstance(document, dict) or set(document) != self._FIELDS
+        if not isinstance(document, dict):
+            return self._report("MISMATCH")
+        if document.get("schema") == 2 and document.get("kind") == "FAL_BILLING_STATUS_SNAPSHOT":
+            if digest != self.expected_sha256:
+                return self._report("STALE")
+            if document.get("status") != "CURRENT":
+                return self._report("STALE")
+            required = {"schema", "kind", "status", "generation", "generated_at", "request_id", "endpoint_id", "mode", "executor_receipt", "ledger_claim", "settlement_receipt", "provenance", "snapshot_sha256"}
+            if set(document) != required or type(document.get("generation")) is not int or document["generation"] < 1:
+                return self._report("STALE")
+            supplied = document.get("snapshot_sha256")
+            body = {key: value for key, value in document.items() if key != "snapshot_sha256"}
+            if not isinstance(supplied, str) or supplied != _hash(body):
+                return self._report("STALE")
+            now = self.clock()
+            if type(document.get("generated_at")) is not int or not isinstance(now, (int, float)) or document["generated_at"] > now or now - document["generated_at"] > _MAX_BILLING_SNAPSHOT_SECONDS:
+                return self._report("STALE")
+            receipt, claim = document["executor_receipt"], document["ledger_claim"]
+            binding = receipt.get("settlement_binding") if isinstance(receipt, dict) else None
+            if (document["provenance"] != "LOCAL_SNAPSHOT_UNAUTHENTICATED" or document["request_id"] != job.request_id
+                    or document["endpoint_id"] != job.endpoint or document["mode"] != job.mode
+                    or not isinstance(binding, dict) or receipt.get("billing_snapshot_generation") != document["generation"]
+                    or claim.get("billing_snapshot_generation") != document["generation"]
+                    or binding.get("local_request_id") != job.request_id or binding.get("endpoint_id") != job.endpoint
+                    or claim.get("request_id") != job.request_id or claim.get("provider") != job.endpoint
+                    or claim.get("auth_scope") != binding.get("auth_scope") or claim.get("provider_request_id") != binding.get("provider_request_id")):
+                return self._report("STALE")
+            settlement = document["settlement_receipt"]
+            if settlement is not None:
+                if not isinstance(settlement, dict):
+                    return self._report("STALE")
+                try:
+                    canonical = json.dumps(settlement, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                    parsed, actual, _receipt_hash = validate_canonical_settlement_receipt(canonical)
+                except (BudgetDenied, TypeError, ValueError):
+                    return self._report("STALE")
+                if (
+                    claim.get("state") != "SETTLED"
+                    or claim.get("actual_usd") != f"{Decimal(actual) / Decimal(1_000_000):.6f}"
+                    or parsed["local_request_id"] != job.request_id
+                    or parsed["endpoint_id"] != job.endpoint
+                    or parsed["provider_request_id"] != binding.get("provider_request_id")
+                    or parsed["auth_scope"] != binding.get("auth_scope")
+                    or parsed["authority_mode"] != job.mode
+                ):
+                    return self._report("STALE")
+            return self._report("TEST" if job.mode == "TEST" else "PENDING", document["provenance"])
+        if (digest != self.expected_sha256 or set(document) != self._FIELDS
                 or type(document.get("schema")) is not int or document.get("schema") != 1
                 or document.get("kind") != "FAL_BILLING_STATUS_SNAPSHOT"):
             return self._report("MISMATCH")
@@ -240,72 +290,6 @@ class BillingStatusSnapshot:
             return self._report("PENDING", provenance)
         return self._report("UNAUTHENTICATED", provenance)
 
-
-class BillingStatusSnapshotPublisher:
-    """Atomically publish a closed projection captured by the real writer path.
-
-    Inputs are captured receipts/claims, not database paths.  This deliberately
-    cannot open or copy SQLite/WAL/SHM, and callers must invoke it while their
-    executor/ledger writer context still owns the coherent state.
-    """
-
-    def __init__(self, path: Path, *, clock=time.time) -> None:
-        self.path, self.clock = Path(path), clock
-
-    @staticmethod
-    def _projection(job: Job, executor_receipt: object, ledger_claim: object,
-                    settlement_receipt: object) -> tuple[dict[str, Any], dict[str, Any]]:
-        if not isinstance(executor_receipt, dict) or not isinstance(ledger_claim, dict):
-            raise LiveQualificationError("writer-owned executor receipt and ledger claim are required")
-        binding = executor_receipt.get("settlement_binding")
-        required_binding = BillingStatusSnapshot._BINDING_FIELDS
-        required_receipt = BillingStatusSnapshot._RECEIPT_FIELDS
-        required_claim = BillingStatusSnapshot._CLAIM_FIELDS
-        if not isinstance(binding, dict) or set(binding) != required_binding:
-            raise LiveQualificationError("executor settlement binding is not closed")
-        receipt = {key: executor_receipt.get(key) for key in required_receipt}
-        claim = {key: ledger_claim.get(key) for key in required_claim}
-        if set(receipt) != required_receipt or set(claim) != required_claim:
-            raise LiveQualificationError("billing projection schema is not closed")
-        if settlement_receipt is not None:
-            raise LiveQualificationError("settled snapshot publication requires canonical receipt integration")
-        if (receipt["receipt_schema"] != 2 or receipt["request_id"] != job.request_id
-                or receipt["endpoint"] != job.endpoint or receipt["mode"] != job.mode
-                or binding.get("schema") != 2 or binding.get("local_request_id") != job.request_id
-                or binding.get("endpoint_id") != job.endpoint or binding.get("authority_mode") != job.mode
-                or claim.get("request_id") != job.request_id or claim.get("provider") != job.endpoint
-                or claim.get("authority_mode") != job.mode or claim.get("auth_scope") != binding.get("auth_scope")
-                or claim.get("provider_request_id") != binding.get("provider_request_id")
-                or claim.get("settlement_mode") != "FAL_READBACK_V2"):
-            raise LiveQualificationError("writer billing records do not form a coherent binding")
-        return receipt, claim
-
-    def publish(self, job: Job, *, executor_receipt: object, ledger_claim: object,
-                settlement_receipt: object) -> str:
-        receipt, claim = self._projection(job, executor_receipt, ledger_claim, settlement_receipt)
-        generated_at = self.clock()
-        if type(generated_at) is not int:
-            raise LiveQualificationError("snapshot publisher requires integer UTC clock")
-        body = {
-            "schema": 1, "kind": "FAL_BILLING_STATUS_SNAPSHOT", "generated_at": generated_at,
-            "request_id": job.request_id, "endpoint_id": job.endpoint, "mode": job.mode,
-            "executor_receipt": receipt, "ledger_claim": claim, "settlement_receipt": None,
-            "provenance": "LOCAL_SNAPSHOT_UNAUTHENTICATED",
-        }
-        document = {**body, "snapshot_sha256": _hash(body)}
-        encoded = _canonical(document)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-        return sha256(encoded).hexdigest()
 
 
 class LiveExecutionService:

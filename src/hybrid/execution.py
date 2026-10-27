@@ -24,6 +24,10 @@ from src.budget.guard import (
     CostRecord,
 )
 from src.config.loader import BudgetConfig
+from src.hybrid._billing_coordinator_guard import (
+    _require_coordinator_capability,
+    _require_coordinator_write,
+)
 from src.hybrid.artifacts import Manifest, digest, sha256
 from src.hybrid.cas import ContentAddressedStore, job_content_key
 from src.hybrid.locks import file_slot
@@ -93,6 +97,12 @@ class Provider(Protocol):
     ) -> ProviderResult: ...
 
 
+class SettlementCheckpoint(Protocol):
+    """Composition-owned capability for an FAL remote-ID checkpoint."""
+
+    def checkpoint_provider_binding(self, request_id: str, provider_request_id: str, *, partial: str | None = None) -> object: ...
+
+
 class Executor:
     def __init__(
         self,
@@ -111,6 +121,8 @@ class Executor:
         self.cas = cas
         self.events = events
         self._standing_ledger = None
+        self._billing_snapshot_coordinator = None
+        self._billing_snapshot_owner_binding = None
         if standing_ledger is not None:
             self._attach_standing_ledger(standing_ledger)
         self.semaphore = asyncio.Semaphore(config.concurrency)
@@ -157,6 +169,23 @@ class Executor:
                 "SELECT data FROM jobs WHERE id=?", (request_id,)
             ).fetchone()
         return json.loads(row[0]) if row else None
+
+    def _bind_billing_snapshot_coordinator(self, coordinator, owner_binding) -> None:
+        """Bind the configured runtime owner; durable rows remain the authority."""
+        if not isinstance(owner_binding, dict) or set(owner_binding) != {"schema", "namespace", "config_root"}:
+            raise TypeError("billing snapshot owner binding is malformed")
+        if (owner_binding.get("schema") != 1
+                or owner_binding.get("namespace") != "FAL_BILLING_STATUS_SNAPSHOT"
+                or not isinstance(owner_binding.get("config_root"), str)
+                or not owner_binding["config_root"]):
+            raise TypeError("billing snapshot owner binding is malformed")
+        if self._billing_snapshot_coordinator is not None:
+            if (self._billing_snapshot_coordinator is coordinator
+                    and self._billing_snapshot_owner_binding == owner_binding):
+                return
+            raise ValueError("executor billing snapshot coordinator binding is immutable")
+        self._billing_snapshot_coordinator = coordinator
+        self._billing_snapshot_owner_binding = dict(owner_binding)
 
     def _attach_standing_ledger(self, ledger) -> None:
         """Bind the composition-owned ledger; request payloads never select it."""
@@ -234,7 +263,7 @@ class Executor:
             (data["request_id"], json.dumps(data, sort_keys=True, allow_nan=False)),
         )
 
-    def _change(self, request_id, **updates):
+    def _change(self, request_id, *, _coordinator_capability=None, **updates):
         if "settlement_binding" in updates:
             raise ValueError("settlement binding is immutable outside atomic checkpoint")
         if "provider_id" in updates:
@@ -246,10 +275,24 @@ class Executor:
                     "SELECT data FROM jobs WHERE id=?", (request_id,)
                 ).fetchone()[0]
             )
+            generation = row.get("billing_snapshot_generation")
+            if type(generation) is int:
+                if _coordinator_capability is None:
+                    _require_coordinator_write(generation)
+                else:
+                    if self._billing_snapshot_owner_binding != row.get("billing_snapshot_owner"):
+                        raise PermissionError("generation-pinned FAL owner does not match configured coordinator")
+                    _require_coordinator_capability(
+                        _coordinator_capability,
+                        expected_coordinator=self._billing_snapshot_coordinator,
+                        request_id=request_id, executor=self, ledger=self._standing_ledger,
+                        config=self.config, owner_binding=row.get("billing_snapshot_owner"),
+                    )
             row.update(updates)
             self._put(db, row)
 
-    def _checkpoint_provider_binding(self, request_id, provider_id, *, partial=None):
+    def _checkpoint_provider_binding(self, request_id, provider_id, *, partial=None,
+                                     billing_snapshot_generation=None):
         """Atomically bind the one real provider id learned after dispatch.
 
         This is the sole transition from the pre-dispatch ``UNASSIGNED`` marker.
@@ -258,12 +301,20 @@ class Executor:
         """
         if not isinstance(provider_id, str) or not provider_id or len(provider_id) > 512:
             raise ValueError("provider request id is invalid")
+        if billing_snapshot_generation is not None and (
+            type(billing_snapshot_generation) is not int
+            or billing_snapshot_generation < 1
+        ):
+            raise ValueError("billing snapshot generation must be a positive integer")
+        _require_coordinator_write(billing_snapshot_generation)
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             found = db.execute("SELECT data FROM jobs WHERE id=?", (request_id,)).fetchone()
             if found is None:
                 raise ValueError("executor request does not exist")
             persisted = json.loads(found[0])
+            if type(persisted.get("billing_snapshot_generation")) is int and billing_snapshot_generation is None:
+                raise PermissionError("generation-pinned executor checkpoint requires coordinator capability")
             binding = persisted.get("settlement_binding")
             required = {
                 "schema", "local_request_id", "provider_request_id", "endpoint_id",
@@ -286,11 +337,42 @@ class Executor:
             binding["provider_request_id"] = provider_id
             persisted["provider_id"] = provider_id
             persisted["status"] = "SUBMITTED"
+            if billing_snapshot_generation is not None:
+                persisted["billing_snapshot_generation"] = billing_snapshot_generation
             if partial:
                 persisted["partial"] = str(Path(partial).resolve())
             self._put(db, persisted)
 
-    def _reserve(self, job, *, reservation_cost=None, cache_key="", auth_scope=None):
+    def _set_billing_snapshot_generation(self, request_id, generation):
+        """Coordinator-only pin update after a ledger-side settlement transition."""
+        if type(generation) is not int or generation < 1:
+            raise ValueError("billing snapshot generation must be a positive integer")
+        _require_coordinator_write(generation)
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            found = db.execute("SELECT data FROM jobs WHERE id=?", (request_id,)).fetchone()
+            if found is None:
+                raise ValueError("executor request does not exist")
+            persisted = json.loads(found[0])
+            persisted["billing_snapshot_generation"] = generation
+            self._put(db, persisted)
+
+    def _reserve(self, job, *, reservation_cost=None, cache_key="", auth_scope=None,
+                 billing_snapshot_generation=None, billing_snapshot_owner=None):
+        if billing_snapshot_generation is not None and (type(billing_snapshot_generation) is not int or billing_snapshot_generation < 1):
+            raise ValueError("billing snapshot generation must be a positive integer")
+        if billing_snapshot_generation is not None and (
+            not isinstance(billing_snapshot_owner, dict)
+            or set(billing_snapshot_owner) != {"schema", "namespace", "config_root"}
+            or billing_snapshot_owner.get("schema") != 1
+            or billing_snapshot_owner.get("namespace") != "FAL_BILLING_STATUS_SNAPSHOT"
+            or not isinstance(billing_snapshot_owner.get("config_root"), str)
+            or not billing_snapshot_owner["config_root"]
+        ):
+            raise ValueError("generation-pinned intent requires durable coordinator owner binding")
+        if billing_snapshot_generation is None and billing_snapshot_owner is not None:
+            raise ValueError("un-pinned intent cannot carry coordinator owner binding")
+        _require_coordinator_write(billing_snapshot_generation)
         reservation_cost = job.cost if reservation_cost is None else money(reservation_cost)
         if auth_scope is None:
             if job.mode != "TEST":
@@ -380,6 +462,8 @@ class Executor:
                 db,
                 {
                     "receipt_schema": 2,
+                    "billing_snapshot_generation": billing_snapshot_generation,
+                    "billing_snapshot_owner": dict(billing_snapshot_owner) if billing_snapshot_owner else None,
                     "settlement_binding": {
                         "schema": 2,
                         "local_request_id": job.request_id,
@@ -406,7 +490,8 @@ class Executor:
             )
             return True
 
-    def prepare_intent(self, job: Job, *, auth_scope=None):
+    def prepare_intent(self, job: Job, *, auth_scope=None, billing_snapshot_generation=None,
+                       billing_snapshot_owner=None):
         """Durably record a non-submitting intent for external admission.
 
         This deliberately performs no provider construction or network I/O.  A
@@ -422,7 +507,9 @@ class Executor:
         job.manifest.verify(job.mode)
         if auth_scope is None:
             auth_scope = "TEST_LOCAL_ONLY" if job.mode == "TEST" else None
-        fresh = self._reserve(job, auth_scope=auth_scope)
+        fresh = self._reserve(job, auth_scope=auth_scope,
+                              billing_snapshot_generation=billing_snapshot_generation,
+                              billing_snapshot_owner=billing_snapshot_owner)
         row = self.inspect(job.request_id)
         if fresh:
             self._change(job.request_id, status="PREPARED")
@@ -441,6 +528,8 @@ class Executor:
             db.execute("BEGIN IMMEDIATE")
             found = db.execute("SELECT data FROM jobs WHERE id=?", (request_id,)).fetchone()
             row = json.loads(found[0]) if found else None
+            if row and type(row.get("billing_snapshot_generation")) is int:
+                _require_coordinator_write(row["billing_snapshot_generation"])
             if (not row or row["status"] != "COMPLETE" or type(approved) is not bool
                     or not reviewer or result_sha256 != row["result_sha256"]):
                 raise ValueError("QA must bind a completed receipt hash and reviewer")
@@ -453,7 +542,7 @@ class Executor:
             self._put(db, row)
 
     async def run(self, job: Job, provider: Provider, authorization=None, price=None,
-                  settlement_checkpoint: Callable[[str, str], None] | None = None,
+                  settlement_checkpoint: SettlementCheckpoint | None = None,
                   submit_prepared: bool = False):
         job = deepcopy(job)  # Caller mutation cannot change identity during await.
         if job.mode not in {"TEST", "LIVE"} or provider.mode != job.mode:
@@ -538,6 +627,15 @@ class Executor:
                     return row
                 if row["status"] == "OVERRUN":
                     raise RuntimeError("budget overrun requires reconciliation")
+                if type(row.get("billing_snapshot_generation")) is int:
+                    if self._billing_snapshot_owner_binding != row.get("billing_snapshot_owner"):
+                        raise PermissionError("generation-pinned FAL owner does not match configured coordinator")
+                    _require_coordinator_capability(
+                        settlement_checkpoint,
+                        expected_coordinator=self._billing_snapshot_coordinator,
+                        request_id=job.request_id, executor=self, ledger=self._standing_ledger,
+                        config=self.config, owner_binding=row.get("billing_snapshot_owner"),
+                    )
                 if fresh and cached is not None:
                     zero = Decimal(".000")
                     self._change(
@@ -568,11 +666,29 @@ class Executor:
                     if partial:
                         updates["partial"] = str(Path(partial).resolve())
                     if provider_id:
-                        self._checkpoint_provider_binding(
-                            job.request_id, provider_id, partial=partial
-                        )
-                        if settlement_checkpoint is not None:
+                        checkpoint_method = getattr(
+                            settlement_checkpoint, "checkpoint_provider_binding", None
+                        ) if settlement_checkpoint is not None else None
+                        if callable(checkpoint_method):
+                            # Coordinator-owned admissions are generation-pinned;
+                            # only the explicit capability may transition them.
+                            checkpoint_method(job.request_id, provider_id, partial=partial)
+                        elif settlement_checkpoint is None:
+                            self._checkpoint_provider_binding(
+                                job.request_id, provider_id, partial=partial
+                            )
+                        elif type(row.get("billing_snapshot_generation")) is int:
+                            raise TypeError("generation-pinned FAL checkpoint requires coordinator capability")
+                        elif callable(settlement_checkpoint):
+                            # Legacy unpinned TEST callers remain isolated from
+                            # coordinator-owned rows. This compatibility branch
+                            # is never selected for a configured generation.
+                            self._checkpoint_provider_binding(
+                                job.request_id, provider_id, partial=partial
+                            )
                             settlement_checkpoint(job.request_id, provider_id)
+                        else:
+                            raise TypeError("FAL checkpoint requires callable legacy hook or coordinator capability")
                     elif updates:
                         self._change(job.request_id, **updates)
 
@@ -581,7 +697,8 @@ class Executor:
                     # A boolean is not authority: before the irreversible POST,
                     # re-read the configured ledger's exact durable reservation.
                     self._verify_prepared_fal_admission(job, row)
-                    self._change(job.request_id, status="SUBMITTING")
+                    self._change(job.request_id, status="SUBMITTING",
+                                 _coordinator_capability=settlement_checkpoint)
                     row = self.inspect(job.request_id)
                     submit_now = True
                 elif fresh:
@@ -593,6 +710,7 @@ class Executor:
                 if submit_now:
                     self._change(
                         job.request_id,
+                        _coordinator_capability=settlement_checkpoint,
                         authorization=json.loads(json.dumps(asdict(authorization), default=str)) if authorization else None,
                         live_price=json.loads(json.dumps(asdict(price), default=str)) if price else None,
                     )
@@ -609,13 +727,14 @@ class Executor:
                 actual = money(result.actual_cost)
                 result_path = Path(result.path).resolve()
                 if actual > job.cost:
-                    self._change(job.request_id, status="OVERRUN", result=str(result_path), charged=str(actual), actual_cost=str(actual))
+                    self._change(job.request_id, status="OVERRUN", result=str(result_path), charged=str(actual), actual_cost=str(actual),
+                                 _coordinator_capability=settlement_checkpoint)
                     raise RuntimeError("budget provider overrun recorded; execution blocked")
                 if self.cas is not None:
                     self.cas.put(cache_key, result_path)
                 self._change(
                     job.request_id, status="COMPLETE", result=str(result_path),
                     result_sha256=sha256(result_path), charged=str(actual), actual_cost=str(actual),
-                    cache_key=cache_key, cache_hit=False,
+                    cache_key=cache_key, cache_hit=False, _coordinator_capability=settlement_checkpoint,
                 )
                 return self.inspect(job.request_id)
