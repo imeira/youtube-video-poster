@@ -457,9 +457,11 @@ class OperationalMetricsLedger:
         observed_at_utc = None if occurred is None else occurred.isoformat()
         model = observation.get("model")
         model = model if isinstance(model, str) and model in self.model_catalog else None
-        payload = {"episode_id": episode_id, "observed_at_utc": observed_at_utc,
-                   "experiment": observation["experiment"], "model": model,
-                   "tokens_input": counts[0], "tokens_cached": counts[1],
+        # Identity is the provider billing event, not the caller's readback
+        # window or observation time.  Those are retained in the row as audit
+        # metadata but must not turn an exact replay into another financial event.
+        payload = {"episode_id": episode_id, "experiment": observation["experiment"],
+                   "model": model, "tokens_input": counts[0], "tokens_cached": counts[1],
                    "tokens_output": counts[2], "tokens_reasoning": counts[3],
                    "latency_s": None if latency is None else float(latency), "quota_units": counts[4],
                    "billing_status": billing, "money_usd": amount}
@@ -629,6 +631,7 @@ class AutonomousTwoGateRunner:
             raise PolicyError("standing budget ledger is incompatible with TEST policy")
         if not episode_id.startswith("TEST-"):
             raise PolicyError("TEST runner requires a TEST episode namespace")
+        executor._attach_standing_ledger(ledger)
         self.root = Path(root)
         self.episode_id = episode_id
         self.policy = policy
@@ -835,18 +838,60 @@ class AutonomousTwoGateRunner:
         for binding in document["jobs"]:
             request_id = binding["request_id"]
             receipt = self.executor.inspect(request_id)
-            if receipt is None:
+            if receipt is None or (
+                receipt.get("status") == "PREPARED" and not receipt.get("provider_id")
+            ):
                 job = self._jobs.get(request_id)
                 if job is None:
                     raise RuntimeError(
                         "runner resume needs the original hash-bound Job objects"
                     )
+                # First persist a provider-free executor intent.  The FAL-bound
+                # standing claim is admitted only from that durable intent and
+                # before executor.run can call the provider.
+                prepared = self.executor.prepare_intent(job, auth_scope="TEST_LOCAL_ONLY")
                 if self.ledger is not None:
                     self.ledger.reserve(
-                        request_id, self.episode_id, job.endpoint, job.cost
+                        request_id, self.episode_id, job.endpoint, job.cost,
+                        settlement_mode="FAL_READBACK_V2",
+                        auth_scope=prepared["settlement_binding"]["auth_scope"],
+                        provider_request_id=prepared["settlement_binding"]["provider_request_id"],
+                        authority_mode=prepared["settlement_binding"]["authority_mode"],
                     )
                 try:
-                    await self.executor.run(job, provider)
+                    await self.executor.run(
+                        job, provider,
+                        settlement_checkpoint=(
+                            lambda local_id, remote_id: self.ledger.bind_provider_request_id(local_id, remote_id)
+                        ) if self.ledger is not None else None,
+                        submit_prepared=True,
+                    )
+                except asyncio.CancelledError:
+                    if self.ledger is not None:
+                        self.ledger.mark_unknown(request_id)
+                    raise
+                except Exception:
+                    if self.ledger is not None:
+                        self.ledger.mark_unknown(request_id)
+                    raise
+                receipt = self.executor.inspect(request_id)
+            elif receipt.get("provider_id"):
+                # A crash after the executor checkpoint but before the ledger
+                # attach is recovered without a second submit or binding rewrite.
+                if self.ledger is not None:
+                    self.ledger.bind_provider_request_id(request_id, receipt["provider_id"])
+                job = self._jobs.get(request_id)
+                if job is None:
+                    raise RuntimeError(
+                        "runner recovery needs the original hash-bound Job objects"
+                    )
+                try:
+                    await self.executor.run(
+                        job, provider,
+                        settlement_checkpoint=(
+                            lambda local_id, remote_id: self.ledger.bind_provider_request_id(local_id, remote_id)
+                        ) if self.ledger is not None else None,
+                    )
                 except asyncio.CancelledError:
                     if self.ledger is not None:
                         self.ledger.mark_unknown(request_id)
@@ -871,8 +916,9 @@ class AutonomousTwoGateRunner:
                     self.ledger.mark_unknown(request_id)
                 raise ValueError("completed receipt output hash mismatch")
             if self.ledger is not None:
-                self.ledger.settle(request_id, receipt["actual_cost"])
-            # A local provider receipt is operational evidence only, never authenticated billing.
+                # A local executor receipt is not authenticated provider billing.
+                # Preserve the reservation until explicit FAL billing reconciliation.
+                self.ledger.mark_unknown(request_id)
             self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
             if request_id not in document["qa"]:
                 verdict = independent_qa(receipt)

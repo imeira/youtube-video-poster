@@ -1,5 +1,3 @@
-import asyncio
-import time
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -8,9 +6,10 @@ import pytest
 from PIL import Image
 
 from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
-from src.hybrid.execution import Authorization, Executor, Job, Price
+from src.hybrid.execution import Executor, Job
 from src.hybrid.live import FalFluxProvider, RunPodSeedanceProvider
 from src.hybrid.planner import Config
+from src.hybrid.standing_budget import StandingBudgetLedger
 
 
 def live_manifest(tmp_path):
@@ -198,10 +197,30 @@ async def test_executor_recovers_fal_without_second_submission(tmp_path):
     Image.new("RGB", (64, 36), "orange").save(remote)
     client = FalClient("https://signed.example/result")
     provider = FalFluxProvider(tmp_path / "quarantine", client=client, downloader=Downloader(remote))
-    request = image_job(tmp_path)
-    executor = Executor(tmp_path / "jobs.db", Config())
-    price = Price(request.endpoint, request.request_id, request.cost, time.time() + 60, "test")
-    authorization = Authorization(request.request_id, "test", time.time() + 60, request.cost)
+    provider.mode = "TEST"
+    live_request = image_job(tmp_path)
+    assets = tuple(FrozenAsset.approve(asset.path, "test reviewer", "TEST") for asset in live_request.manifest.assets)
+    sheet = tmp_path / "test-sheet.png"
+    contact_sheet(assets, sheet)
+    request = replace(
+        live_request,
+        mode="TEST",
+        manifest=Manifest.freeze(
+            assets, FrozenAsset.approve(sheet, "test reviewer", "TEST"), "test reviewer", "TEST"
+        ),
+    )
+    ledger = StandingBudgetLedger(
+        tmp_path / "admission.sqlite3", policy_sha256="a" * 64,
+        episode_limit_usd="1", month_limit_usd="1", experiment_limit_usd="1", mode="TEST",
+    )
+    executor = Executor(tmp_path / "jobs.db", Config(), standing_ledger=ledger)
+    prepared = executor.prepare_intent(request)
+    ledger.reserve(
+        request.request_id, "TEST-EP", request.endpoint, request.cost,
+        settlement_mode="FAL_READBACK_V2",
+        auth_scope=prepared["settlement_binding"]["auth_scope"],
+        provider_request_id="UNASSIGNED", authority_mode="TEST",
+    )
 
     original = provider._resolve
 
@@ -211,10 +230,15 @@ async def test_executor_recovers_fal_without_second_submission(tmp_path):
 
     provider._resolve = crash_after_remote
     with pytest.raises(TimeoutError):
-        await executor.run(request, provider, authorization, price)
+        await executor.run(
+            request, provider,
+            settlement_checkpoint=lambda local_id, remote_id: ledger.bind_provider_request_id(local_id, remote_id),
+            submit_prepared=True,
+        )
     provider._resolve = original
-    receipt = await executor.run(request, provider)
+    receipt = await executor.run(request, provider, submit_prepared=True)
 
     assert receipt["status"] == "COMPLETE"
     assert client.submits == 1
     assert client.gets == 2
+    assert ledger.claim(request.request_id)["provider_request_id"] == "fal-remote-1"

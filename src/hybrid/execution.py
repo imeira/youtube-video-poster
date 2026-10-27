@@ -102,6 +102,7 @@ class Executor:
         prior_spend=Decimal(0),
         cas: ContentAddressedStore | None = None,
         events: StructuredEventLog | None = None,
+        standing_ledger=None,
     ):
         self.database = Path(database)
         self.database.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +110,9 @@ class Executor:
         self.prior_spend = money(prior_spend)
         self.cas = cas
         self.events = events
+        self._standing_ledger = None
+        if standing_ledger is not None:
+            self._attach_standing_ledger(standing_ledger)
         self.semaphore = asyncio.Semaphore(config.concurrency)
         self.locks = {}
         self.lock_dir = self.database.with_suffix(".locks")
@@ -154,6 +158,55 @@ class Executor:
             ).fetchone()
         return json.loads(row[0]) if row else None
 
+    def _attach_standing_ledger(self, ledger) -> None:
+        """Bind the composition-owned ledger; request payloads never select it."""
+        if not callable(getattr(ledger, "claim", None)):
+            raise TypeError("configured standing ledger must expose durable claims")
+        if self._standing_ledger is not None and self._standing_ledger is not ledger:
+            raise ValueError("executor standing ledger is immutable")
+        self._standing_ledger = ledger
+
+    def _verify_prepared_fal_admission(self, job: Job, row: dict) -> None:
+        """Require the configured ledger's exact durable reservation before POST."""
+        ledger = self._standing_ledger
+        if ledger is None:
+            raise PermissionError("prepared FAL submit requires standing-ledger admission")
+        binding = row.get("settlement_binding")
+        required = {
+            "schema", "local_request_id", "provider_request_id", "endpoint_id",
+            "auth_scope", "authority_mode",
+        }
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != required
+            or binding.get("schema") != 2
+            or binding.get("local_request_id") != job.request_id
+            or binding.get("endpoint_id") != job.endpoint
+            or binding.get("authority_mode") != job.mode
+            or binding.get("provider_request_id") != "UNASSIGNED"
+        ):
+            raise PermissionError("prepared FAL submit has no durable intent binding")
+        try:
+            claim = ledger.claim(job.request_id)
+        except Exception as exc:
+            raise PermissionError("prepared FAL submit requires standing-ledger admission") from exc
+        if (
+            claim.get("request_id") != job.request_id
+            or claim.get("provider") != job.endpoint
+            or claim.get("settlement_mode") != "FAL_READBACK_V2"
+            or claim.get("auth_scope") != binding["auth_scope"]
+            or claim.get("provider_request_id") != "UNASSIGNED"
+            or claim.get("authority_mode") != job.mode
+            or claim.get("state") != "RESERVED"
+        ):
+            raise PermissionError("prepared FAL submit ledger reservation does not bind intent")
+        try:
+            reserved = money(claim.get("reserved_usd"))
+        except (TypeError, ValueError):
+            raise PermissionError("prepared FAL submit ledger reservation is invalid") from None
+        if reserved != job.cost:
+            raise PermissionError("prepared FAL submit ledger reservation value mismatch")
+
     def sync_cost_ledger(self, ledger_path: Path, *, episode_id: str, budget: BudgetConfig) -> CostLedger:
         """Project immutable completed receipts into the episode's canonical ledger."""
         ledger = CostLedger.load(Path(ledger_path), episode_id, budget)
@@ -182,6 +235,10 @@ class Executor:
         )
 
     def _change(self, request_id, **updates):
+        if "settlement_binding" in updates:
+            raise ValueError("settlement binding is immutable outside atomic checkpoint")
+        if "provider_id" in updates:
+            raise ValueError("provider request id is immutable outside atomic checkpoint")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = json.loads(
@@ -192,8 +249,55 @@ class Executor:
             row.update(updates)
             self._put(db, row)
 
-    def _reserve(self, job, *, reservation_cost=None, cache_key=""):
+    def _checkpoint_provider_binding(self, request_id, provider_id, *, partial=None):
+        """Atomically bind the one real provider id learned after dispatch.
+
+        This is the sole transition from the pre-dispatch ``UNASSIGNED`` marker.
+        It deliberately validates the immutable executor intent rather than
+        accepting a replacement binding supplied by a caller.
+        """
+        if not isinstance(provider_id, str) or not provider_id or len(provider_id) > 512:
+            raise ValueError("provider request id is invalid")
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            found = db.execute("SELECT data FROM jobs WHERE id=?", (request_id,)).fetchone()
+            if found is None:
+                raise ValueError("executor request does not exist")
+            persisted = json.loads(found[0])
+            binding = persisted.get("settlement_binding")
+            required = {
+                "schema", "local_request_id", "provider_request_id", "endpoint_id",
+                "auth_scope", "authority_mode",
+            }
+            if (not isinstance(binding, dict) or set(binding) != required
+                    or binding.get("schema") != 2
+                    or binding.get("local_request_id") != request_id
+                    or binding.get("endpoint_id") != persisted.get("endpoint")
+                    or binding.get("authority_mode") != persisted.get("mode")
+                    or not isinstance(binding.get("auth_scope"), str)
+                    or not binding["auth_scope"]):
+                raise ValueError("settlement binding intent is malformed")
+            prior = binding["provider_request_id"]
+            prior_provider = persisted.get("provider_id", "")
+            if prior == provider_id and prior_provider == provider_id:
+                return
+            if prior != "UNASSIGNED" or prior_provider:
+                raise ValueError("provider request id is immutable")
+            binding["provider_request_id"] = provider_id
+            persisted["provider_id"] = provider_id
+            persisted["status"] = "SUBMITTED"
+            if partial:
+                persisted["partial"] = str(Path(partial).resolve())
+            self._put(db, persisted)
+
+    def _reserve(self, job, *, reservation_cost=None, cache_key="", auth_scope=None):
         reservation_cost = job.cost if reservation_cost is None else money(reservation_cost)
+        if auth_scope is None:
+            if job.mode != "TEST":
+                raise PermissionError("LIVE settlement binding requires authorization scope")
+            auth_scope = "TEST_LOCAL_ONLY"
+        if not isinstance(auth_scope, str) or not auth_scope or len(auth_scope) > 512:
+            raise ValueError("settlement authorization scope is invalid")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             rows = [json.loads(r[0]) for r in db.execute("SELECT data FROM jobs")]
@@ -275,6 +379,16 @@ class Executor:
             self._put(
                 db,
                 {
+                    "receipt_schema": 2,
+                    "settlement_binding": {
+                        "schema": 2,
+                        "local_request_id": job.request_id,
+                        # A local identity is not evidence of a remote FAL identity.
+                        "provider_request_id": "UNASSIGNED",
+                        "endpoint_id": job.endpoint,
+                        "auth_scope": auth_scope,
+                        "authority_mode": job.mode,
+                    },
                     "request_id": job.request_id,
                     "scene": job.scene,
                     "mode": job.mode,
@@ -291,6 +405,31 @@ class Executor:
                 },
             )
             return True
+
+    def prepare_intent(self, job: Job, *, auth_scope=None):
+        """Durably record a non-submitting intent for external admission.
+
+        This deliberately performs no provider construction or network I/O.  A
+        caller can bind the resulting immutable intent into another durable
+        ledger before it later invokes :meth:`run`.
+        """
+        job = deepcopy(job)
+        if job.mode not in {"TEST", "LIVE"}:
+            raise PermissionError("explicit TEST/LIVE job mode required")
+        money(job.cost)
+        if not job.scene or not job.endpoint or job.cost <= 0:
+            raise ValueError("explicit scene, endpoint and positive maximum cost required")
+        job.manifest.verify(job.mode)
+        if auth_scope is None:
+            auth_scope = "TEST_LOCAL_ONLY" if job.mode == "TEST" else None
+        fresh = self._reserve(job, auth_scope=auth_scope)
+        row = self.inspect(job.request_id)
+        if fresh:
+            self._change(job.request_id, status="PREPARED")
+            row = self.inspect(job.request_id)
+        if row["status"] not in {"PREPARED", "INTENT", "COMPLETE"}:
+            raise RuntimeError("prepared executor intent is not runnable")
+        return row
 
     @staticmethod
     def _verify_receipt(row):
@@ -313,7 +452,9 @@ class Executor:
             row.update(qa=approved, qa_reviewer=reviewer)
             self._put(db, row)
 
-    async def run(self, job: Job, provider: Provider, authorization=None, price=None):
+    async def run(self, job: Job, provider: Provider, authorization=None, price=None,
+                  settlement_checkpoint: Callable[[str, str], None] | None = None,
+                  submit_prepared: bool = False):
         job = deepcopy(job)  # Caller mutation cannot change identity during await.
         if job.mode not in {"TEST", "LIVE"} or provider.mode != job.mode:
             raise PermissionError("TEST/LIVE provider mode mismatch")
@@ -362,10 +503,20 @@ class Executor:
                     cached = self.cas.get(cache_key) if self.cas is not None else None
                     if cached is None:
                         live_gate()
+                    auth_scope = (
+                        "TEST_LOCAL_ONLY"
+                        if job.mode == "TEST"
+                        else (
+                            f"LIVE_AUTHORIZATION_REQUEST:{authorization.request_id}"
+                            if authorization is not None
+                            else "LIVE_CACHE_NO_PROVIDER_REQUEST"
+                        )
+                    )
                     fresh = self._reserve(
                         job,
                         reservation_cost=Decimal(0) if cached is not None else None,
                         cache_key=cache_key,
+                        auth_scope=auth_scope,
                     )
                 else:
                     cache_key = existing.get("cache_key") or (
@@ -376,6 +527,12 @@ class Executor:
                     cached = None
                     fresh = False
                 row = self.inspect(job.request_id)
+                if fresh and cached is None and job.endpoint.startswith("fal-ai/"):
+                    # A fresh FAL request must take the same durable admission
+                    # path as a separately prepared intent; direct run is not a bypass.
+                    self._change(job.request_id, status="PREPARED")
+                    row = self.inspect(job.request_id)
+                    fresh = False
                 if row["status"] == "COMPLETE":
                     self._verify_receipt(row)
                     return row
@@ -394,6 +551,15 @@ class Executor:
                         cache_hit=True,
                     )
                     return self.inspect(job.request_id)
+                if (
+                    row["status"] == "PREPARED"
+                    and not submit_prepared
+                    and not row["provider_id"]
+                    and not row["partial"]
+                ):
+                    raise RuntimeError(
+                        "prepared intent requires admission or reconciliation; no submit"
+                    )
 
                 def checkpoint(*, provider_id=None, partial=None):
                     updates = {}
@@ -401,9 +567,30 @@ class Executor:
                         updates["provider_id"] = provider_id
                     if partial:
                         updates["partial"] = str(Path(partial).resolve())
-                    self._change(job.request_id, **updates)
+                    if provider_id:
+                        self._checkpoint_provider_binding(
+                            job.request_id, provider_id, partial=partial
+                        )
+                        if settlement_checkpoint is not None:
+                            settlement_checkpoint(job.request_id, provider_id)
+                    elif updates:
+                        self._change(job.request_id, **updates)
 
-                if fresh:
+                submit_now = fresh
+                if row["status"] == "PREPARED" and submit_prepared:
+                    # A boolean is not authority: before the irreversible POST,
+                    # re-read the configured ledger's exact durable reservation.
+                    self._verify_prepared_fal_admission(job, row)
+                    self._change(job.request_id, status="SUBMITTING")
+                    row = self.inspect(job.request_id)
+                    submit_now = True
+                elif fresh:
+                    # Even direct Executor users must leave a durable marker
+                    # before the non-idempotent provider POST.
+                    self._change(job.request_id, status="SUBMITTING")
+                    row = self.inspect(job.request_id)
+
+                if submit_now:
                     self._change(
                         job.request_id,
                         authorization=json.loads(json.dumps(asdict(authorization), default=str)) if authorization else None,

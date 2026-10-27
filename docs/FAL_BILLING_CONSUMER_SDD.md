@@ -7,7 +7,7 @@ This slice adds a bounded, read-only consumer for FAL's documented Platform API 
 - `GET https://api.fal.ai/v1/models/pricing`
 - `GET https://api.fal.ai/v1/models/billing-events`
 
-It creates no provider factory for inference and has no POST, queue submission, media download, budget reservation, ledger settlement, dispatch, RunPod, Telegram, or EP12 path. Construction is inert. The CLI makes no network request unless the caller explicitly supplies `--readback` and a configured `FAL_KEY`.
+It creates no provider factory for inference and has no POST, queue submission, media download, budget reservation, or dispatch. The separate `billing_reconciler` bridge may consume this client only after validating a durable executor binding and an existing standing-ledger reservation; it does not enable LIVE dispatch. Construction is inert. The CLI makes no network request unless the caller explicitly supplies `--readback` and a configured `FAL_KEY`.
 
 ## Current qualification status
 

@@ -19,6 +19,7 @@ from src.hybrid.compiled import compile_storyboard, ProductionRun
 from src.hybrid.execution import Executor
 from src.hybrid.planner import Config
 from src.hybrid.revision import RevisionHarness, read, semantic_timeline, validate_ep8_script
+from src.hybrid.standing_budget import StandingBudgetLedger
 from src.providers.video.runpod_serverless import RunPodHeroProvider
 
 
@@ -228,8 +229,34 @@ def test_review_rejects_ambiguous_malformed_or_unbound(deployment, case):
 def test_fal_exact_wire_submit_recovery_qa_and_independent_delivery(deployment, monkeypatch):
     deps = construct(deployment)
     run, scenes = compiled(deps)
-    job = run.baseline_jobs()[0]
-    auth, prices = deps.authorize([job], deps.plan)
+    live_job = run.baseline_jobs()[0]
+    assets = tuple(FrozenAsset.approve(asset.path, "test reviewer", "TEST") for asset in live_job.manifest.assets)
+    sheet = deps.root / "test-sheet.png"
+    contact_sheet(assets, sheet)
+    job = replace(
+        live_job,
+        mode="TEST",
+        manifest=Manifest.freeze(
+            assets, FrozenAsset.approve(sheet, "test reviewer", "TEST"), "test reviewer", "TEST"
+        ),
+    )
+    deps.images.mode = "TEST"
+    ledger = StandingBudgetLedger(
+        deps.root / "admission.sqlite3", policy_sha256="a" * 64,
+        episode_limit_usd="1", month_limit_usd="1", experiment_limit_usd="1", mode="TEST",
+    )
+    run.executor = Executor(
+        deps.root / "executor.sqlite3", Config(), prior_spend=deps.prior_spend,
+        standing_ledger=ledger,
+    )
+    run._active_images[job.scene] = job
+    prepared = run.executor.prepare_intent(job)
+    ledger.reserve(
+        job.request_id, "TEST-EP", job.endpoint, job.cost,
+        settlement_mode="FAL_READBACK_V2",
+        auth_scope=prepared["settlement_binding"]["auth_scope"],
+        provider_request_id="UNASSIGNED", authority_mode="TEST",
+    )
     calls = []
     fal = deployment[2]
     fal.upload_file = lambda path: calls.append(("upload", path)) or "https://v3.fal.media/ref.png"
@@ -238,7 +265,11 @@ def test_fal_exact_wire_submit_recovery_qa_and_independent_delivery(deployment, 
         calls.append(("post", arguments)) or SimpleNamespace(request_id="remote-1"))
     deps.images.downloader = lambda url, stream: Image.new("RGB", (1280, 720), "orange").save(stream, format="PNG")
     async def exercise():
-        receipt = await run.executor.run(job, deps.images, authorization=auth[job.request_id], price=prices[job.request_id])
+        receipt = await run.executor.run(
+            job, deps.images,
+            settlement_checkpoint=lambda local_id, remote_id: ledger.bind_provider_request_id(local_id, remote_id),
+            submit_prepared=True,
+        )
         await deps.images.recover(job, job.request_id, "remote-1", receipt["result"], lambda **kw: None)
         assert len([c for c in calls if c[0] == "post"]) == 1
         wire = next(c[1] for c in calls if c[0] == "post")
@@ -261,7 +292,7 @@ def test_fal_exact_wire_submit_recovery_qa_and_independent_delivery(deployment, 
             await deps.visual_qa(packet, scenes[0], deps.plan["references"])
         run.executor.qa(job.request_id, receipt["result_sha256"], False, "mock rejection")
         correction = run.remediation_job(job.scene, job.payload["prompt"] + live.CORRECTION)
-        assert correction.request_id in deps.authorize([correction], deps.plan)[0]
+        assert correction.predecessor == job.request_id
     asyncio.run(exercise())
     sends = []
 
@@ -276,6 +307,7 @@ def test_fal_exact_wire_submit_recovery_qa_and_independent_delivery(deployment, 
     assert asyncio.run(deps.messenger.send_photo("-12345", str(photo), "thumbnail")) == 1
     assert asyncio.run(deps.messenger.send_video("-12345", str(media), "video")) == 2
     assert sends == ["sendPhoto", "sendVideo"]
+    assert ledger.claim(job.request_id)["provider_request_id"] == "remote-1"
 
 
 def test_review_network_failure_sanitized_and_not_retried(deployment, monkeypatch):

@@ -155,6 +155,8 @@ async def test_runner_resumes_executor_and_reaches_two_hash_bound_human_gates(tm
     )
     assert media_pending["state"] == "MEDIA_PENDING"
     assert provider.calls == 1
+    assert runner.ledger.claim(candidate.request_id)["state"] == "UNKNOWN"
+
 
     resumed = await runner.resume(
         provider,
@@ -195,6 +197,113 @@ async def test_runner_resumes_executor_and_reaches_two_hash_bound_human_gates(tm
     )
     assert published["state"] == "PUBLISHED"
     assert published["publication"]["video_id"] == "TEST-video-id"
+
+
+@pytest.mark.asyncio
+async def test_runner_prepares_fal_bound_claim_before_submit_and_failed_admission_posts_zero(tmp_path):
+    """The runner, not a later readback helper, owns paid admission ordering."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    class TrapProvider(FixtureProvider):
+        async def submit(self, *args):
+            self.calls += 1
+            raise AssertionError("provider POST must not happen when ledger admission fails")
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    shared = ledger(tmp_path, parsed)
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"))), shared,
+    )
+    candidate = job(tmp_path)
+    runner.start({"packet": "test"}, [candidate])
+    shared.reserve("exhaust", "TEST-EP", "test-image", "0.91")
+    trap = TrapProvider(tmp_path)
+
+    with pytest.raises(Exception, match="budget exhausted"):
+        await runner.resume(trap, lambda _: {})
+    assert trap.calls == 0
+    intent = runner.executor.inspect(candidate.request_id)
+    assert intent["status"] == "PREPARED"
+    assert intent["settlement_binding"]["provider_request_id"] == "UNASSIGNED"
+    with pytest.raises(Exception, match="reservation does not exist"):
+        shared.claim(candidate.request_id)
+
+
+@pytest.mark.asyncio
+async def test_fresh_runner_recovers_checkpointed_receipt_without_second_submit(tmp_path):
+    """Crash after executor checkpoint but before ledger attach is recovery-only."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    class CrashSignal(BaseException):
+        pass
+
+    class CrashAfterCheckpointProvider(FixtureProvider):
+        def __init__(self, root):
+            super().__init__(root)
+            self.recoveries = 0
+
+        async def submit(self, job, request_id, checkpoint):
+            self.calls += 1
+            checkpoint(provider_id="TEST-" + request_id)
+            raise AssertionError("checkpoint crash must interrupt submit")
+
+        async def recover(self, job, request_id, provider_id, partial, checkpoint):
+            self.recoveries += 1
+            assert provider_id == "TEST-" + request_id
+            output = self.root / f"{request_id}.recovered"
+            output.write_bytes(b"recovered-after-crash")
+            return ProviderResult(output, job.cost)
+
+    class CrashBeforeLedgerAttach:
+        def __init__(self, durable):
+            self.durable = durable
+
+        def bind_provider_request_id(self, request_id, provider_id):
+            raise CrashSignal("simulated process crash before ledger attach")
+
+        def __getattr__(self, name):
+            return getattr(self.durable, name)
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    db = tmp_path / "jobs.db"
+    shared = ledger(tmp_path, parsed)
+    candidate = job(tmp_path)
+    first = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(db, Config(limit=Decimal("1.00"))), CrashBeforeLedgerAttach(shared),
+    )
+    first.start({"packet": "test"}, [candidate])
+    provider = CrashAfterCheckpointProvider(tmp_path)
+
+    with pytest.raises(CrashSignal, match="before ledger attach"):
+        await first.resume(provider, lambda _: {})
+    checkpointed = first.executor.inspect(candidate.request_id)
+    assert checkpointed["status"] == "SUBMITTED"
+    assert checkpointed["provider_id"] == "TEST-" + candidate.request_id
+    assert checkpointed["settlement_binding"]["provider_request_id"] == checkpointed["provider_id"]
+    assert provider.calls == 1
+    assert shared.claim(candidate.request_id)["provider_request_id"] == "UNASSIGNED"
+
+    fresh = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(db, Config(limit=Decimal("1.00"))), shared,
+    )
+    resumed = await fresh.resume(
+        provider,
+        lambda receipt: {
+            "approved": True,
+            "reviewer": "independent-test-qa",
+            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
+            "request_id": receipt["request_id"],
+            "result_sha256": receipt["result_sha256"],
+            "codes": [],
+        },
+    )
+
+    assert resumed["state"] == "MEDIA_PENDING"
+    assert provider.calls == 1
+    assert provider.recoveries == 1
 
 
 def test_policy_blocks_unknown_cost_and_publish_without_valid_policy(tmp_path):
@@ -886,12 +995,5 @@ async def test_cancelled_executor_run_marks_reservation_unknown_and_propagates(t
         await runner.resume(provider, lambda receipt: receipt)
 
     assert provider.submits == 1
-    assert (
-        budget.reserve(
-            candidate.request_id,
-            "TEST-EP",
-            candidate.endpoint,
-            candidate.cost,
-        )["state"]
-        == "UNKNOWN"
-    )
+    assert budget.claim(candidate.request_id)["state"] == "UNKNOWN"
+    assert budget.claim(candidate.request_id)["settlement_mode"] == "FAL_READBACK_V2"
