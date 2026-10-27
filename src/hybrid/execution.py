@@ -30,7 +30,7 @@ from src.hybrid._billing_coordinator_guard import (
 )
 from src.hybrid.artifacts import Manifest, digest, sha256
 from src.hybrid.cas import ContentAddressedStore, job_content_key
-from src.hybrid.locks import file_slot
+from src.hybrid.locks import file_lock, file_slot
 from src.hybrid.observability import StructuredEventLog
 from src.hybrid.planner import Config, money
 
@@ -129,8 +129,15 @@ class Executor:
         self.locks = {}
         self.lock_dir = self.database.with_suffix(".locks")
         self.lock_dir.mkdir(exist_ok=True)
-        with self._db() as db:
-            db.execute("PRAGMA journal_mode=WAL")
+        self._initialize()
+
+    def _initialize(self):
+        """Serialize schema/WAL bootstrap without reconfiguring open WAL stores."""
+        init_lock = self.database.with_name(f".{self.database.name}.init.lock")
+        with file_lock(init_lock, timeout=30), self._db() as db:
+            journal_mode = db.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(journal_mode).lower() != "wal":
+                db.execute("PRAGMA journal_mode=WAL")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
             )
@@ -139,9 +146,9 @@ class Executor:
             )
             settings = json.dumps(
                 {
-                    "limit": str(config.limit),
+                    "limit": str(self.config.limit),
                     "prior_spend": str(self.prior_spend),
-                    "concurrency": config.concurrency,
+                    "concurrency": self.config.concurrency,
                 }
             )
             db.execute("INSERT OR IGNORE INTO settings VALUES (1, ?)", (settings,))

@@ -237,9 +237,12 @@ def _coordinator_worker(action, root_text, request_id, ready_text, release_text,
     root = __import__("pathlib").Path(root_text)
     ready, release = __import__("pathlib").Path(ready_text), __import__("pathlib").Path(release_text)
     try:
+        if action == "init-race":
+            ready.write_text("ready", encoding="utf-8")
+            _wait_for([release])
         coordinator, executor, ledger = _fresh_components(root)
         job = _fresh_job(root, request_id)
-        if action == "prepare-race":
+        if action in {"prepare-race", "init-race"}:
             ready.write_text("ready", encoding="utf-8")
             _wait_for([release])
             event_queue.put({"action": action, "result": coordinator.prepare_and_reserve(job, episode_id="TEST-EP")})
@@ -355,6 +358,27 @@ def test_fresh_process_competing_coordinators_publish_only_coherent_generations(
     assert document["status"] == "CURRENT"
     assert document["generation"] == 2
     assert document["executor_receipt"]["billing_snapshot_generation"] == document["ledger_claim"]["billing_snapshot_generation"] == 2
+
+
+def test_fresh_process_initialization_race_is_serialized_and_bounded(tmp_path):
+    """Fresh stores configure WAL/schema before coordinator barriers can run."""
+    for attempt in range(6):
+        root = tmp_path / f"initialization-{attempt}"
+        root.mkdir()
+        first, first_events, first_ready, first_release = _fresh("init-race", root, "race-one")
+        second, second_events, second_ready, second_release = _fresh("init-race", root, "race-two")
+        try:
+            _wait_for([first_ready, second_ready])
+            first_release.write_text("release", encoding="utf-8")
+            second_release.write_text("release", encoding="utf-8")
+            events = [_join_event(first, first_events), _join_event(second, second_events)]
+        finally:
+            for process in (first, second):
+                if process.is_alive():
+                    process.kill()
+                    process.join(10)
+        assert not [event for event in events if "error" in event], events
+        assert sorted(event["result"]["generation"] for event in events) == [1, 2]
 
 
 def test_fresh_process_crashes_leave_stale_snapshot_and_consumer_never_opens_sqlite(tmp_path):

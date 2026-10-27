@@ -27,7 +27,12 @@ def reject_reparse_path(path: Path) -> Path:
 
 
 def try_lock(path):
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    """Create and acquire a lock only through a lexical reparse-safe path."""
+    path = os.fspath(reject_reparse_path(Path(path)))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # A directory can be swapped for a reparse point while mkdir runs; reject
+    # that race before the lock file is opened or created.
+    path = os.fspath(reject_reparse_path(Path(path)))
     if os.name == "nt":
         path = os.path.abspath(path)
         if not path.startswith("\\\\?\\"):
@@ -58,15 +63,23 @@ def try_lock(path):
 
 
 @contextmanager
-def file_lock(path):
+def file_lock(path, *, timeout=None):
     """Acquire one crash-released interprocess lock without re-entering it."""
+    if timeout is not None and (not isinstance(timeout, (int, float)) or timeout <= 0):
+        raise ValueError("file lock timeout must be a positive number of seconds")
     fd = None
+    deadline = None
+    if timeout is not None:
+        import time
+        deadline = time.monotonic() + timeout
     try:
         while fd is None:
             fd = try_lock(path)
             if fd is None:
                 import time
 
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out acquiring file lock: {path}")
                 time.sleep(0.02)
         yield
     finally:

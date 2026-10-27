@@ -16,6 +16,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from src.hybrid._billing_coordinator_guard import _require_coordinator_write
+from src.hybrid.locks import file_lock
 
 
 class BudgetDenied(ValueError):
@@ -125,23 +126,32 @@ class StandingBudgetLedger:
         if _authenticated_authority:
             self.binding['authorization_id'] = _authorization_id
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as db, db:
-            db.execute('PRAGMA journal_mode=WAL')
+        # Changing journal mode takes an exclusive SQLite lock.  Fresh OS
+        # processes may construct the same durable ledger before the snapshot
+        # coordinator exists, so serialize only this bounded bootstrap phase.
+        self._initialize()
+
+    def _initialize(self):
+        init_lock = self.path.with_name(f'.{self.path.name}.init.lock')
+        with file_lock(init_lock, timeout=30), closing(self._connect()) as db, db:
+            journal_mode = db.execute('PRAGMA journal_mode').fetchone()[0]
+            if str(journal_mode).lower() != 'wal':
+                db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
-                CREATE TABLE IF NOT EXISTS policy (id INTEGER PRIMARY KEY CHECK(id=1), binding TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS claims (
-                  request_id TEXT PRIMARY KEY, episode_id TEXT NOT NULL, provider TEXT NOT NULL,
-                  month TEXT NOT NULL, cap INTEGER NOT NULL CHECK(cap>=0),
-                  experiment INTEGER NOT NULL, state TEXT NOT NULL, actual INTEGER,
-                  settlement_mode TEXT NOT NULL DEFAULT 'LEGACY_TEST_UNBOUND',
-                  auth_scope TEXT NOT NULL DEFAULT 'TEST_UNBOUND_LEGACY',
-                  provider_request_id TEXT NOT NULL DEFAULT 'UNASSIGNED',
-                  authority_mode TEXT NOT NULL DEFAULT 'TEST',
-                  billing_snapshot_generation INTEGER);
-                CREATE TABLE IF NOT EXISTS settlement_receipts (
-                  request_id TEXT PRIMARY KEY REFERENCES claims(request_id),
-                  receipt_sha256 TEXT NOT NULL UNIQUE, actual INTEGER NOT NULL CHECK(actual>=0),
-                  receipt_body TEXT NOT NULL, provenance TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS policy (id INTEGER PRIMARY KEY CHECK(id=1), binding TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS claims (
+              request_id TEXT PRIMARY KEY, episode_id TEXT NOT NULL, provider TEXT NOT NULL,
+              month TEXT NOT NULL, cap INTEGER NOT NULL CHECK(cap>=0),
+              experiment INTEGER NOT NULL, state TEXT NOT NULL, actual INTEGER,
+              settlement_mode TEXT NOT NULL DEFAULT 'LEGACY_TEST_UNBOUND',
+              auth_scope TEXT NOT NULL DEFAULT 'TEST_UNBOUND_LEGACY',
+              provider_request_id TEXT NOT NULL DEFAULT 'UNASSIGNED',
+              authority_mode TEXT NOT NULL DEFAULT 'TEST',
+              billing_snapshot_generation INTEGER);
+            CREATE TABLE IF NOT EXISTS settlement_receipts (
+              request_id TEXT PRIMARY KEY REFERENCES claims(request_id),
+              receipt_sha256 TEXT NOT NULL UNIQUE, actual INTEGER NOT NULL CHECK(actual>=0),
+              receipt_body TEXT NOT NULL, provenance TEXT NOT NULL);
             ''')
             columns = {row[1] for row in db.execute('PRAGMA table_info(claims)')}
             if 'settlement_mode' not in columns:
