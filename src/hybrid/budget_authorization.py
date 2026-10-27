@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from src.approval.inbound import AuthenticatedApprovalSource
-from src.hybrid.locks import file_lock
+from src.hybrid.locks import file_lock, reject_reparse_path
 from src.hybrid.standing_budget import StandingBudgetLedger
 
 _REQUEST_KEYS = {
@@ -51,29 +52,75 @@ def _sha256(value: object) -> str:
 
 def _load(path: Path, label: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        value = json.loads(reject_reparse_path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
         raise BudgetAuthorizationError(f"{label} is unreadable") from error
     if type(value) is not dict:
         raise BudgetAuthorizationError(f"{label} must be an object")
     return value
 
 
-def _write_once(path: Path, document: dict[str, Any], label: str) -> None:
-    encoded = _canonical(document)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o600)
-    except FileExistsError:
-        if _load(path, label) != document:
-            raise BudgetAuthorizationError(f"{label} is write-once")
+def _fsync_parent(path: Path) -> None:
+    """Durably publish a POSIX directory entry; Windows has no directory fd API."""
+    if os.name == "nt":
         return
-    with os.fdopen(fd, "wb") as stream:
-        stream.write(encoded)
-        stream.flush()
-        os.fsync(stream.fileno())
-    if _load(path, label) != document:
-        raise BudgetAuthorizationError(f"{label} readback mismatch")
+    fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _write_once(path: Path, document: dict[str, Any], label: str) -> None:
+    """Publish a fully-fsynced immutable document without exposing staging bytes."""
+    encoded = _canonical(document)
+    path = reject_reparse_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path = reject_reparse_path(path)
+    lock_path = path.with_name(f".{path.name}.write-once.lock")
+    with file_lock(lock_path):
+        try:
+            if path.exists():
+                if _load(path, label) != document:
+                    raise BudgetAuthorizationError(f"{label} is write-once")
+                return
+        except OSError as error:
+            raise BudgetAuthorizationError(f"{label} is unreadable") from error
+        staging = path.with_name(f".{path.name}.{uuid.uuid4().hex}.staging")
+        staging_identity = None
+        try:
+            fd = os.open(staging, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o600)
+            try:
+                staging_identity = os.fstat(fd)
+                with os.fdopen(fd, "wb") as stream:
+                    fd = None
+                    stream.write(encoded)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            finally:
+                if fd is not None:
+                    os.close(fd)
+            try:
+                os.link(staging, path)
+            except FileExistsError:
+                if _load(path, label) != document:
+                    raise BudgetAuthorizationError(f"{label} is write-once")
+                return
+            except OSError as error:
+                raise BudgetAuthorizationError(f"{label} could not publish immutable document") from error
+            _fsync_parent(path)
+            if _load(path, label) != document:
+                raise BudgetAuthorizationError(f"{label} readback mismatch")
+        finally:
+            try:
+                if staging_identity is not None and _same_file(os.lstat(staging), staging_identity):
+                    os.unlink(staging)
+            except FileNotFoundError:
+                pass
 
 
 def _positive_usd(value: object, label: str) -> str:

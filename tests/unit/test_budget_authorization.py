@@ -84,6 +84,28 @@ def _concurrent_delivery_worker(root: str, barrier, result_queue) -> None:
     result_queue.put(service.deliver_request(request).document["message_id"])
 
 
+def _write_once_after_create_worker(path: str, barrier, result_queue) -> None:
+    """Reproduce the old visible-empty-file window without network delivery."""
+    from src.hybrid import budget_authorization
+
+    target = Path(path)
+    original_open = budget_authorization.os.open
+
+    def pause_after_target_create(name, flags, *args):
+        fd = original_open(name, flags, *args)
+        if Path(name) == target and flags & os.O_CREAT and flags & os.O_EXCL:
+            try:
+                barrier.wait(timeout=1)
+            except BrokenBarrierError:
+                pass
+        return fd
+
+    budget_authorization.os.open = pause_after_target_create
+    document = {"schema": 1, "kind": "TEST_WRITE_ONCE"}
+    budget_authorization._write_once(target, document, "test write-once document")
+    result_queue.put(budget_authorization._load(target, "test write-once document"))
+
+
 def _request(*, expires_at: str | None = None):
     return {"schema": 1, "kind": "BUDGET_AUTHORIZATION", "mode": "TEST", "request_id": "budget-request-001",
         "episode_id": "EP-TEST-001", "policy_sha256": "a" * 64,
@@ -207,6 +229,75 @@ def test_two_process_services_emit_one_outbound_delivery_for_one_canonical_reque
         assert worker.exitcode == 0
     assert sorted(results.get(timeout=1) for _ in workers) == [42, 42]
     assert (tmp_path / "outbound-calls.log").read_text(encoding="utf-8").splitlines() == ["call"]
+
+
+def test_two_process_write_once_never_exposes_an_empty_canonical_document(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    target = tmp_path / "canonical.json"
+    barrier, results = context.Barrier(2), context.Queue()
+    workers = [context.Process(target=_write_once_after_create_worker, args=(str(target), barrier, results)) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=15)
+        assert worker.exitcode == 0
+    assert [results.get(timeout=1) for _ in workers] == [{"schema": 1, "kind": "TEST_WRITE_ONCE"}] * 2
+    assert json.loads(target.read_text(encoding="utf-8")) == {"schema": 1, "kind": "TEST_WRITE_ONCE"}
+
+
+def test_write_once_collision_is_idempotent_only_for_the_exact_canonical_document(tmp_path):
+    from src.hybrid.budget_authorization import _write_once
+
+    target = tmp_path / "canonical.json"
+    document = {"schema": 1, "kind": "TEST_WRITE_ONCE"}
+    _write_once(target, document, "test write-once document")
+    _write_once(target, document, "test write-once document")
+    with pytest.raises(BudgetAuthorizationError, match="write-once"):
+        _write_once(target, {**document, "kind": "DIFFERENT"}, "test write-once document")
+    assert json.loads(target.read_text(encoding="utf-8")) == document
+
+
+def test_partial_canonical_document_blocks_before_provider_and_preserves_evidence(tmp_path):
+    adapter, outbound = _adapter(tmp_path), LocalTestOutbound()
+    service = _service(tmp_path, adapter, outbound)
+    target = tmp_path / "authority" / "requests" / "budget-request-001.json"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'{"schema":')
+
+    with pytest.raises(BudgetAuthorizationError, match="unreadable"):
+        service.create_request(_request())
+
+    assert target.read_bytes() == b'{"schema":'
+    assert outbound.calls == 0
+    assert list(target.parent.glob("*.staging")) == []
+
+
+def test_staging_is_same_directory_and_cleanup_preserves_foreign_evidence(tmp_path, monkeypatch):
+    from src.hybrid import budget_authorization
+
+    target = tmp_path / "canonical.json"
+    document = {"schema": 1, "kind": "TEST_WRITE_ONCE"}
+    foreign = b"external-crash-evidence"
+    original_link = budget_authorization.os.link
+
+    def competing_publish(source, destination):
+        source, destination = Path(source), Path(destination)
+        assert source.parent == destination.parent  # Never request a cross-volume hard link.
+        evidence = source.with_name("preserved-external-evidence.bin")
+        os.replace(source, evidence)
+        source.write_bytes(foreign)
+        destination.write_bytes(budget_authorization._canonical(document))
+        raise FileExistsError
+
+    monkeypatch.setattr(budget_authorization.os, "link", competing_publish)
+    budget_authorization._write_once(target, document, "test write-once document")
+
+    assert json.loads(target.read_text(encoding="utf-8")) == document
+    staging = list(tmp_path.glob("*.staging"))
+    assert len(staging) == 1
+    assert staging[0].read_bytes() == foreign
+    assert (tmp_path / "preserved-external-evidence.bin").exists()
+    monkeypatch.setattr(budget_authorization.os, "link", original_link)
 
 
 def test_crash_unknown_intent_blocks_a_new_service_instance_from_resending(tmp_path):
