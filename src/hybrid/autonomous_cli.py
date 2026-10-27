@@ -412,10 +412,7 @@ def _compiled_status(root: Path, rid: str) -> dict:
 
 
 def _load_compiled(workspace: Path, rid: str):
-    from src.hybrid.autonomous import (
-        AutonomousCompiledTestAdapter,
-        AutonomousTwoGateRunner,
-    )
+    from src.agents.director import DirectorAgent
     from src.hybrid.compiled import CompiledEpisode, OperationalPipeline
 
     if len(rid) != 64 or any(char not in "0123456789abcdef" for char in rid):
@@ -438,8 +435,13 @@ def _load_compiled(workspace: Path, rid: str):
         _under(asset.path, inputs)
     executor = Executor(root / "executor.sqlite3", Config(limit=parsed.episode_cap_usd))
     pipeline = OperationalPipeline(episode, executor, manifest, workspace=root / "compiled", endpoint=TEST_COMPILED_PROVIDER, image_cost=TEST_COMPILED_COST)
-    ledger = StandingBudgetLedger(root / "standing-budget.sqlite3", policy_sha256=parsed.digest, episode_limit_usd=parsed.episode_cap_usd, month_limit_usd=parsed.month_cap_usd, experiment_limit_usd=parsed.experiment_cap_usd, mode="TEST")
-    adapter = AutonomousCompiledTestAdapter(AutonomousTwoGateRunner(root / "runner", episode.episode_id, parsed, executor, ledger), pipeline)
+    # The TEST packet's allowlisted policy is still checked above; bind its
+    # runner through the Director factory without loading runtime configuration
+    # that could select a provider, destination, or LIVE route.
+    director = DirectorAgent.__new__(DirectorAgent)
+    adapter = director.create_autonomous_compiled_test_adapter(
+        pipeline, root / "runner", _policy_data
+    )
     return root, adapter, adapter.runner._load() if adapter.runner.path.is_file() else None
 
 

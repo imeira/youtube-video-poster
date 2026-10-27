@@ -221,3 +221,59 @@ def test_cli_compiled_packet_rejects_live_policy_and_external_asset(tmp_path):
     }), encoding="utf-8")
     code, blocked = run_cli("start", "--workspace", str(tmp_path / "workspace"), "--compiled-input", str(packet))
     assert code == 1 and blocked["status"] == "BLOCKED"
+
+
+def test_compiled_test_loader_uses_director_adapter_factory(tmp_path, monkeypatch):
+    """The CLI handoff must retain the Director as compiled-run control plane."""
+    from decimal import Decimal
+
+    from PIL import Image
+
+    from src.agents.director import DirectorAgent
+    from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
+    from src.hybrid.autonomous_cli import start_compiled
+    from src.hybrid.compiled import compile_storyboard
+
+    packet = tmp_path / "packet"
+    packet.mkdir()
+    audio = packet / "audio.wav"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i",
+         "sine=frequency=440:sample_rate=48000:duration=2", "-ac", "2", str(audio)],
+        check=True,
+    )
+    reference = packet / "reference.png"
+    Image.new("RGB", (64, 64), "navy").save(reference)
+    asset = FrozenAsset.approve(reference, "TEST fixture", "TEST")
+    sheet = packet / "sheet.png"
+    contact_sheet((asset,), sheet)
+    manifest = Manifest.freeze(
+        (asset,), FrozenAsset.approve(sheet, "TEST fixture", "TEST"), "TEST fixture", "TEST"
+    )
+    compile_storyboard(
+        "TEST-DIRECTOR-HANDOFF", FrozenAsset.approve(audio, "TEST fixture", "TEST"),
+        [{"scene_id": "R001", "start": 0, "end": 2, "image_prompt": "céu", "action": "céu"}],
+    ).save(packet / "compiled.json")
+    manifest.save(packet / "manifest.json")
+    policy_document = {
+        "schema": 1, "version": "compiled-cli-test-v1", "mode": "TEST",
+        "episode_cap_usd": "1.00", "month_cap_usd": "1.00", "experiment_cap_usd": "1.00",
+        "allowed_providers": ["test-local-fixture"], "publication": {"enabled": False},
+    }
+    (packet / "policy.json").write_text(json.dumps(policy_document), encoding="utf-8")
+    original = DirectorAgent.create_autonomous_compiled_test_adapter
+    calls = []
+
+    def tracked(self, pipeline, workspace, policy):
+        calls.append((pipeline.run.executor, Path(workspace), policy))
+        return original(self, pipeline, workspace, policy)
+
+    monkeypatch.setattr(DirectorAgent, "create_autonomous_compiled_test_adapter", tracked)
+    result = start_compiled(tmp_path / "workspace", packet, None)
+
+    assert result["state"] == "WAITING_THUMBNAIL_APPROVAL"
+    assert len(calls) == 1
+    executor, workspace, policy = calls[0]
+    assert executor.config.limit == Decimal("1.00")
+    assert workspace.name == "runner"
+    assert policy == policy_document
