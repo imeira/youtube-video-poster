@@ -34,10 +34,32 @@ def _hash(value: object) -> str:
     return sha256(_canonical(value)).hexdigest()
 
 
+def validate_test_billing_snapshot_config(app_config: object) -> tuple[Path, str]:
+    """Validate the closed TEST snapshot configuration without filesystem I/O.
+
+    This boundary intentionally only inspects the already-loaded application
+    mapping.  Callers must use it before opening state, reading credentials, or
+    constructing clients and durable-store objects.
+    """
+    raw = getattr(app_config, "raw", None)
+    if not isinstance(raw, dict) or raw.get("mode") != "TEST":
+        raise BillingSnapshotError("explicit TEST billing snapshot application configuration is required")
+    configured = raw.get("billing_snapshot")
+    if not isinstance(configured, dict) or set(configured) != {"root", "name"}:
+        raise BillingSnapshotError("closed billing_snapshot configuration is required")
+    root, name = configured["root"], configured["name"]
+    if type(root) is not str or type(name) is not str or name != "billing-status.json":
+        raise BillingSnapshotError("configured snapshot name must be billing-status.json")
+    root_path = Path(root)
+    if not root_path.is_absolute():
+        raise BillingSnapshotError("configured snapshot root must be absolute")
+    return root_path, name
+
+
 class BillingSnapshotCoordinator:
     """The only writer of the non-authoritative billing JSON read model."""
 
-    def __init__(self, root: Path, *, executor: Executor, ledger: StandingBudgetLedger, clock=time.time):
+    def __init__(self, root: Path, *, executor: Executor, ledger: StandingBudgetLedger, clock=lambda: int(time.time())):
         if not isinstance(executor, Executor) or not isinstance(ledger, StandingBudgetLedger):
             raise TypeError("configured executor and standing ledger are required")
         root = Path(root)
@@ -73,15 +95,9 @@ class BillingSnapshotCoordinator:
         return dict(self._owner_binding)
 
     @classmethod
-    def from_app_config(cls, app_config: object, *, executor: Executor, ledger: StandingBudgetLedger, clock=time.time):
-        raw = getattr(app_config, "raw", None)
-        configured = raw.get("billing_snapshot") if isinstance(raw, dict) else None
-        if not isinstance(configured, dict) or set(configured) != {"root", "name"}:
-            raise BillingSnapshotError("closed billing_snapshot configuration is required")
-        root, name = configured["root"], configured["name"]
-        if not isinstance(root, str) or not isinstance(name, str) or name != "billing-status.json":
-            raise BillingSnapshotError("configured snapshot name must be billing-status.json")
-        return cls(Path(root), executor=executor, ledger=ledger, clock=clock)
+    def from_app_config(cls, app_config: object, *, executor: Executor, ledger: StandingBudgetLedger, clock=lambda: int(time.time())):
+        root, _name = validate_test_billing_snapshot_config(app_config)
+        return cls(root, executor=executor, ledger=ledger, clock=clock)
 
     def _checked(self, path: Path) -> Path:
         try:

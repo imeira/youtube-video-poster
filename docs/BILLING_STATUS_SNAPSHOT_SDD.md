@@ -141,6 +141,45 @@ billing bridge is absent and the existing fail-closed preflight result remains
 `UNAUTHENTICATED`/`READBACK_REQUIRED`; it must not construct a publisher from a
 caller path.
 
+### TEST CLI composition slice
+
+The FAL CLI may compose a coordinator only through a deployment-owned
+application configuration object supplied outside the episode/request path. The
+closed TEST-only `billing_snapshot` mapping is exactly
+`{"root": absolute-path-string, "name": "billing-status.json"}`.
+The pure configuration validator checks schema, exact types and lexical path
+absoluteness without filesystem I/O. Filesystem existence, directory/reparse
+checks and durable owner matching belong to the subsequent configured factory;
+they are not claims made by the pure validator.
+Missing, extra, non-TEST or lexically invalid configuration fails before
+credential access and transport construction. Durable root/owner mismatches are
+rejected by the configured factory after transport construction but before any
+provider POST; constructing a transport does not authorize or dispatch a request. `--state-root` remains a legacy durable-state
+locator only: it can reopen the executor/ledger pair, but it never supplies the
+coordinator owner root and no request/packet field can supply one.
+
+The configured factory binds one real `Executor`, `StandingBudgetLedger`, and
+`BillingSnapshotCoordinator`, then injects that exact trio into
+`FalLedgerSettlementService`. Its admitted execution path is
+`service.run_admitted(job, provider, ...)`; no CLI caller passes a checkpoint
+callback. Reconciliation uses that same configured service.
+
+Before a `reconcile` command constructs a FAL transport, the real CLI obtains
+application configuration through the existing application configuration
+channel and resolves the settlement composition. A declared snapshot section
+must be explicitly `mode: TEST` and contain only the closed snapshot mapping;
+a `LIVE`, partial, or malformed declaration fails before client construction.
+`--state-root` remains only the durable-store locator and cannot select or pin
+the owner root. Deployments with no snapshot declaration retain the legacy
+non-coordinated readback path for unpinned rows, while generation-pinned rows
+fail closed when the compatible configured coordinator is absent or foreign.
+
+The executable proof is a fresh CLI process using an explicit TEST loopback
+transport/provider DI: application configuration → service → real coordinator
+→ snapshot → JSON-only preflight. It proves no LIVE authority, no real provider,
+root mismatch/missing configuration/foreign capability perform zero POSTs, and
+a restart follows the durable checkpoint without a second POST.
+
 ## Consumer contract
 
 `BillingStatusSnapshot.inspect` reads only the configured validated JSON file;

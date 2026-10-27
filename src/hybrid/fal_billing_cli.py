@@ -13,7 +13,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from src.config.loader import get_config
 from src.hybrid.billing_reconciler import FalLedgerSettlementService, SettlementDenied
+from src.hybrid.billing_snapshot import (
+    BillingSnapshotCoordinator,
+    BillingSnapshotError,
+    validate_test_billing_snapshot_config,
+)
 from src.hybrid.execution import Executor
 from src.hybrid.fal_billing import (
     AiohttpFalBillingClient,
@@ -109,6 +115,78 @@ def _trusted_settlement_service(root: Path, consumer: FalBillingConsumer) -> Fal
     return FalLedgerSettlementService(ledger, executor, consumer)
 
 
+def configured_test_settlement_service(
+    state_root: Path, consumer: FalBillingConsumer, app_config: object,
+) -> FalLedgerSettlementService:
+    """Compose TEST stores and their coordinator from deployment configuration.
+
+    ``state_root`` locates pre-existing durable stores only.  The coordinator
+    root is accepted exclusively from the closed deployment configuration, so a
+    request or legacy CLI argument cannot claim snapshot ownership.
+    """
+    try:
+        validate_test_billing_snapshot_config(app_config)
+    except BillingSnapshotError as exc:
+        raise ValueError("configured TEST billing snapshot application configuration is invalid") from exc
+    state_root = _trusted_local_path(state_root, directory=True)
+    executor_path, ledger_path = state_root / "executor.sqlite3", state_root / "ledger.sqlite3"
+    for path in (executor_path, ledger_path):
+        _trusted_local_path(path, directory=False)
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(path) + suffix)
+            if sidecar.exists():
+                _trusted_local_path(sidecar, directory=False)
+    with sqlite3.connect(executor_path) as db:
+        settings_row = db.execute("SELECT data FROM settings WHERE id=1").fetchone()
+    with sqlite3.connect(ledger_path) as db:
+        binding_row = db.execute("SELECT binding FROM policy WHERE id=1").fetchone()
+    if settings_row is None or binding_row is None:
+        raise ValueError("configured TEST durable stores are incomplete")
+    try:
+        settings = json.loads(settings_row[0])
+        binding = json.loads(binding_row[0])
+        if binding.get("mode") != "TEST" or binding.get("authority") != "direct":
+            raise ValueError("configured CLI coordinator is restricted to TEST state")
+        ledger = StandingBudgetLedger(
+            ledger_path, policy_sha256=binding["policy_sha256"],
+            episode_limit_usd=Decimal(binding["episode"]) / Decimal(1_000_000),
+            month_limit_usd=Decimal(binding["month"]) / Decimal(1_000_000),
+            experiment_limit_usd=Decimal(binding["experiment"]) / Decimal(1_000_000), mode="TEST",
+        )
+        executor = Executor(
+            executor_path, Config(limit=Decimal(settings["limit"]), concurrency=settings["concurrency"]),
+            standing_ledger=ledger,
+        )
+        coordinator = BillingSnapshotCoordinator.from_app_config(
+            app_config, executor=executor, ledger=ledger,
+        )
+    except (KeyError, TypeError, ValueError, InvalidOperation, BudgetDenied, sqlite3.Error) as exc:
+        raise ValueError("configured TEST billing composition is invalid") from exc
+    return FalLedgerSettlementService(ledger, executor, consumer, coordinator=coordinator)
+
+
+def _settlement_factory_from_application_config(app_config: object) -> Callable[[Path, FalBillingConsumer], FalLedgerSettlementService]:
+    """Select trusted TEST composition before a reconcile can construct transport.
+
+    Configuration is supplied by the application loader, never by CLI arguments.
+    A deployment with no snapshot section retains the legacy unpinned readback
+    path; a partial or non-TEST section is an attempted coordinator deployment
+    and fails closed.
+    """
+    raw = getattr(app_config, "raw", None)
+    if not isinstance(raw, dict):
+        raise TypeError("application configuration is required")
+    declared = "mode" in raw or "billing_snapshot" in raw
+    if not declared:
+        return _trusted_settlement_service
+    validate_test_billing_snapshot_config(app_config)
+
+    def configured(root: Path, consumer: FalBillingConsumer) -> FalLedgerSettlementService:
+        return configured_test_settlement_service(root, consumer, app_config)
+
+    return configured
+
+
 async def main(
     argv: list[str] | None = None,
     *,
@@ -136,6 +214,14 @@ async def main(
     except (TypeError, ValueError):
         _report({"mode": "READ_ONLY", "qualification": "NOT_QUALIFIED", "status": "UNKNOWN"})
         return 1
+
+    settlement_composition = settlement_factory
+    if args.action == "reconcile" and settlement_factory is _trusted_settlement_service:
+        try:
+            settlement_composition = _settlement_factory_from_application_config(get_config())
+        except (OSError, TypeError, ValueError):
+            _report({"mode": "READ_ONLY", "qualification": "NOT_QUALIFIED", "status": "UNKNOWN"})
+            return 1
 
     if args.action == "preflight":
         assert isinstance(validated, str)
@@ -191,7 +277,7 @@ async def main(
             })
         else:
             assert isinstance(validated, BillingReadbackRequest)
-            service = settlement_factory(args.state_root, consumer)
+            service = settlement_composition(args.state_root, consumer)
             result = await service.reconcile(validated.request_id, start=validated.start, end=validated.end)
             _report({"claim": result["claim"], "mode": "READ_ONLY", "qualification": "NOT_QUALIFIED", "request_id": result["request_id"], "status": result["status"]})
         return 0
