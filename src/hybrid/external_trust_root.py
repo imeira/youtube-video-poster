@@ -75,7 +75,9 @@ def _finite_json_float(value: str) -> Decimal:
     return parsed
 
 
-def load_strict_json_snapshot(path: Path | str, label: str, *, contained_by: Path | None = None) -> tuple[dict[str, Any], str]:
+def load_strict_json_snapshot(
+    path: Path | str, label: str, *, contained_by: Path | None = None, include_bytes: bool = False,
+) -> tuple[dict[str, Any], str] | tuple[dict[str, Any], str, bytes]:
     """Strictly parse and hash one accepted byte snapshot after lexical checks.
 
     Path checks occur before the initial open; the parsed document and returned
@@ -133,7 +135,10 @@ def load_strict_json_snapshot(path: Path | str, label: str, *, contained_by: Pat
             os.close(descriptor)
     if not isinstance(raw, dict):
         raise TrustRootVerificationError(f"{label} must be a JSON object")
-    return raw, sha256(raw_bytes).hexdigest()
+    digest = sha256(raw_bytes).hexdigest()
+    if include_bytes:
+        return raw, digest, raw_bytes
+    return raw, digest
 
 
 def load_strict_json(path: Path | str, label: str, *, contained_by: Path | None = None) -> dict[str, Any]:
@@ -203,15 +208,15 @@ def _load_root(path: Path) -> tuple[dict[str, Any], str]:
         if signer_id in ids:
             raise TrustRootVerificationError("external trust root signer IDs must be unique")
         ids.add(signer_id)
-        if key.get("role") != "QA":
-            raise TrustRootVerificationError("external trust root only accepts QA signer roles")
+        if key.get("role") not in {"QA", "LICENSE"}:
+            raise TrustRootVerificationError("external trust root signer role is unsupported")
         scopes = key.get("scopes")
         if (
             not isinstance(scopes, list)
             or not scopes
             or any(not isinstance(scope, str) for scope in scopes)
             or len(scopes) != len(set(scopes))
-            or any(scope != "EVIDENCE:QA" for scope in scopes)
+            or any(scope not in {"EVIDENCE:QA", "TTS:LICENSE"} for scope in scopes)
         ):
             raise TrustRootVerificationError("external trust root signer scopes are unsupported")
         if len(_strict_b64(key.get("public_key_b64"), "public key")) != 32:
@@ -382,3 +387,61 @@ class ExternalTrustRootVerifier:
         return VerifiedEvidence(
             signer_id, "QA", "EVIDENCE:QA", root["version"], provenance,
         )
+
+    def verify_tts_license_declaration(
+        self, packet: object, *, expected: dict[str, str]
+    ) -> VerifiedEvidence:
+        """Verify a source authorization declaration without asserting legal proof.
+
+        This deliberately supplies only cryptographic evidence and configured-root
+        provenance.  Consumers must retain a separate qualification decision.
+        """
+        required = {
+            "schema", "mode", "source_sha256", "script_sha256", "audio_sha256", "timing_sha256",
+            "provider_id", "voice_id", "license_source", "signer_id", "role",
+            "scope", "issued_at", "expires_at", "nonce", "signature_b64",
+        }
+        root = self._load_current_root()
+        if not isinstance(packet, dict) or set(packet) != required:
+            raise TrustRootVerificationError("TTS license declaration must use the closed schema")
+        if packet.get("schema") != "tts-license-declaration-v1" or packet.get("mode") not in {"PREPRODUCTION", "TEST"}:
+            raise TrustRootVerificationError("unsupported TTS license declaration schema")
+        if set(expected) != {"source_sha256", "script_sha256", "audio_sha256", "timing_sha256", "provider_id", "voice_id"}:
+            raise TrustRootVerificationError("expected TTS license bindings must be closed")
+        for field in ("source_sha256", "script_sha256", "audio_sha256", "timing_sha256"):
+            value = _require_hash(packet.get(field), field)
+            if expected[field] != value:
+                raise TrustRootVerificationError(f"TTS license binding mismatch: {field}")
+        for field in ("provider_id", "voice_id"):
+            value = _require_text(packet.get(field), field)
+            if expected[field] != value:
+                raise TrustRootVerificationError(f"TTS license binding mismatch: {field}")
+        _require_text(packet.get("license_source"), "license_source")
+        signer_id = _require_text(packet.get("signer_id"), "signer_id")
+        signer = next((item for item in root["keys"] if item["signer_id"] == signer_id), None)
+        if signer is None or signer_id in root["revoked_signers"]:
+            raise TrustRootVerificationError("TTS license signer is unknown or revoked")
+        if packet.get("role") != "LICENSE" or signer["role"] != "LICENSE":
+            raise TrustRootVerificationError("TTS license role is not authorized")
+        if packet.get("scope") != "TTS:LICENSE" or "TTS:LICENSE" not in signer["scopes"]:
+            raise TrustRootVerificationError("TTS license scope is not authorized")
+        issued_at = _require_time(packet.get("issued_at"), "issued_at")
+        expires_at = _require_time(packet.get("expires_at"), "expires_at")
+        now = self.clock()
+        if type(now) not in (int, float) or not issued_at <= now < expires_at:
+            raise TrustRootVerificationError("TTS license is expired or not yet valid")
+        if not signer["not_before"] <= now < signer["not_after"]:
+            raise TrustRootVerificationError("TTS license signer key is outside its validity window")
+        _require_text(packet.get("nonce"), "nonce", limit=128)
+        signature = _strict_b64(packet.get("signature_b64"), "signature")
+        if len(signature) != 64:
+            raise TrustRootVerificationError("signature must be an Ed25519 signature")
+        body = {key: value for key, value in packet.items() if key != "signature_b64"}
+        try:
+            Ed25519PublicKey.from_public_bytes(_strict_b64(signer["public_key_b64"], "public key")).verify(signature, canonical_json(body))
+        except (InvalidSignature, ValueError) as error:
+            raise TrustRootVerificationError("TTS license signature is invalid") from error
+        provenance = "CRYPTOGRAPHICALLY_VALID_UNAUTHENTICATED_ROOT"
+        if self.trusted_configuration is not None:
+            provenance = "EXTERNAL_CONFIGURATION_VALIDATED"
+        return VerifiedEvidence(signer_id, "LICENSE", "TTS:LICENSE", root["version"], provenance)

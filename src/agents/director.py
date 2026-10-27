@@ -380,6 +380,18 @@ class DirectorAgent:
 
         return import_real_preproduction_handoff(workspace, request_id, manifest_path)
 
+    def import_preproduction_audio_candidate(
+        self, workspace: Path, request_id: str, audio_path: Path, timing_path: Path,
+        license_path: Path, *, app_config: object, clock,
+    ):
+        """Materialize a verified local candidate while retaining blocked TTS state."""
+        from src.hybrid.audio_preproduction import import_real_audio_candidate
+
+        return import_real_audio_candidate(
+            workspace, request_id, audio_path, timing_path, license_path,
+            app_config=app_config, clock=clock,
+        )
+
     def activate_compiled_production(
         self,
         episode_id: str,
