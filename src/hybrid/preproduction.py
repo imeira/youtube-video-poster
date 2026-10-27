@@ -329,6 +329,152 @@ def _load_guarded_manifest(path: Path, reject_path):
     return Manifest.load(path), sha256(path.read_bytes()).hexdigest()
 
 
+_DIRECTOR_IMPORT_OPERATIONS = {
+    "provider_dispatch": "BLOCKED", "render": "BLOCKED", "telegram": "BLOCKED", "publication": "BLOCKED",
+}
+_DIRECTOR_IMPORT_AUTHORITY = {
+    "qualification_status": "NOT_QUALIFIED",
+    "reasons": ["TTS_AUTHENTICATED_RECEIPT_REQUIRED", "TRUST_ROOT_AUTHENTICATION_REQUIRED"],
+    "operation_status": "BLOCKED",
+}
+
+
+def _fsync_directory(path: Path) -> None:
+    """Durably flush a directory where the platform exposes that primitive.
+
+    Windows does not expose POSIX directory ``fsync`` through Python's ``os``;
+    file data is flushed there, but power-loss durability of a directory rename is
+    filesystem/volume dependent and is never represented as a stronger guarantee.
+    """
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _durable_write_bytes(path: Path, value: bytes) -> None:
+    """Write immutable packet bytes and flush the file before publication."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(value)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _durable_json(path: Path, value: dict[str, Any]) -> bytes:
+    raw = json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False).encode("utf-8")
+    _durable_write_bytes(path, raw)
+    return raw
+
+
+def _packet_files(root: Path) -> set[str]:
+    files: set[str] = set()
+    for current, _directories, names in os.walk(root):
+        current_path = reject_reparse_path(Path(current))
+        for name in names:
+            path = reject_reparse_path(current_path / name)
+            if not path.is_file():
+                raise ValueError("materialized packet contains a non-regular file")
+            files.add(path.relative_to(root).as_posix())
+    return files
+
+
+def _validate_packet_path(value: object) -> str:
+    if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value:
+        raise ValueError("materialized packet index path is invalid")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or str(path.as_posix()) != value:
+        raise ValueError("materialized packet index path is invalid")
+    return value
+
+
+def verify_real_preproduction_import(packet_path: Path, request_id: str) -> dict[str, Any]:
+    """Verify only materialized bytes; source paths are never opened on replay."""
+    _validate_id(request_id)
+    packet = reject_reparse_path(Path(packet_path))
+    if not packet.is_dir():
+        raise ValueError("materialized packet is missing")
+    _reject_tree(packet, reject_reparse_path)
+    receipt_path = reject_reparse_path(packet / "receipt.json")
+    index_path = reject_reparse_path(packet / "index.json")
+    if not receipt_path.is_file() or not index_path.is_file():
+        raise ValueError("materialized packet receipt or index is missing")
+    try:
+        receipt = json.loads(receipt_path.read_bytes().decode("utf-8"))
+        index_raw = index_path.read_bytes()
+        index = json.loads(index_raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("materialized packet receipt or index is invalid") from error
+    receipt_binding = dict(receipt) if isinstance(receipt, dict) else {}
+    if receipt_binding.pop("receipt_sha256", None) != _digest_json(receipt_binding):
+        raise ValueError("materialized packet receipt hash mismatch")
+    if (
+        receipt.get("schema") != "preproduction-director-import-receipt-v2"
+        or receipt.get("mode") != "PREPRODUCTION"
+        or receipt.get("request_id") != request_id
+        or receipt.get("operations") != _DIRECTOR_IMPORT_OPERATIONS
+        or receipt.get("authority") != _DIRECTOR_IMPORT_AUTHORITY
+        or receipt.get("packet_index_sha256") != sha256(index_raw).hexdigest()
+    ):
+        raise ValueError("materialized packet receipt contract mismatch")
+    if not isinstance(index, dict) or set(index) != {"schema", "mode", "request_id", "entries", "asset_bindings"}:
+        raise ValueError("materialized packet index schema mismatch")
+    if index.get("schema") != "preproduction-director-import-index-v1" or index.get("mode") != "PREPRODUCTION" or index.get("request_id") != request_id:
+        raise ValueError("materialized packet index contract mismatch")
+    entries = index.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("materialized packet index entries are required")
+    indexed: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256", "size", "kind"}:
+            raise ValueError("materialized packet index entry schema mismatch")
+        relative = _validate_packet_path(entry["path"])
+        if relative in indexed or not isinstance(entry["sha256"], str) or len(entry["sha256"]) != 64 or type(entry["size"]) is not int or entry["size"] < 0 or not isinstance(entry["kind"], str):
+            raise ValueError("materialized packet index entry is invalid")
+        indexed[relative] = entry
+    if _packet_files(packet) != {*indexed, "index.json", "receipt.json"}:
+        raise ValueError("materialized packet has missing or extra files")
+    for relative, entry in indexed.items():
+        raw = reject_reparse_path(packet / relative).read_bytes()
+        if len(raw) != entry["size"] or sha256(raw).hexdigest() != entry["sha256"]:
+            raise ValueError("materialized packet bytes do not match index")
+    bindings = index.get("asset_bindings")
+    if not isinstance(bindings, dict) or set(bindings) != {"manifest", "assets", "sheet"}:
+        raise ValueError("materialized packet asset bindings mismatch")
+    manifest_entry = indexed.get("manifest.json")
+    if manifest_entry is None or bindings.get("manifest") != manifest_entry["sha256"]:
+        raise ValueError("materialized packet manifest binding mismatch")
+    assets = bindings.get("assets")
+    sheet = bindings.get("sheet")
+    if not isinstance(assets, list) or not assets or not isinstance(sheet, dict):
+        raise ValueError("materialized packet asset bindings mismatch")
+    asset_hashes: list[str] = []
+    for item in assets:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+            raise ValueError("materialized packet asset binding mismatch")
+        path = _validate_packet_path(item["path"])
+        if indexed.get(path, {}).get("sha256") != item["sha256"]:
+            raise ValueError("materialized packet asset binding mismatch")
+        asset_hashes.append(item["sha256"])
+    if set(sheet) != {"path", "binding_path", "sha256"} or indexed.get(sheet.get("path"), {}).get("sha256") != sheet.get("sha256"):
+        raise ValueError("materialized packet sheet binding mismatch")
+    binding_raw = reject_reparse_path(packet / _validate_packet_path(sheet["binding_path"])).read_bytes()
+    try:
+        sheet_binding = json.loads(binding_raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("materialized packet sheet binding is invalid") from error
+    if sheet_binding != {"assets": asset_hashes, "sheet": sheet["sha256"]}:
+        raise ValueError("materialized packet sheet binding mismatch")
+    return receipt
+
+
 def _read_real_review_candidate(path: Path, source_sha256: str, script_sha256: str) -> dict[str, Any]:
     """Read the fixed active review as evidence, never as executable authority."""
     path = reject_reparse_path(path)
@@ -426,6 +572,17 @@ def build_real_handoff_preflight(workspace: Path, request_id: str) -> dict[str, 
     if review_path.exists():
         review = _read_real_review_candidate(review_path, hashes["source_sha256"], hashes["script_sha256"])
 
+    import_status = {"status": "REQUIRED", "reason": "DIRECTOR_IMPORT_CONTRACT_REQUIRED"}
+    imported = reject_reparse_path(revision / "director-import")
+    if imported.exists():
+        receipt = verify_real_preproduction_import(imported, request_id)
+        # Freshness is intentionally distinct from packet integrity: the verifier
+        # above reads only packet bytes, while this preflight checks active revision
+        # bindings before treating an old packet as current.
+        if any(receipt.get(key) != hashes[key] for key in ("source_sha256", "script_sha256", "script_qa_sha256")):
+            raise ValueError("Director import receipt does not bind active revision")
+        import_status = {"status": "MATERIALIZED", "receipt_sha256": receipt["receipt_sha256"]}
+
     dependencies = (
         ("TTS_AUTHENTICATED_RECEIPT_REQUIRED", "A configured authenticated trust-root receipt must bind this request and narration."),
         ("MEASURED_NON_SILENT_AUDIO_REQUIRED", "No qualified narration bytes were opened or promoted by this preflight."),
@@ -449,9 +606,169 @@ def build_real_handoff_preflight(workspace: Path, request_id: str) -> dict[str, 
             "timing": "COMPLETE_TIMELINE_RECEIPT_REQUIRED",
             "assets": "FROZEN_APPROVED_ASSET_MANIFEST_REQUIRED",
         },
-        "dependencies": [{"code": code, "status": "REQUIRED", "reason": reason} for code, reason in dependencies],
+        "dependencies": [{"code": code, "status": import_status["status"] if code == "DIRECTOR_IMPORT_CONTRACT_REQUIRED" else "REQUIRED", "reason": import_status.get("reason", reason) if code == "DIRECTOR_IMPORT_CONTRACT_REQUIRED" else reason} for code, reason in dependencies],
+        "director_import": import_status,
         "operations": {"provider_dispatch": "BLOCKED", "render": "BLOCKED", "telegram": "BLOCKED", "publication": "BLOCKED"},
         "note": "Read-only readiness only; this report does not qualify review authority, authorize LIVE work, or complete production.",
+    }
+
+
+def _real_import_evidence(workspace: Path, request_id: str, manifest_path: Path) -> dict[str, Any]:
+    """Read and bind the local evidence needed by the non-activating importer."""
+    preflight = build_real_handoff_preflight(workspace, request_id)
+    root = reject_reparse_path(_root(workspace, request_id))
+    execution = load_preproduction(workspace, request_id)["execution"]
+    revision = reject_reparse_path(root / execution["active_revision"])
+    stages = json.loads(reject_reparse_path(revision / "stages.json").read_text(encoding="utf-8"))
+    paths = {
+        "source": reject_reparse_path(revision / "inputs" / "source.json"),
+        "script": reject_reparse_path(revision / "script" / "script.json"),
+        "script_qa": reject_reparse_path(revision / "qa" / "script-qa.json"),
+        "review": reject_reparse_path(revision / "qa" / "independent-editorial-review-v4.json"),
+        "timeline": reject_reparse_path(revision / "inputs" / "timeline.json"),
+        "storyboard": reject_reparse_path(revision / "storyboard" / "scenes.json"),
+        "storyboard_qa": reject_reparse_path(revision / "qa" / "storyboard.json"),
+    }
+    audio_paths = [reject_reparse_path(path) for path in (revision / "inputs").glob("audio.*")] + [
+        reject_reparse_path(path) for path in (revision / "inputs").glob("narration.*")
+    ]
+    audio_paths = list(dict.fromkeys(audio_paths))
+    if len(audio_paths) != 1:
+        raise ValueError("real import requires exactly one local narration file")
+    paths["audio"] = audio_paths[0]
+    if any(not path.is_file() for path in paths.values()):
+        raise ValueError("real import required evidence is missing")
+    raw = {name: path.read_bytes() for name, path in paths.items()}
+    hashes = {f"{name}_sha256": sha256(value).hexdigest() for name, value in raw.items()}
+    if hashes["source_sha256"] != preflight["bindings"]["source_sha256"] or hashes["script_sha256"] != preflight["bindings"]["script_sha256"]:
+        raise ValueError("real import source/script binding changed")
+    for name, stage_key in (("timeline", "timeline_sha256"), ("audio", "audio_sha256"), ("storyboard", "sha256"), ("storyboard_qa", "qa_sha256")):
+        if stages.get("storyboard", {}).get(stage_key) != hashes[f"{name}_sha256"]:
+            raise ValueError(f"real import {name} hash does not bind active stage")
+    timeline = json.loads(raw["timeline"].decode("utf-8"))
+    script = json.loads(raw["script"].decode("utf-8"))
+    if timeline.get("mode") != "PREPRODUCTION" or timeline.get("audio_sha256") != hashes["audio_sha256"] or timeline.get("script_sha256") != hashes["script_sha256"] or timeline.get("source_sha256") != hashes["source_sha256"]:
+        raise ValueError("real import timeline does not bind preproduction evidence")
+    _audio_raw, _audio_sha, duration, _suffix = _read_local_audio(paths["audio"])
+    if _audio_sha != hashes["audio_sha256"] or abs(float(timeline.get("audio_duration_s", -1)) - duration) > 0.02:
+        raise ValueError("real import narration is not measured against its timeline")
+    timestamps = timeline.get("sentence_timestamps")
+    if not isinstance(timestamps, list) or len(timestamps) != len(script.get("segments", [])):
+        raise ValueError("real import timeline must cover every script segment")
+    previous = 0.0
+    for timestamp, segment in zip(timestamps, script["segments"], strict=True):
+        if not isinstance(timestamp, dict) or timestamp.get("text") != segment.get("narration"):
+            raise ValueError("real import timeline narration differs from script")
+        start, end = float(timestamp["start"]), float(timestamp["end"])
+        if abs(start - previous) > 0.000001 or end <= start or abs(float(timestamp.get("duration", -1)) - (end - start)) > 0.000001:
+            raise ValueError("real import timestamps must be contiguous measured intervals")
+        previous = end
+    if abs(previous - duration) > 0.02:
+        raise ValueError("real import timestamps do not end at decoded audio duration")
+    manifest_path = reject_reparse_path(Path(manifest_path))
+    if not manifest_path.is_file():
+        raise ValueError("real import manifest is required")
+    manifest, manifest_sha = _load_guarded_manifest(manifest_path, reject_reparse_path)
+    if manifest.mode != "LIVE" or "TEST" in manifest.reviewer.upper():
+        raise ValueError("real import rejects TEST manifest evidence")
+    for asset in (*manifest.assets, manifest.sheet):
+        reject_reparse_path(asset.path)
+        reject_reparse_path(asset.path.with_suffix(".binding.json")) if asset == manifest.sheet else None
+        asset.verify("LIVE")
+        if "TEST" in asset.reviewer.upper():
+            raise ValueError("real import rejects TEST asset evidence")
+    manifest.verify("LIVE")
+    return {"root": root, "revision": revision, "paths": paths, "raw": raw, "hashes": hashes, "manifest": manifest, "manifest_sha256": manifest_sha, "request_id": request_id}
+
+
+def import_real_preproduction_handoff(workspace: Path, request_id: str, manifest_path: Path) -> dict[str, Any]:
+    """Atomically materialize verified PREPRODUCTION evidence for Director intake.
+
+    This is deliberately only a local import contract. It neither instantiates a
+    Director nor activates/render/dispatches anything.
+    """
+    _validate_id(request_id)
+    evidence = _real_import_evidence(workspace, request_id, manifest_path)
+    revision, raw = evidence["revision"], evidence["raw"]
+    packet = reject_reparse_path(revision / "director-import")
+    receipt_base = {
+        "schema": "preproduction-director-import-receipt-v2", "mode": "PREPRODUCTION", "request_id": request_id,
+        "source_sha256": evidence["hashes"]["source_sha256"], "script_sha256": evidence["hashes"]["script_sha256"],
+        "script_qa_sha256": evidence["hashes"]["script_qa_sha256"], "review_sha256": evidence["hashes"]["review_sha256"],
+        "timeline_sha256": evidence["hashes"]["timeline_sha256"], "audio_sha256": evidence["hashes"]["audio_sha256"],
+        "storyboard_sha256": evidence["hashes"]["storyboard_sha256"], "storyboard_qa_sha256": evidence["hashes"]["storyboard_qa_sha256"],
+        "manifest_sha256": evidence["manifest_sha256"], "active_revision": str(revision.relative_to(evidence["root"])).replace("\\", "/"),
+        "authority": _DIRECTOR_IMPORT_AUTHORITY, "operations": _DIRECTOR_IMPORT_OPERATIONS,
+    }
+
+    def existing() -> dict[str, Any]:
+        receipt = verify_real_preproduction_import(packet, request_id)
+        if any(receipt.get(key) != value for key, value in receipt_base.items() if key not in {"packet_index_sha256", "receipt_sha256"}):
+            raise ValueError("Director import conflicts with changed immutable evidence")
+        return {
+            "mode": "PREPRODUCTION", "packet_path": str(packet), "receipt_sha256": receipt["receipt_sha256"],
+            "operations": receipt["operations"], "qualification_status": receipt["authority"]["qualification_status"],
+        }
+
+    with file_lock(revision / ".director-import.lock"):
+        refreshed = _real_import_evidence(workspace, request_id, manifest_path)
+        if refreshed["hashes"] != evidence["hashes"] or refreshed["manifest_sha256"] != evidence["manifest_sha256"]:
+            raise ValueError("real import evidence changed before locked materialization")
+        if packet.exists():
+            return existing()
+        for stale in revision.glob(".di-*"):
+            _reject_tree(stale, reject_reparse_path)
+            shutil.rmtree(stale)
+        staging = Path(tempfile.mkdtemp(prefix=".di-", dir=revision))
+        files: list[tuple[str, bytes, str]] = []
+        for name in ("source", "script", "script_qa", "review", "timeline", "audio", "storyboard", "storyboard_qa"):
+            relative = f"evidence/{name}.bin"
+            _durable_write_bytes(staging / relative, raw[name])
+            files.append((relative, raw[name], "evidence"))
+        manifest_raw = reject_reparse_path(Path(manifest_path)).read_bytes()
+        _durable_write_bytes(staging / "manifest.json", manifest_raw)
+        files.append(("manifest.json", manifest_raw, "manifest"))
+        assets = staging / "assets"
+        assets.mkdir()
+        asset_bindings: list[dict[str, str]] = []
+        sheet_binding: dict[str, str] | None = None
+        for index, asset in enumerate((*evidence["manifest"].assets, evidence["manifest"].sheet), 1):
+            relative = f"assets/{index}-{asset.path.name}"
+            asset_raw = reject_reparse_path(asset.path).read_bytes()
+            _durable_write_bytes(staging / relative, asset_raw)
+            if sha256(asset_raw).hexdigest() != asset.sha256:
+                raise ValueError("Director import copied asset hash mismatch")
+            files.append((relative, asset_raw, "asset" if asset != evidence["manifest"].sheet else "sheet"))
+            if asset == evidence["manifest"].sheet:
+                binding_relative = f"assets/{index}-{asset.path.with_suffix('.binding.json').name}"
+                binding_raw = reject_reparse_path(asset.path.with_suffix(".binding.json")).read_bytes()
+                _durable_write_bytes(staging / binding_relative, binding_raw)
+                files.append((binding_relative, binding_raw, "sheet_binding"))
+                sheet_binding = {"path": relative, "binding_path": binding_relative, "sha256": asset.sha256}
+            else:
+                asset_bindings.append({"path": relative, "sha256": asset.sha256})
+        if sheet_binding is None:
+            raise ValueError("Director import sheet binding is required")
+        index = {
+            "schema": "preproduction-director-import-index-v1", "mode": "PREPRODUCTION", "request_id": request_id,
+            "entries": [
+                {"path": relative, "sha256": sha256(value).hexdigest(), "size": len(value), "kind": kind}
+                for relative, value, kind in sorted(files)
+            ],
+            "asset_bindings": {"manifest": sha256(manifest_raw).hexdigest(), "assets": asset_bindings, "sheet": sheet_binding},
+        }
+        index_raw = _durable_json(staging / "index.json", index)
+        receipt_base["packet_index_sha256"] = sha256(index_raw).hexdigest()
+        receipt_base["receipt_sha256"] = _digest_json(receipt_base)
+        _durable_json(staging / "receipt.json", receipt_base)
+        for directory in (staging / "evidence", staging / "assets", staging):
+            _fsync_directory(directory)
+        os.replace(staging, packet)
+        _fsync_directory(revision)
+        verified = verify_real_preproduction_import(packet, request_id)
+    return {
+        "mode": "PREPRODUCTION", "packet_path": str(packet), "receipt_sha256": verified["receipt_sha256"],
+        "operations": verified["operations"], "qualification_status": verified["authority"]["qualification_status"],
     }
 
 

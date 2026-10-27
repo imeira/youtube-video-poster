@@ -88,6 +88,48 @@ The fixed active review location is `qa/independent-editorial-review-v4.json`. A
 
 The result is an ephemeral sanitized report with `TTS_REQUIRED`, a structured ordered dependency list, binding hashes, explicit missing narration/timing/assets, and `next_required_action: OBTAIN_TTS_AUTHENTICATED_RECEIPT`. It never writes request/stage/cache files, creates a database/directory/lock, opens unavailable media, or constructs a provider, Director, executor, reservation, or delivery service. It does not claim production is complete or that its own report enables LIVE work.
 
+## Local immutable Director import
+
+`import_real_preproduction_handoff` is the only local materialization route from
+an active `PREPRODUCTION` revision to a Director-readable packet.  It is not an
+activation route: it never constructs a provider, executor, delivery service,
+Telegram client, renderer, publication client, budget reservation, or LIVE
+authority. `DirectorAgent.import_preproduction_handoff` is a narrow facade over
+that same verifier and returns the local receipt; it cannot dispatch or render.
+
+Before writing a byte it rejects reparse points on the request, revision,
+source, script, QA, audio, timeline, storyboard, manifest, every manifest
+asset/binding, and existing import tree. It rehashes the request-bound source
+revision; the script, deterministic QA, timeline, audio, storyboard, and
+independent-review source/script bindings; decodes and measures non-silent
+audio; verifies contiguous measured timestamps against the decoded duration;
+and verifies the existing frozen-asset manifest and contact-sheet binding.
+The manifest must be existing `LIVE` evidence and an input marked `TEST` is
+rejected rather than relabelled or promoted.
+
+All checks complete before mutation. Under an OS-released per-revision lock the
+importer copies only verified immutable bytes into a staging directory, writes a
+closed path/hash/size index and then the receipt that binds that index, fsyncs
+every file, and publishes by rename. On platforms where Python exposes directory
+`fsync`, it flushes the staging and parent directories as well. Windows has no
+POSIX directory-`fsync` primitive in Python: file flushes and rename are used,
+but power-loss durability of the directory entry remains filesystem/volume
+dependent and is not claimed. The importer reopens the published packet through
+the same materialized-byte verifier before returning success; a crash before or
+a validation failure after rename never returns success. Stale staging directories
+remain auditable until a later verified resume removes them.
+
+The packet contains the manifest, every asset and the contact-sheet binding as
+materialized bytes. Replay integrity uses only those packet bytes; it rejects an
+absent, changed, extra, reparse, or index/binding-mismatched file without opening
+the original manifest or asset source. Active-revision freshness is checked
+separately when preflight compares receipt bindings to the current revision.
+A matching final receipt is replay-idempotent; changed inputs conflict and never
+overwrite it. The receipt and Director return explicitly state
+`qualification_status: NOT_QUALIFIED`, the missing authenticated TTS/trust-root
+reasons, and blocked operations. Its `PREPRODUCTION` mode cannot promote TEST or
+otherwise authorize dispatch, render, notify Telegram, publish, or execute LIVE.
+
 ## Negative acceptance tests
 
 1. A source-bound narrative is emitted as complete, exact prose with no fixed target duration.

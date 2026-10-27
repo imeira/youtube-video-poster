@@ -370,6 +370,16 @@ class DirectorAgent:
         )
         return AutonomousCompiledTestAdapter(runner, pipeline)
 
+    def import_preproduction_handoff(self, workspace: Path, request_id: str, manifest_path: Path):
+        """Verify one local PREPRODUCTION import without activating production.
+
+        The importer deliberately stops before state transition, pipeline,
+        provider, rendering, messaging, or publication construction.
+        """
+        from src.hybrid.preproduction import import_real_preproduction_handoff
+
+        return import_real_preproduction_handoff(workspace, request_id, manifest_path)
+
     def activate_compiled_production(
         self,
         episode_id: str,
