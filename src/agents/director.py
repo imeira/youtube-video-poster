@@ -9,9 +9,12 @@ Responsibility: Coordinate all agents, manage state machine, enforce budget.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
+import stat
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -418,6 +421,192 @@ class DirectorAgent:
             app_config=app_config,
             clock=clock,
         )
+
+    async def readback_elevenlabs_origin_from_submission(
+        self,
+        *,
+        candidate_receipt_path: Path,
+        submission_receipt_path: Path,
+        app_config: object,
+        readback_service,
+    ) -> dict[str, object]:
+        """Read one already-submitted TEST item without activating ElevenLabs.
+
+        A caller cannot provide a history ID. It comes only from a durable receipt
+        below the configured evidence root and must bind the immutable candidate.
+        No real submission-receipt producer exists, so production fails before a
+        factory, credential, or GET can be reached.
+        """
+        from src.hybrid.elevenlabs_origin_readback import ElevenLabsHistoryBinding
+        from src.hybrid.external_trust_root import (
+            TrustRootVerificationError,
+            load_strict_json_snapshot,
+        )
+        from src.hybrid.locks import reject_reparse_path
+
+        raw = getattr(app_config, "raw", None)
+        configured = raw.get("external_trust_root") if isinstance(raw, dict) else None
+        evidence_root = configured.get("evidence_root") if isinstance(configured, dict) else None
+        if not isinstance(evidence_root, str) or not evidence_root:
+            raise ValueError("configured evidence root is required before readback service")
+        root = Path(evidence_root)
+        if not root.is_absolute():
+            raise ValueError("configured evidence root is invalid before readback service")
+        try:
+            candidate, _candidate_file_sha, _ = load_strict_json_snapshot(
+                candidate_receipt_path, "immutable audio candidate receipt", contained_by=root, include_bytes=True,
+            )
+            submission, _submission_file_sha, _ = load_strict_json_snapshot(
+                submission_receipt_path, "durable submission receipt", contained_by=root, include_bytes=True,
+            )
+        except TrustRootVerificationError as error:
+            raise ValueError("missing or invalid durable submission receipt") from error
+
+        candidate_fields = {
+            "schema", "mode", "candidate_class", "request_id", "source_sha256",
+            "script_sha256", "audio_sha256", "provider_id", "voice_id", "receipt_sha256",
+        }
+        submission_fields = {
+            "schema", "mode", "request_id", "provider", "history_item_id",
+            "source_sha256", "script_sha256", "audio_sha256", "voice_id",
+            "candidate_receipt_sha256", "receipt_sha256",
+        }
+
+        def receipt_digest(receipt: dict[str, object]) -> str:
+            projection = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+            return hashlib.sha256(
+                json.dumps(projection, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+
+        if set(candidate) != candidate_fields or candidate.get("schema") != "elevenlabs-origin-readback-candidate-fixture-v1":
+            raise ValueError("immutable candidate receipt contract is unavailable")
+        if candidate.get("receipt_sha256") != receipt_digest(candidate):
+            raise ValueError("immutable candidate receipt_sha256 is invalid")
+        if "history_item_id" not in submission:
+            raise ValueError("history_item_id is required in durable submission receipt")
+        if set(submission) != submission_fields:
+            raise ValueError("durable submission receipt contract is invalid")
+        if submission.get("receipt_sha256") != receipt_digest(submission):
+            raise ValueError("durable submission receipt_sha256 is invalid")
+        if candidate.get("mode") != "TEST" or candidate.get("candidate_class") != "TEST":
+            raise ValueError("real immutable ElevenLabs candidate producer is unavailable")
+        if submission.get("mode") != "TEST":
+            raise ValueError("real submission receipt producer is unavailable")
+        if submission.get("schema") != "elevenlabs-history-submission-receipt-fixture-v1":
+            raise ValueError("durable submission receipt contract is invalid")
+        bindings = {"request_id", "source_sha256", "script_sha256", "audio_sha256", "voice_id"}
+        if any(submission.get(key) != candidate.get(key) for key in bindings) or submission.get(
+            "candidate_receipt_sha256"
+        ) != candidate.get("receipt_sha256"):
+            raise ValueError("submission receipt does not bind immutable candidate")
+        if submission.get("provider") != "elevenlabs" or candidate.get("provider_id") != "elevenlabs":
+            raise ValueError("submission receipt provider binding is invalid")
+        if not all(
+            isinstance(candidate.get(key), str) and len(candidate[key]) == 64
+            and all(char in "0123456789abcdef" for char in candidate[key])
+            for key in ("source_sha256", "script_sha256", "audio_sha256")
+        ):
+            raise ValueError("immutable candidate hash binding is invalid")
+        if not callable(readback_service):
+            raise TypeError("TEST readback service is required")
+        binding = ElevenLabsHistoryBinding(
+            request_id=candidate["request_id"],
+            history_item_id=submission.get("history_item_id"),
+            expected_script_sha256=candidate["script_sha256"],
+            expected_voice_id=candidate["voice_id"],
+            expected_provider="elevenlabs",
+            expected_source="TTS",
+            expected_audio_sha256=candidate["audio_sha256"],
+        )
+        origin = await readback_service(binding, root / "elevenlabs-origin-readback")
+        quarantine = root / "elevenlabs-origin-readback"
+        expected_audio_path = quarantine / f"{submission['history_item_id']}.audio"
+        expected_receipt_path = quarantine / f"{submission['history_item_id']}.receipt.json"
+        if (
+            Path(getattr(origin, "audio_path", "")) != expected_audio_path
+            or Path(getattr(origin, "receipt_path", "")) != expected_receipt_path
+        ):
+            raise ValueError("readback service returned paths outside the configured quarantine")
+        try:
+            receipt, _receipt_file_sha, receipt_bytes = load_strict_json_snapshot(
+                expected_receipt_path,
+                "materialized origin readback receipt",
+                contained_by=quarantine,
+                include_bytes=True,
+            )
+            audio_path = reject_reparse_path(expected_audio_path)
+            before = os.stat(audio_path, follow_symlinks=False)
+            descriptor = os.open(
+                audio_path,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
+                    raise ValueError("materialized origin audio is missing or not a regular file")
+                with os.fdopen(descriptor, "rb") as stream:
+                    descriptor = None
+                    audio = stream.read()
+                after = os.stat(audio_path, follow_symlinks=False)
+                if not os.path.samestat(opened, after):
+                    raise ValueError("materialized origin audio changed during read")
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+        except (TrustRootVerificationError, ValueError, OSError) as error:
+            raise ValueError("materialized origin readback is unavailable") from error
+        if receipt_bytes != json.dumps(
+            receipt, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8") or getattr(origin, "receipt", None) != receipt:
+            raise ValueError("materialized origin receipt differs from callback result")
+        receipt_fields = {
+            "schema", "request_id", "provider", "history_item_id", "provider_request_id", "source",
+            "voice_id", "model_id", "date_unix", "output_format", "returned_text_sha256",
+            "history_metadata_sha256", "voice_metadata_sha256", "audio_sha256", "audio_bytes",
+            "provider_output_hash", "authenticated_readback", "origin_provenance",
+            "voice_access_observation", "commercial_license", "acoustic_alignment",
+            "qualification_status", "status", "operations", "receipt_sha256",
+        }
+        if (
+            set(receipt) != receipt_fields
+            or receipt.get("schema") != "elevenlabs-history-origin-readback-v1"
+            or receipt.get("receipt_sha256") != receipt_digest(receipt)
+        ):
+            raise ValueError("materialized origin receipt schema or canonical hash is invalid")
+        if hashlib.sha256(audio).hexdigest() != receipt.get("audio_sha256") or len(audio) != receipt.get("audio_bytes"):
+            raise ValueError("materialized origin audio does not match its receipt")
+        origin_bindings = {
+            "request_id": candidate["request_id"],
+            "history_item_id": submission["history_item_id"],
+            "provider": "elevenlabs",
+            "source": "TTS",
+            "returned_text_sha256": candidate["script_sha256"],
+            "voice_id": candidate["voice_id"],
+            "audio_sha256": candidate["audio_sha256"],
+        }
+        if any(receipt.get(key) != value for key, value in origin_bindings.items()):
+            raise ValueError("materialized origin receipt does not close candidate and submission bindings")
+        if (
+            receipt.get("authenticated_readback") != "TEST_NOT_AUTHORITY"
+            or receipt.get("qualification_status") != "NOT_QUALIFIED"
+            or receipt.get("status") != "TTS_REQUIRED"
+            or receipt.get("operations") != {
+                "provider_dispatch": "BLOCKED", "render": "BLOCKED",
+                "telegram": "BLOCKED", "publication": "BLOCKED",
+            }
+        ):
+            raise ValueError("injected readback service returned an unsafe authority claim")
+        return {
+            "candidate_receipt_sha256": candidate["receipt_sha256"],
+            "submission_receipt_sha256": submission["receipt_sha256"],
+            "origin_receipt_sha256": receipt["receipt_sha256"],
+            "audio_path": str(origin.audio_path),
+            "receipt_path": str(origin.receipt_path),
+            "authenticated_readback": "TEST_NOT_AUTHORITY",
+            "qualification_status": "NOT_QUALIFIED",
+            "status": "TTS_REQUIRED",
+            "operations": dict(receipt["operations"]),
+        }
 
     def activate_compiled_production(
         self,

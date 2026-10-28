@@ -113,6 +113,43 @@ license proof, acoustic/timing verification, billing settlement, authorization, 
 production promotion. Audio is preserved exactly as received; this adapter performs
 no decode, resample, transcode, or silent conversion.
 
+## Director TEST-only facade
+
+`DirectorAgent.readback_elevenlabs_origin_from_submission(...)` is the sole
+consumer connection. It accepts no `history_item_id` argument and does not construct
+the production transport, credential supplier, provider configuration, renderer,
+Telegram sender, budget reservation, or LIVE pipeline. Before it calls an injected
+service, it strictly snapshots both files below the application-configured
+`external_trust_root.evidence_root`:
+
+- immutable candidate fixture receipt: source SHA-256, literal script SHA-256, exact
+  audio SHA-256, ElevenLabs voice/provider, request ID, TEST class/mode, and its
+  canonical receipt hash;
+- durable submission fixture receipt: the pre-persisted history ID plus each of those
+  exact candidate bindings and the candidate receipt hash.
+
+The façade permits only the explicit `TEST` fixture contracts
+`elevenlabs-origin-readback-candidate-fixture-v1` and
+`elevenlabs-history-submission-receipt-fixture-v1`. The injected service must return
+`TEST_NOT_AUTHORITY`, `NOT_QUALIFIED`, `TTS_REQUIRED`, and all four blocked
+operations. The Director accepts neither those callback claims nor the callback
+receipt self-hash as authority: it reopens the exact expected materialized receipt
+and audio paths under the configured quarantine through reparse-safe snapshots. The
+receipt bytes must be canonical, its self-hash must cover its closed existing-service
+schema, and its request/history/provider/source/script/voice/audio bindings must
+exactly match both fixture receipts and the snapshot audio bytes. A missing/mutated
+receipt, stale source, swapped audio/hash, path escape, wrong source/script/voice,
+absent history ID, invalid/missing configured evidence root, existing quarantine
+target, or mismatched raw bytes fails closed.
+The raw provider bytes are never decoded, converted, resampled, or substituted: a
+raw MP3 cannot satisfy a candidate's exact PCM/WAV hash.
+
+There is currently **no real submission-receipt contract producer**. Therefore
+non-TEST candidate or submission mode is explicitly blocked before any service,
+factory, credential, or GET. This is not a production ElevenLabs activation; a future
+producer must define and persist an independently authoritative receipt before the
+Director can expose a production factory path.
+
 ## Tests
 
 `tests/unit/test_elevenlabs_origin_readback.py` exercises the public service end to
