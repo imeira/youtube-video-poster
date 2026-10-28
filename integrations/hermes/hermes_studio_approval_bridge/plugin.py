@@ -1,24 +1,28 @@
 """Standalone, disabled-by-default Hermes plugin template.
 
-Deployment must pass a configured bridge and a loopback-only transport to
-``register``. This file has no import-time registration or network side effect.
+Deployment must pass a configured bridge to ``register``. This file has no
+import-time registration or network side effect. A normal ``False`` recognition
+continues Hermes dispatch; an exception after a raw update passes the configured
+sender/chat/reply boundary is conservatively consumed as uncertain.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import secrets
 import time
-from collections.abc import Callable
 from inspect import isawaitable
 from types import SimpleNamespace
 
-from src.approval.hermes_inbound_bridge import HermesBridgeConfig, canonical_envelope
+from src.approval.hermes_bridge_composition import HermesApprovalBridgeComposition
+from src.approval.hermes_inbound_bridge import canonical_envelope
 
 _DOMAIN = b"hermes-studio-approval-bridge/v1\0"
 
 
-def _raw_update(update: object, config: HermesBridgeConfig) -> bytes | None:
+def _raw_update(update: object, bridge: HermesApprovalBridgeComposition) -> bytes | None:
+    config = bridge.config
     message = getattr(update, "effective_message", None)
     sender, chat, reply = (getattr(message, name, None) for name in ("from_user", "chat", "reply_to_message"))
     update_id, message_id = getattr(update, "update_id", None), getattr(message, "message_id", None)
@@ -33,36 +37,36 @@ def _raw_update(update: object, config: HermesBridgeConfig) -> bytes | None:
     return json.dumps({"update_id": update_id, "message": {"message_id": message_id, "from": {"id": sender_id, "is_bot": False}, "chat": {"id": chat_id, "type": chat.type}, "reply_to_message": {"message_id": reply_id}, "text": text}}, separators=(",", ":")).encode()
 
 
-def register(
-    ctx: object,
-    *,
-    config: HermesBridgeConfig | None = None,
-    transport: Callable[[bytes, dict[str, str]], object] | None = None,
-    recognize: Callable[[bytes], bool] | None = None,
-) -> bool:
-    """Register one bound approval handler only when trusted dependencies exist."""
-    if config is None or transport is None or recognize is None:
+def register(ctx: object, *, bridge: HermesApprovalBridgeComposition | None = None) -> bool:
+    """Register one pre-core handler bound to the composition's ingress and recognizer."""
+    if not isinstance(bridge, HermesApprovalBridgeComposition):
         return False
 
     def factory(application: object, _adapter: object) -> None:
         async def callback(update: object, _context: object) -> None:
-            raw = _raw_update(update, config)
+            raw = _raw_update(update, bridge)
             if raw is None:
                 return
             try:
-                recognized = recognize(raw)
-            except Exception:  # noqa: BLE001 - an uncertain binding must not reach Studio or core
+                recognized = await asyncio.to_thread(bridge.recognize, raw)
+            except Exception:  # noqa: BLE001 - raw-bound lookup uncertainty must not reach Studio or core
+                if application_handler_stop is not None:
+                    raise application_handler_stop
                 return
             if recognized is not True:
                 return
+            config = bridge.config
             envelope = canonical_envelope(config, raw, nonce=secrets.token_hex(16), timestamp=int(time.time()))
             signature = hmac.new(config.hmac_key.encode(), _DOMAIN + envelope, hashlib.sha256).hexdigest()
             try:
-                # One local attempt only. No Telegram API, polling, webhook, or reply.
-                delivered = transport(envelope, {"X-Studio-Bridge-Version": "1", "X-Studio-Bridge-Instance": config.instance_id, "X-Studio-Bridge-Signature": f"v1={signature}"})
+                delivered = await asyncio.to_thread(
+                    bridge.deliver,
+                    envelope,
+                    {"X-Studio-Bridge-Version": "1", "X-Studio-Bridge-Instance": config.instance_id, "X-Studio-Bridge-Signature": f"v1={signature}"},
+                )
                 if isawaitable(delivered):
                     await delivered
-            except Exception:  # noqa: BLE001 - delivery may be ambiguous; never retry or expose it to core
+            except Exception:  # noqa: BLE001 - ambiguous local delivery remains locally consumed
                 if application_handler_stop is not None:
                     raise application_handler_stop
                 return

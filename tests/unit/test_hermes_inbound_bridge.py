@@ -9,6 +9,7 @@ import importlib
 import json
 import sqlite3
 import sys
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,8 +74,12 @@ def _signed(config: HermesBridgeConfig, raw: bytes, *, nonce: str = "nonce-0001"
     return envelope, {"X-Studio-Bridge-Version": "1", "X-Studio-Bridge-Instance": config.instance_id, "X-Studio-Bridge-Signature": f"v1={signature}"}
 
 
-def test_actual_plugin_registration_uses_single_isolated_handler_and_forwards_normalized_update():
+def test_actual_plugin_registration_uses_single_isolated_handler_and_forwards_normalized_update(tmp_path: Path):
     from integrations.hermes.hermes_studio_approval_bridge.plugin import register
+    from src.approval.hermes_bridge_composition import HermesApprovalBridgeComposition
+
+    service, _, _ = _service(tmp_path)
+    bridge = HermesApprovalBridgeComposition(config=_config(), service=service)
 
     class App:
         def __init__(self): self.handlers = []
@@ -83,8 +88,10 @@ def test_actual_plugin_registration_uses_single_isolated_handler_and_forwards_no
         def __init__(self): self.application = App(); self.factories = []
         def register_platform_handler(self, platform, factory): self.factories.append((platform, factory))
     captured: list[bytes] = []
+    delivered = bridge.deliver
+    bridge.deliver = lambda body, headers: captured.append(body) or delivered(body, headers)
     ctx = Context()
-    register(ctx, config=_config(), transport=lambda body, headers: captured.append(body) or 200, recognize=lambda _raw: True)
+    assert register(ctx, bridge=bridge)
     assert [name for name, _ in ctx.factories] == ["telegram"]
     factory = ctx.factories[0][1]
     factory(ctx.application, object())
@@ -99,9 +106,10 @@ def test_actual_plugin_registration_uses_single_isolated_handler_and_forwards_no
 
 def test_registered_handler_local_transport_reuses_studio_approval_entrypoint(tmp_path: Path):
     from integrations.hermes.hermes_studio_approval_bridge.plugin import register
+    from src.approval.hermes_bridge_composition import HermesApprovalBridgeComposition
 
     service, episode, artifact = _service(tmp_path)
-    ingress = HermesStudioIngress(config=_config(), service=service)
+    bridge = HermesApprovalBridgeComposition(config=_config(), service=service)
 
     class App:
         def __init__(self): self.handler = None
@@ -115,8 +123,10 @@ def test_registered_handler_local_transport_reuses_studio_approval_entrypoint(tm
             self.factory = factory
 
     results = []
+    delivered = bridge.deliver
+    bridge.deliver = lambda body, headers: results.append(delivered(body, headers)) or results[-1]
     ctx, app = Context(), App()
-    assert register(ctx, config=_config(), transport=lambda body, headers: results.append(ingress.handle(body, headers) or 200), recognize=lambda _raw: True)
+    assert register(ctx, bridge=bridge)
     ctx.factory(app, object())
     update = SimpleNamespace(update_id=1, effective_message=SimpleNamespace(message_id=99, text="APROVAR THUMBNAIL EP8", from_user=SimpleNamespace(id=int(SENDER_ID), is_bot=False), chat=SimpleNamespace(id=int(CHAT_ID), type="private"), reply_to_message=SimpleNamespace(message_id=42)))
     asyncio.run(app.handler.callback(update, object()))
@@ -176,12 +186,12 @@ def test_missing_bridge_configuration_is_disabled_and_plugin_registers_nothing()
     from integrations.hermes.hermes_studio_approval_bridge.plugin import register
     class Context:
         def register_platform_handler(self, *_args): raise AssertionError("must not register")
-    assert register(Context(), config=None, transport=None) is False
+    assert register(Context(), bridge=None) is False
     with pytest.raises(ValueError, match="HMAC"):
         _config(secret=None)
 
 
-def test_plugin_stops_only_bound_approval_replies_before_core_dispatch(monkeypatch: pytest.MonkeyPatch):
+def test_plugin_stops_only_bound_approval_replies_before_core_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A fake PTB dispatcher proves ApplicationHandlerStop controls group 0."""
     class ApplicationHandlerStop(Exception):
         pass
@@ -227,9 +237,14 @@ def test_plugin_stops_only_bound_approval_replies_before_core_dispatch(monkeypat
             chat=SimpleNamespace(id=int(CHAT_ID), type="private"), reply_to_message=SimpleNamespace(message_id=reply_to),
         ))
 
-    for transport in (lambda _body, _headers: 200, lambda _body, _headers: 409, lambda _body, _headers: (_ for _ in ()).throw(RuntimeError("ambiguous local failure"))):
+    from src.approval.hermes_bridge_composition import HermesApprovalBridgeComposition
+
+    for index, transport in enumerate((lambda _body, _headers: 200, lambda _body, _headers: 409, lambda _body, _headers: (_ for _ in ()).throw(RuntimeError("ambiguous local failure")))):
         app, ctx, core_calls, bridge_calls = App(), Context(), [], []
-        assert plugin.register(ctx, config=_config(), transport=lambda body, headers, send=transport, calls=bridge_calls: calls.append(body) or send(body, headers), recognize=lambda raw: json.loads(raw)["message"]["reply_to_message"]["message_id"] == 42)
+        service, _, _ = _service(tmp_path / f"bound-{index}")
+        bridge = HermesApprovalBridgeComposition(config=_config(), service=service)
+        bridge.deliver = lambda body, headers, send=transport, calls=bridge_calls: calls.append(body) or send(body, headers)
+        assert plugin.register(ctx, bridge=bridge)
         ctx.factory(app, object())
         async def core(_update, _context, calls=core_calls):
             calls.append("core")
@@ -239,7 +254,10 @@ def test_plugin_stops_only_bound_approval_replies_before_core_dispatch(monkeypat
         assert core_calls == []
 
     app, ctx, core_calls, bridge_calls = App(), Context(), [], []
-    assert plugin.register(ctx, config=_config(), transport=lambda body, _headers: bridge_calls.append(body), recognize=lambda raw: json.loads(raw)["message"]["reply_to_message"]["message_id"] == 42)
+    service, _, _ = _service(tmp_path / "unrelated")
+    bridge = HermesApprovalBridgeComposition(config=_config(), service=service)
+    bridge.deliver = lambda body, _headers: bridge_calls.append(body)
+    assert plugin.register(ctx, bridge=bridge)
     ctx.factory(app, object())
     async def unrelated_core(_update, _context):
         core_calls.append("core")
@@ -247,6 +265,141 @@ def test_plugin_stops_only_bound_approval_replies_before_core_dispatch(monkeypat
     assert app.dispatch(update(777)) == "completed"
     assert bridge_calls == []
     assert core_calls == ["core"]
+
+    app, ctx, core_calls, bridge_calls = App(), Context(), [], []
+    service, _, _ = _service(tmp_path / "uncertain-recognition")
+    bridge = HermesApprovalBridgeComposition(config=_config(), service=service)
+    bridge.recognize = lambda _raw: (_ for _ in ()).throw(RuntimeError("uncertain receipt lookup"))
+    bridge.deliver = lambda body, _headers: bridge_calls.append(body)
+    assert plugin.register(ctx, bridge=bridge)
+    ctx.factory(app, object())
+    async def uncertain_core(_update, _context):
+        core_calls.append("core")
+    app.add_handler(SimpleNamespace(callback=uncertain_core), group=0)
+    assert app.dispatch(update(42)) == "stopped"
+    assert bridge_calls == []
+    assert core_calls == []
+
+
+def test_plugin_offloads_slow_recognition_so_the_event_loop_heartbeats_and_delivery_is_not_lost(tmp_path: Path):
+    """SQLite-backed recognition must not stall unrelated PTB loop work."""
+    from integrations.hermes.hermes_studio_approval_bridge.plugin import register
+    from src.approval.hermes_bridge_composition import HermesApprovalBridgeComposition
+
+    service, _, _ = _service(tmp_path)
+    bridge = HermesApprovalBridgeComposition(config=_config(), service=service)
+    original_recognize = bridge.recognize
+    recognition_started = threading.Event()
+    release_recognition = threading.Event()
+    deliveries: list[object] = []
+
+    def slow_recognize(raw: bytes) -> bool:
+        recognition_started.set()
+        assert release_recognition.wait(timeout=1)
+        return original_recognize(raw)
+
+    original_deliver = bridge.deliver
+    bridge.recognize = slow_recognize
+    bridge.deliver = lambda body, headers: deliveries.append(original_deliver(body, headers)) or deliveries[-1]
+
+    class App:
+        def add_handler(self, handler, group=0):
+            assert group == -1
+            self.handler = handler
+
+    class Context:
+        def register_platform_handler(self, platform, factory):
+            assert platform == "telegram"
+            self.factory = factory
+
+    ctx, app = Context(), App()
+    assert register(ctx, bridge=bridge)
+    ctx.factory(app, object())
+    update = SimpleNamespace(update_id=1, effective_message=SimpleNamespace(
+        message_id=99, text="APROVAR THUMBNAIL EP8", from_user=SimpleNamespace(id=int(SENDER_ID), is_bot=False),
+        chat=SimpleNamespace(id=int(CHAT_ID), type="private"), reply_to_message=SimpleNamespace(message_id=42),
+    ))
+
+    async def exercise() -> None:
+        heartbeat = asyncio.Event()
+
+        async def other_loop_work() -> None:
+            await asyncio.sleep(0.01)
+            heartbeat.set()
+
+        callback = asyncio.create_task(app.handler.callback(update, object()))
+        asyncio.create_task(other_loop_work())
+        await asyncio.to_thread(recognition_started.wait, 1)
+        await heartbeat.wait()
+        assert not callback.done(), "slow recognition blocked the event loop instead of running in a worker"
+        release_recognition.set()
+        await callback
+
+    asyncio.run(exercise())
+    assert [result.body["status"] for result in deliveries] == ["approved"]
+
+
+def test_plugin_offloads_blocked_ingress_so_the_event_loop_heartbeats_once_and_approves_once(tmp_path: Path):
+    """The full synchronous callback path, including ingress, leaves PTB responsive."""
+    from integrations.hermes.hermes_studio_approval_bridge.plugin import register
+    from src.approval.hermes_bridge_composition import HermesApprovalBridgeComposition
+
+    service, _, _ = _service(tmp_path)
+    bridge = HermesApprovalBridgeComposition(config=_config(), service=service)
+    original_deliver = bridge.deliver
+    ingress_started = threading.Event()
+    release_ingress = threading.Event()
+    deliveries: list[object] = []
+
+    def blocked_deliver(body: bytes, headers: dict[str, str]) -> object:
+        ingress_started.set()
+        assert release_ingress.wait(timeout=1)
+        result = original_deliver(body, headers)
+        deliveries.append(result)
+        return result
+
+    bridge.deliver = blocked_deliver
+
+    class App:
+        def add_handler(self, handler, group=0):
+            assert group == -1
+            self.handler = handler
+
+    class Context:
+        def register_platform_handler(self, platform, factory):
+            assert platform == "telegram"
+            self.factory = factory
+
+    ctx, app = Context(), App()
+    assert register(ctx, bridge=bridge)
+    ctx.factory(app, object())
+    update = SimpleNamespace(update_id=1, effective_message=SimpleNamespace(
+        message_id=99, text="APROVAR THUMBNAIL EP8", from_user=SimpleNamespace(id=int(SENDER_ID), is_bot=False),
+        chat=SimpleNamespace(id=int(CHAT_ID), type="private"), reply_to_message=SimpleNamespace(message_id=42),
+    ))
+
+    async def exercise() -> None:
+        heartbeat = asyncio.Event()
+        escape_hatch = threading.Timer(0.2, release_ingress.set)
+        escape_hatch.start()
+        callback = asyncio.create_task(app.handler.callback(update, object()))
+        await asyncio.to_thread(ingress_started.wait, 1)
+
+        async def tick_once() -> None:
+            await asyncio.sleep(0.01)
+            heartbeat.set()
+
+        tick = asyncio.create_task(tick_once())
+        await heartbeat.wait()
+        assert not callback.done(), "blocked ingress stalled the event loop"
+        release_ingress.set()
+        escape_hatch.cancel()
+        await callback
+        await tick
+        assert heartbeat.is_set()
+
+    asyncio.run(exercise())
+    assert [result.body["status"] for result in deliveries] == ["approved"]
 
 
 def test_identical_bridge_and_webhook_secret_fails_before_replay_or_journal_mutation(tmp_path: Path):
