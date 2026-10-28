@@ -269,7 +269,7 @@ _IMPORT_RECEIPT_FIELDS = {
     "schema", "mode", "request_id", "source_sha256", "script_sha256", "audio_sha256", "duration_s",
     "timing_sha256", "license_sha256", "provider_id", "voice_id", "integrity", "cryptographic_verification",
     "configuration_validation", "provenance", "candidate_class", "alignment_verification", "qa_qualification",
-    "authorization_assertion", "qualification_status", "status", "operations", "index_sha256", "receipt_sha256",
+    "alignment_attestation_sha256", "authorization_assertion", "qualification_status", "status", "operations", "index_sha256", "receipt_sha256",
 }
 _IMPORT_RECEIPT_FIXED_VALUES = {
     "schema": "preproduction-audio-candidate-import-receipt-v1",
@@ -278,7 +278,6 @@ _IMPORT_RECEIPT_FIXED_VALUES = {
     "cryptographic_verification": "VERIFIED",
     "configuration_validation": "EXTERNAL_CONFIGURATION_VALIDATED",
     "provenance": "UNAUTHENTICATED",
-    "alignment_verification": "NOT_VERIFIED",
     "qa_qualification": "NOT_QUALIFIED",
     "authorization_assertion": "SOURCE_AUTHORIZATION_DECLARED_NOT_LEGAL_PROOF",
     "qualification_status": "NOT_QUALIFIED",
@@ -372,6 +371,14 @@ def _validate_import_receipt(receipt: object) -> dict[str, Any]:
         raise ValueError("materialized audio import receipt contract is invalid")
     if any(not _is_sha256(receipt.get(field)) for field in hash_fields):
         raise ValueError("materialized audio import receipt contract is invalid")
+    if receipt["alignment_verification"] == "NOT_VERIFIED":
+        if receipt.get("alignment_attestation_sha256") != "NOT_PROVIDED":
+            raise ValueError("materialized audio import receipt contract is invalid")
+    elif receipt["alignment_verification"] == "EXTERNALLY_ATTESTED_NON_PROMOTABLE":
+        if not _is_sha256(receipt.get("alignment_attestation_sha256")):
+            raise ValueError("materialized audio import receipt contract is invalid")
+    else:
+        raise ValueError("materialized audio import receipt contract is invalid")
     try:
         duration = Decimal(receipt["duration_s"])
     except Exception as error:
@@ -427,28 +434,36 @@ def verify_real_audio_candidate_import(
 ) -> dict[str, Any]:
     """Replay a packet only with its configured external verifier available."""
     packet = reject_reparse_path(Path(packet_path))
-    expected_files = {"audio.wav", "timing.json", "license.json", "index.json", "receipt.json"}
-    if not packet.is_dir() or {item.name for item in packet.iterdir()} != expected_files:
-        raise ValueError("materialized audio import has missing or extra files")
     try:
         receipt, _receipt_sha, _receipt_raw = load_strict_json_snapshot(
             packet / "receipt.json", "materialized audio import receipt", include_bytes=True,
         )
+    except TrustRootVerificationError as error:
+        raise ValueError("materialized audio import receipt is invalid") from error
+    receipt = _validate_import_receipt(receipt)
+    expected_files = {"audio.wav", "timing.json", "license.json", "index.json", "receipt.json"}
+    if receipt["alignment_verification"] == "EXTERNALLY_ATTESTED_NON_PROMOTABLE":
+        expected_files.add("alignment-attestation.json")
+    if not packet.is_dir() or {item.name for item in packet.iterdir()} != expected_files:
+        raise ValueError("materialized audio import has missing or extra files")
+    try:
         index, _index_sha, _index_raw = load_strict_json_snapshot(
             packet / "index.json", "materialized audio import index", include_bytes=True,
         )
     except TrustRootVerificationError as error:
-        raise ValueError("materialized audio import receipt or index is invalid") from error
-    receipt = _validate_import_receipt(receipt)
+        raise ValueError("materialized audio import index is invalid") from error
     if not isinstance(index, dict) or receipt.get("index_sha256") != _candidate_digest(index):
         raise ValueError("materialized audio import index mismatch")
     entries = index.get("entries")
-    if index.get("schema") != "preproduction-audio-candidate-import-index-v1" or not isinstance(entries, list) or len(entries) != 3:
+    expected_indexed = {"audio.wav", "timing.json", "license.json"}
+    if receipt["alignment_verification"] == "EXTERNALLY_ATTESTED_NON_PROMOTABLE":
+        expected_indexed.add("alignment-attestation.json")
+    if index.get("schema") != "preproduction-audio-candidate-import-index-v1" or not isinstance(entries, list) or len(entries) != len(expected_indexed):
         raise ValueError("materialized audio import index schema is invalid")
     if any(not isinstance(entry, dict) or set(entry) != {"path", "sha256", "size"} for entry in entries):
         raise ValueError("materialized audio import index entries are invalid")
     indexed = {entry["path"]: entry for entry in entries}
-    if set(indexed) != {"audio.wav", "timing.json", "license.json"}:
+    if set(indexed) != expected_indexed:
         raise ValueError("materialized audio import index entries are invalid")
     try:
         _audio_raw, audio_sha, duration_s = _strict_wav_snapshot(packet / "audio.wav")
@@ -457,7 +472,10 @@ def verify_real_audio_candidate_import(
     if indexed["audio.wav"].get("sha256") != audio_sha or indexed["audio.wav"].get("size") != len(_audio_raw):
         raise ValueError("materialized audio import bytes do not match index")
     evidence: dict[str, tuple[dict[str, Any], str, bytes]] = {}
-    for name, label in (("timing.json", "materialized timing receipt"), ("license.json", "materialized license receipt")):
+    evidence_names = [("timing.json", "materialized timing receipt"), ("license.json", "materialized license receipt")]
+    if receipt["alignment_verification"] == "EXTERNALLY_ATTESTED_NON_PROMOTABLE":
+        evidence_names.append(("alignment-attestation.json", "materialized audio alignment attestation"))
+    for name, label in evidence_names:
         try:
             parsed, digest, raw = load_strict_json_snapshot(packet / name, label, include_bytes=True)
         except TrustRootVerificationError as error:
@@ -494,6 +512,19 @@ def verify_real_audio_candidate_import(
         raise ValueError(str(error)) from error
     if receipt["configuration_validation"] != verified.provenance:
         raise ValueError("materialized audio import verifier configuration mismatch")
+    if receipt["alignment_verification"] == "EXTERNALLY_ATTESTED_NON_PROMOTABLE":
+        alignment_receipt, alignment_sha, _alignment_raw = evidence["alignment-attestation.json"]
+        if alignment_sha != receipt["alignment_attestation_sha256"]:
+            raise ValueError("materialized audio import alignment attestation hash mismatch")
+        try:
+            alignment_verified = verifier.verify_audio_alignment_attestation(
+                alignment_receipt,
+                expected={**expected, "timing_sha256": timing_sha, "provider_id": provider_id, "voice_id": voice_id},
+            )
+        except TrustRootVerificationError as error:
+            raise ValueError(str(error)) from error
+        if alignment_verified.provenance != verified.provenance:
+            raise ValueError("materialized audio import alignment verifier configuration mismatch")
     return receipt
 
 
@@ -504,6 +535,7 @@ def import_real_audio_candidate(
     timing_path: Path,
     license_path: Path,
     *,
+    alignment_attestation_path: Path | None = None,
     app_config: object,
     clock,
 ) -> dict[str, Any]:
@@ -543,6 +575,21 @@ def import_real_audio_candidate(
         if "provider_id" in str(error) or "voice_id" in str(error):
             raise ValueError("provider/voice license binding mismatch") from error
         raise ValueError(str(error)) from error
+    alignment_raw = None
+    alignment_sha = "NOT_PROVIDED"
+    alignment_verification = "NOT_VERIFIED"
+    if alignment_attestation_path is not None:
+        try:
+            alignment_receipt, alignment_sha, alignment_raw = load_strict_json_snapshot(
+                alignment_attestation_path, "audio alignment attestation", contained_by=scope, include_bytes=True,
+            )
+            verifier.verify_audio_alignment_attestation(
+                alignment_receipt,
+                expected={**expected, "timing_sha256": timing_sha, "provider_id": provider_id, "voice_id": voice_id},
+            )
+        except TrustRootVerificationError as error:
+            raise ValueError(str(error)) from error
+        alignment_verification = "EXTERNALLY_ATTESTED_NON_PROMOTABLE"
     packet = reject_reparse_path(revision / "audio-import")
     receipt = {
         "schema": "preproduction-audio-candidate-import-receipt-v1", "mode": "PREPRODUCTION", "request_id": request_id,
@@ -550,11 +597,14 @@ def import_real_audio_candidate(
         "provider_id": provider_id, "voice_id": voice_id, "integrity": "VERIFIED",
         "cryptographic_verification": "VERIFIED", "configuration_validation": verified.provenance,
         "provenance": "UNAUTHENTICATED", "candidate_class": candidate_class,
-        "alignment_verification": "NOT_VERIFIED", "qa_qualification": "NOT_QUALIFIED",
+        "alignment_verification": alignment_verification, "alignment_attestation_sha256": alignment_sha,
+        "qa_qualification": "NOT_QUALIFIED",
         "authorization_assertion": "SOURCE_AUTHORIZATION_DECLARED_NOT_LEGAL_PROOF",
         "qualification_status": "NOT_QUALIFIED", "status": "TTS_REQUIRED", "operations": _DIRECTOR_BLOCKED_OPERATIONS,
     }
     files = {"audio.wav": audio_raw, "timing.json": timing_raw, "license.json": license_raw}
+    if alignment_raw is not None:
+        files["alignment-attestation.json"] = alignment_raw
     index = {"schema": "preproduction-audio-candidate-import-index-v1", "entries": [
         {"path": name, "sha256": sha256(raw).hexdigest(), "size": len(raw)} for name, raw in sorted(files.items())
     ]}

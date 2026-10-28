@@ -445,3 +445,57 @@ class ExternalTrustRootVerifier:
         if self.trusted_configuration is not None:
             provenance = "EXTERNAL_CONFIGURATION_VALIDATED"
         return VerifiedEvidence(signer_id, "LICENSE", "TTS:LICENSE", root["version"], provenance)
+
+    def verify_audio_alignment_attestation(
+        self, packet: object, *, expected: dict[str, str]
+    ) -> VerifiedEvidence:
+        """Verify independent hash-bound alignment evidence without qualification."""
+        required = {
+            "schema", "mode", "source_sha256", "script_sha256", "audio_sha256", "timing_sha256",
+            "provider_id", "voice_id", "signer_id", "role", "scope", "issued_at", "expires_at",
+            "nonce", "signature_b64",
+        }
+        bindings = {"source_sha256", "script_sha256", "audio_sha256", "timing_sha256", "provider_id", "voice_id"}
+        root = self._load_current_root()
+        if not isinstance(packet, dict) or set(packet) != required:
+            raise TrustRootVerificationError("audio alignment attestation must use the closed schema")
+        if packet.get("schema") != "audio-alignment-attestation-v1" or packet.get("mode") not in {"PREPRODUCTION", "TEST"}:
+            raise TrustRootVerificationError("unsupported audio alignment attestation schema")
+        if set(expected) != bindings:
+            raise TrustRootVerificationError("expected audio alignment bindings must be closed")
+        for field in ("source_sha256", "script_sha256", "audio_sha256", "timing_sha256"):
+            value = _require_hash(packet.get(field), field)
+            if expected[field] != value:
+                raise TrustRootVerificationError(f"audio alignment binding mismatch: {field}")
+        for field in ("provider_id", "voice_id"):
+            value = _require_text(packet.get(field), field)
+            if expected[field] != value:
+                raise TrustRootVerificationError(f"audio alignment binding mismatch: {field}")
+        signer_id = _require_text(packet.get("signer_id"), "signer_id")
+        signer = next((item for item in root["keys"] if item["signer_id"] == signer_id), None)
+        if signer is None or signer_id in root["revoked_signers"]:
+            raise TrustRootVerificationError("audio alignment signer is unknown or revoked")
+        if packet.get("role") != "QA" or signer["role"] != "QA":
+            raise TrustRootVerificationError("audio alignment role is not authorized")
+        if packet.get("scope") != "EVIDENCE:QA" or "EVIDENCE:QA" not in signer["scopes"]:
+            raise TrustRootVerificationError("audio alignment scope is not authorized")
+        issued_at = _require_time(packet.get("issued_at"), "issued_at")
+        expires_at = _require_time(packet.get("expires_at"), "expires_at")
+        now = self.clock()
+        if type(now) not in (int, float) or not issued_at <= now < expires_at:
+            raise TrustRootVerificationError("audio alignment attestation is expired or not yet valid")
+        if not signer["not_before"] <= now < signer["not_after"]:
+            raise TrustRootVerificationError("audio alignment signer key is outside its validity window")
+        _require_text(packet.get("nonce"), "nonce", limit=128)
+        signature = _strict_b64(packet.get("signature_b64"), "signature")
+        if len(signature) != 64:
+            raise TrustRootVerificationError("signature must be an Ed25519 signature")
+        body = {key: value for key, value in packet.items() if key != "signature_b64"}
+        try:
+            Ed25519PublicKey.from_public_bytes(_strict_b64(signer["public_key_b64"], "public key")).verify(signature, canonical_json(body))
+        except (InvalidSignature, ValueError) as error:
+            raise TrustRootVerificationError("audio alignment attestation signature is invalid") from error
+        provenance = "CRYPTOGRAPHICALLY_VALID_UNAUTHENTICATED_ROOT"
+        if self.trusted_configuration is not None:
+            provenance = "EXTERNAL_CONFIGURATION_VALIDATED"
+        return VerifiedEvidence(signer_id, "QA", "EVIDENCE:QA", root["version"], provenance)

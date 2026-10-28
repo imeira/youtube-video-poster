@@ -38,13 +38,19 @@ def _prepared_request(tmp_path: Path):
     return _prepare(tmp_path)
 
 
-def _configured_root(tmp_path: Path, private: Ed25519PrivateKey):
+def _configured_root(tmp_path: Path, private: Ed25519PrivateKey, qa_private: Ed25519PrivateKey | None = None):
     public = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    qa_private = qa_private or private
+    qa_public = qa_private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     root = {
         "schema": 1, "kind": "EXTERNAL_SIGNER_TRUST_ROOT", "environment": "TEST",
         "algorithm": "Ed25519", "version": "test-tts-root-v1",
-        "keys": [{"signer_id": "license-source", "role": "LICENSE", "scopes": ["TTS:LICENSE"],
-                  "public_key_b64": base64.b64encode(public).decode(), "not_before": 100, "not_after": 9_999}],
+        "keys": [
+            {"signer_id": "license-source", "role": "LICENSE", "scopes": ["TTS:LICENSE"],
+             "public_key_b64": base64.b64encode(public).decode(), "not_before": 100, "not_after": 9_999},
+            {"signer_id": "alignment-qa", "role": "QA", "scopes": ["EVIDENCE:QA"],
+             "public_key_b64": base64.b64encode(qa_public).decode(), "not_before": 100, "not_after": 9_999},
+        ],
         "revoked_signers": [],
     }
     root_path = tmp_path / "root.json"
@@ -87,6 +93,44 @@ def _license(path: Path, hashes: dict, private: Ed25519PrivateKey, *, expires_at
             "signer_id": "license-source", "role": "LICENSE", "scope": "TTS:LICENSE", "issued_at": 200,
             "expires_at": expires_at, "nonce": "license-nonce-1"}
     path.write_bytes(_canonical({**body, "signature_b64": base64.b64encode(private.sign(_canonical(body))).decode()}))
+
+
+def _alignment_attestation(path: Path, hashes: dict, private: Ed25519PrivateKey):
+    body = {
+        "schema": "audio-alignment-attestation-v1", "mode": "TEST",
+        "source_sha256": hashes["source_sha256"], "script_sha256": hashes["script_sha256"],
+        "audio_sha256": hashes["audio_sha256"], "timing_sha256": hashes["timing_sha256"],
+        "provider_id": "provider.example", "voice_id": "voice-approved-1",
+        "signer_id": "alignment-qa", "role": "QA", "scope": "EVIDENCE:QA",
+        "issued_at": 200, "expires_at": 500, "nonce": "alignment-nonce-1",
+    }
+    path.write_bytes(_canonical({**body, "signature_b64": base64.b64encode(private.sign(_canonical(body))).decode()}))
+
+
+def test_director_entrypoint_materializes_externally_verified_alignment_attestation_without_qualification(tmp_path):
+    from src.agents.director import DirectorAgent
+
+    created, revision, audio, timing, hashes = _candidate_inputs(tmp_path)
+    license_private = Ed25519PrivateKey.generate()
+    qa_private = Ed25519PrivateKey.generate()
+    app_config = _configured_root(tmp_path, license_private, qa_private)
+    license_path = tmp_path / "license.json"
+    attestation_path = tmp_path / "alignment-attestation.json"
+    _license(license_path, hashes, license_private)
+    _alignment_attestation(attestation_path, hashes, qa_private)
+
+    result = DirectorAgent.__new__(DirectorAgent).import_preproduction_audio_candidate(
+        tmp_path, created["request_id"], audio, timing, license_path,
+        alignment_attestation_path=attestation_path, app_config=app_config, clock=lambda: 300,
+    )
+
+    receipt = json.loads((revision / "audio-import" / "receipt.json").read_text(encoding="utf-8"))
+    assert result["status"] == "TTS_REQUIRED"
+    assert result["qualification_status"] == "NOT_QUALIFIED"
+    assert receipt["alignment_verification"] == "EXTERNALLY_ATTESTED_NON_PROMOTABLE"
+    assert receipt["qa_qualification"] == "NOT_QUALIFIED"
+    assert receipt["provenance"] == "UNAUTHENTICATED"
+    assert (revision / "audio-import" / "alignment-attestation.json").is_file()
 
 
 def test_imports_explicit_test_candidate_but_never_calls_fixture_audio_real_aligned_or_qa_qualified(tmp_path):
