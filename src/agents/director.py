@@ -393,6 +393,32 @@ class DirectorAgent:
             app_config=app_config, clock=clock,
         )
 
+    def import_audio_qualification_evidence(
+        self,
+        workspace: Path,
+        request_id: str,
+        *,
+        origin_declaration: Path | None = None,
+        editorial_review: Path | None = None,
+        acoustic_review: Path | None = None,
+        app_config: object,
+        clock,
+    ):
+        """Materialize declared evidence only; this cannot qualify or promote audio."""
+        from src.hybrid.audio_qualification_evidence import (
+            import_audio_qualification_evidence,
+        )
+
+        return import_audio_qualification_evidence(
+            workspace,
+            request_id,
+            origin_declaration=origin_declaration,
+            editorial_review=editorial_review,
+            acoustic_review=acoustic_review,
+            app_config=app_config,
+            clock=clock,
+        )
+
     def activate_compiled_production(
         self,
         episode_id: str,
