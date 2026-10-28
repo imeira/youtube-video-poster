@@ -238,7 +238,16 @@ def test_voice_unknown_permission_and_preexisting_quarantine_fail_closed(tmp_pat
     assert transport.paths == []
 
 
-@pytest.mark.parametrize("kind", ["symlink", "junction"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "symlink",
+        pytest.param(
+            "junction",
+            marks=pytest.mark.skipif(sys.platform != "win32", reason="NTFS junctions require Windows"),
+        ),
+    ],
+)
 def test_quarantine_reparse_escape_rejects_before_any_get(tmp_path: Path, kind: str):
     from src.hybrid.elevenlabs_origin_readback import readback_existing_tts_origin
 
