@@ -7,6 +7,7 @@ import json
 import multiprocessing
 import sqlite3
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,14 +27,29 @@ from src.state.machine import EpisodeState, EpisodeStateStore
 SECRET = "test-only-external-secret"
 CHAT_ID = "10001"
 SENDER_ID = "20002"
+_PROCESS_STARTUP_TIMEOUT_SECONDS = 20
+_CRITICAL_SECTION_TIMEOUT_SECONDS = 5
+_CHILD_CLEANUP_TIMEOUT_SECONDS = 5
 
 
-def _hold_gate_lock(path: str, ready, release) -> None:
+def _hold_gate_lock(path: str, ready, release, readiness_delay: float = 0.0) -> None:
     from src.hybrid.locks import file_lock
 
+    if readiness_delay:
+        time.sleep(readiness_delay)
     with file_lock(Path(path)):
         ready.set()
         assert release.wait(5)
+
+
+async def _cleanup_holder(holder: multiprocessing.Process, release) -> None:
+    release.set()
+    await asyncio.to_thread(holder.join, _CHILD_CLEANUP_TIMEOUT_SECONDS)
+    if holder.is_alive():
+        holder.terminate()
+        await asyncio.to_thread(holder.join, _CHILD_CLEANUP_TIMEOUT_SECONDS)
+    assert not holder.is_alive()
+    assert holder.exitcode == 0
 
 
 def _config(episodes_dir: Path):
@@ -285,17 +301,35 @@ async def test_process_lock_serializes_the_same_authenticated_gate(tmp_path: Pat
     holder = context.Process(target=_hold_gate_lock, args=(str(lock), ready, release))
     holder.start()
     try:
-        assert await asyncio.to_thread(ready.wait, 5)
+        assert await asyncio.to_thread(ready.wait, _PROCESS_STARTUP_TIMEOUT_SECONDS)
         pending = asyncio.create_task(asyncio.to_thread(service.handle_webhook, _update(), SECRET))
         await asyncio.sleep(0.1)
         assert not pending.done()
         release.set()
-        result = await pending
+        result = await asyncio.wait_for(pending, _CRITICAL_SECTION_TIMEOUT_SECONDS)
         assert result.status == 200
     finally:
+        await _cleanup_holder(holder, release)
+
+
+@pytest.mark.asyncio
+async def test_process_lock_tolerates_slow_but_bounded_windows_spawn_readiness(tmp_path: Path):
+    service, _, _, _ = _service(tmp_path)
+    lock = service._gate_lock_path(chat_id=CHAT_ID, message_id=42)
+    context = multiprocessing.get_context("spawn")
+    ready, release = context.Event(), context.Event()
+    holder = context.Process(target=_hold_gate_lock, args=(str(lock), ready, release, 5.1))
+    holder.start()
+    try:
+        assert await asyncio.to_thread(ready.wait, _PROCESS_STARTUP_TIMEOUT_SECONDS)
+        pending = asyncio.create_task(asyncio.to_thread(service.handle_webhook, _update(), SECRET))
+        await asyncio.sleep(0.1)
+        assert not pending.done()
         release.set()
-        holder.join(5)
-        assert holder.exitcode == 0
+        result = await asyncio.wait_for(pending, _CRITICAL_SECTION_TIMEOUT_SECONDS)
+        assert result.status == 200
+    finally:
+        await _cleanup_holder(holder, release)
 
 
 def test_crash_after_receipt_before_state_recovers_without_new_approval(tmp_path: Path, monkeypatch):
