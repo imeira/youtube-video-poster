@@ -1,0 +1,26 @@
+manifest_version: 2
+name: hermes-studio-approval-bridge
+version: 0.1.0
+description: "Disabled-by-default, local-only Telegram approval reply bridge for Hybrid AI Animation Studio."
+author: "Hermes Studio"
+license: MIT
+kind: standalone
+requires_hermes: ">=0.22.5"
+tags:
+  - telegram
+  - approvals
+  - local-only
+requires_env:
+  - name: STUDIO_BRIDGE_HMAC
+    description: "Dedicated HMAC for the local Studio approval ingress; must differ from the Telegram webhook secret."
+    password: true
+  - name: STUDIO_TELEGRAM_BOT_TOKEN
+    description: "Existing Studio Telegram bot token, used only to construct the dormant local provider."
+    password: true
+  - name: STUDIO_TELEGRAM_WEBHOOK_SECRET
+    description: "Existing Studio Telegram webhook secret; must differ from the bridge HMAC."
+    password: true
+config_schema:
+  approval_bridge:
+    type: object
+    description: "Explicit opt-in bridge settings; enabled must be true before this plugin registers a Telegram handler."

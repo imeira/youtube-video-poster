@@ -14,9 +14,10 @@ import secrets
 import time
 from inspect import isawaitable
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
-from src.approval.hermes_bridge_composition import HermesApprovalBridgeComposition
-from src.approval.hermes_inbound_bridge import canonical_envelope
+if TYPE_CHECKING:
+    from src.approval.hermes_bridge_composition import HermesApprovalBridgeComposition
 
 _DOMAIN = b"hermes-studio-approval-bridge/v1\0"
 
@@ -38,7 +39,23 @@ def _raw_update(update: object, bridge: HermesApprovalBridgeComposition) -> byte
 
 
 def register(ctx: object, *, bridge: HermesApprovalBridgeComposition | None = None) -> bool:
-    """Register one pre-core handler bound to the composition's ingress and recognizer."""
+    """Register one pre-core handler from an explicit bridge or enabled host settings."""
+    if bridge is None:
+        # Normal Hermes loading supplies only ctx. Check the explicit opt-in
+        # before importing any Studio bootstrap/production composition.
+        getter = getattr(ctx, "get_config", None)
+        configured = getter("approval_bridge", None) if callable(getter) else None
+        if not isinstance(configured, dict) or configured.get("enabled") is not True:
+            return False
+        try:
+            from integrations.hermes.hermes_studio_approval_bridge.bootstrap import (
+                compose_from_context,
+            )
+
+            bridge = compose_from_context(ctx)
+        except (ImportError, OSError, TypeError, ValueError):
+            return False
+    from src.approval.hermes_bridge_composition import HermesApprovalBridgeComposition
     if not isinstance(bridge, HermesApprovalBridgeComposition):
         return False
 
@@ -55,6 +72,8 @@ def register(ctx: object, *, bridge: HermesApprovalBridgeComposition | None = No
                 return
             if recognized is not True:
                 return
+            from src.approval.hermes_inbound_bridge import canonical_envelope
+
             config = bridge.config
             envelope = canonical_envelope(config, raw, nonce=secrets.token_hex(16), timestamp=int(time.time()))
             signature = hmac.new(config.hmac_key.encode(), _DOMAIN + envelope, hashlib.sha256).hexdigest()
