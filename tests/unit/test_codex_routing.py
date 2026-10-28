@@ -19,8 +19,10 @@ def test_codex_provider_builds_ephemeral_read_only_command() -> None:
     assert "--ephemeral" in command
     assert "--ignore-user-config" in command
     assert "--ignore-rules" in command
-    assert ["-s", "read-only"] == command[command.index("-s"):command.index("-s") + 2]
-    assert ["-m", "gpt-5.6-sol"] == command[command.index("-m"):command.index("-m") + 2]
+    assert ["-s", "read-only"] == command[command.index("-s") : command.index("-s") + 2]
+    assert ["-m", "gpt-5.6-sol"] == command[
+        command.index("-m") : command.index("-m") + 2
+    ]
     assert 'model_reasoning_effort="high"' in command
     assert "--json" in command
 
@@ -74,10 +76,10 @@ def test_codex_provider_resolves_windows_cmd_wrapper(monkeypatch, tmp_path) -> N
 def test_profile_d_routes_core_and_auxiliary_tasks() -> None:
     router = CoreModelRouter.profile_d()
 
-    assert router.route("script").model == "gpt-5.6-sol"
-    assert router.route("script").reasoning_effort == "high"
-    assert router.route("storyboard").model == "gpt-5.6-sol"
-    assert router.route("storyboard").reasoning_effort == "high"
+    assert router.route("script").model == "gpt-5.6-terra"
+    assert router.route("script").reasoning_effort == "medium"
+    assert router.route("storyboard").model == "gpt-5.6-terra"
+    assert router.route("storyboard").reasoning_effort == "medium"
     assert router.route("metadata").model == "gpt-5.6-luna"
     assert router.route("metadata").reasoning_effort == "low"
 
@@ -95,10 +97,10 @@ def test_director_uses_profile_d_codex_routes() -> None:
     director = DirectorAgent(model_router=CoreModelRouter.profile_d())
 
     assert isinstance(director.script._llm, CodexLLMProvider)
-    assert director.script._llm.model == "gpt-5.6-sol"
-    assert director.script._llm.reasoning_effort == "high"
+    assert director.script._llm.model == "gpt-5.6-terra"
+    assert director.script._llm.reasoning_effort == "medium"
     assert isinstance(director.storyboard._llm, CodexLLMProvider)
-    assert director.storyboard._llm.model == "gpt-5.6-sol"
+    assert director.storyboard._llm.model == "gpt-5.6-terra"
     assert director.metadata._llm.model == "gpt-5.6-luna"
     assert director.metadata._llm.reasoning_effort == "low"
 
@@ -120,3 +122,13 @@ def test_director_defers_legacy_agent_and_model_initialization() -> None:
     assert router.tasks == []
     assert director.script is not None
     assert router.tasks == ["script"]
+
+
+def test_unclassified_constructor_and_normal_core_do_not_default_to_high_effort():
+    provider = CodexLLMProvider()
+    assert (provider.model, provider.reasoning_effort) == ("gpt-5.6-terra", "medium")
+    router = CoreModelRouter.profile_d()
+    for task in ("coding", "architecture"):
+        assert router.route(task).model == "gpt-5.6-terra"
+        assert router.route(task).reasoning_effort == "medium"
+    assert router.escalate("architecture").model == "gpt-5.6-sol"

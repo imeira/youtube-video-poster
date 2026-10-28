@@ -29,6 +29,18 @@ def main():
     if sys.argv[1:2] == ["offline"]:
         from src.hybrid.offline import main as offline_main
         return offline_main(sys.argv[2:])
+    if sys.argv[1:2] == ["telegram-inbound-preflight"]:
+        from src.approval.telegram_cli import main as telegram_preflight_main
+        return telegram_preflight_main(sys.argv[2:])
+    if sys.argv[1:2] == ["telegram-delivery-session"]:
+        from src.approval.telegram_cli import delivery_session_main
+        return delivery_session_main(sys.argv[2:])
+    if sys.argv[1:2] == ["autonomous"]:
+        from src.hybrid.autonomous_cli import main as autonomous_main
+        return autonomous_main(sys.argv[2:])
+    if sys.argv[1:2] == ["fal-billing"]:
+        from src.hybrid.fal_billing_cli import main as fal_billing_main
+        return asyncio.run(fal_billing_main(sys.argv[2:]))
     parser = argparse.ArgumentParser(
         description="Hybrid AI Animation Studio — produce a children's Bible YouTube video",
     )

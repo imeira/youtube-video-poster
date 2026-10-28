@@ -1,0 +1,21 @@
+# SDD — authenticated financial budget authorization
+
+## Boundary
+`BUDGET_AUTHORIZATION` is a distinct financial-authority contract. It is neither media QA, provider billing evidence, a publication permission, nor either of the two routine thumbnail/video human gates. Its `request_id` identifies the standing authorization scope, not a paid child operation. Standing budget setup is exceptional, per authorization scope—not a new approval per scene.
+
+An immutable request contains only exact, closed fields: schema/kind, TEST mode, request and episode IDs, SHA-256 policy binding, expiry, allowed provider IDs, USD currency, and explicit positive finite decimal caps for `episode`, `month`, and `experiment`. The request contains no chat, sender, role, transport, or route field. These trusted bindings come only from composition settings.
+
+No missing cap has a default. Missing financial-transport configuration fails before a provider, reservation, or ledger is constructed. Local self-authored or self-signed JSON is never financial authority.
+
+## Delivery and receipt
+A caller cannot register a message ID as delivery proof. `deliver_request` takes an OS-released interprocess `file_lock` keyed by the canonical request SHA-256 before it checks the delivery receipt or intent, and retains it through write-ahead intent fsync, send, trusted readback, and durable delivery receipt. Thus independent service instances cannot both call an adapter for one canonical request. The adapter must read back the exact configured chat, positive message ID, transport, and SHA-256 of the canonical request bytes. Any exception or missing readback leaves the intent `UNKNOWN`: a later process may revalidate an existing delivery but never POSTs again. The package supplies no network/Telegram sender; the only test boundary is an explicit local fake.
+
+The accepted reply must be journal-authenticated by the existing `TelegramInboundAdapter`, reply to that exact read-back message ID, originate from a configured financial sender in the configured chat, and have the internally derived exact command `AUTORIZAR ORÇAMENTO <request-id>`. The durable receipt binds request bytes/hash, policy hash, outbound readback, and the adapter's authenticated inbound document. It is write-once and every reuse revalidates both adapter sources. No self-authored receipt qualifies.
+
+## Admission and preflight
+`AuthorizedBudgetPolicyLoader` exposes an authenticated, revalidated policy projection only. `AuthenticatedBudgetBridge` keeps its ledger as private composition state and requires a stable child `operation_id` for every reservation. The immutable ledger claim binds that operation ID to the persisted authorization ID and policy hash, authorized episode, provider, exact quoted cap, and experiment flag: an identical call is idempotent, a changed identity is a collision, and separate operations may reserve only while shared caps permit. There is no default child operation derived from the authorization ID.
+
+`StandingBudgetLedger.from_authorized_policy` creates a TEST ledger only after the projection is verified and persists an authenticated-authority binding distinct from the legacy direct-constructor binding. Consequently, reopening that database through the legacy constructor fails immutable-policy comparison rather than dropping the authority requirement. This is a trusted-process boundary, not a claim that Python attribute privacy defeats hostile in-process code; untrusted JSON, receipts, and caller input remain outside the authority boundary. The ledger remains an admission guard, not trusted billing. `admit_simulated_test` reserves an exact provider cap with the existing ledger and performs no provider call. LIVE dispatch remains unchanged and disabled.
+
+## Negative requirements
+Reject: absent webhook/financial sender configuration; self-authored receipts; expired request; wrong sender/chat/reply message/command; missing or malformed child operation ID; provider outside the allowed list; cross-episode reservation; non-USD currency; missing, zero, negative, non-finite, or excess-precision caps; policy/request/receipt alteration; and any attempt to use this receipt for QA, billing, publication, or LIVE dispatch.

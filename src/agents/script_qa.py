@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 import unicodedata
+from dataclasses import dataclass
 
 from src.content.narrator import LORENA
 
@@ -33,13 +33,14 @@ class ScriptQAAgent:
 
     def review(self, packet: dict) -> ScriptQAResult:
         findings: list[str] = []
+        source_bound_preproduction = packet.get("source_bound_preproduction") is True
         if packet.get("audience") != {"min_age": 6, "max_age": 10}:
             findings.append("AUDIENCE_MUST_BE_6_TO_10")
         closing_duration = packet.get("closing_duration_s")
-        if not isinstance(closing_duration, int) or not 3 <= closing_duration <= 10:
+        if not source_bound_preproduction and (not isinstance(closing_duration, int) or not 3 <= closing_duration <= 10):
             findings.append("CLOSING_MUST_BE_3_TO_10_SECONDS")
         legacy_revoice = packet.get("legacy_published_episode_revoice") is True
-        if not legacy_revoice and packet.get("recurring_narrator") != LORENA:
+        if not source_bound_preproduction and not legacy_revoice and packet.get("recurring_narrator") != LORENA:
             findings.append("CANONICAL_LORENA_NARRATOR_REQUIRED")
         segments = packet.get("segments")
         if not isinstance(segments, list) or not segments:
@@ -48,8 +49,23 @@ class ScriptQAAgent:
         canonical = "\n\n".join(str(segment.get("narration", "")) for segment in segments)
         if packet.get("narration") != canonical:
             findings.append("NARRATION_MUST_EQUAL_APPROVED_SEGMENTS")
+        reflections = [segment for segment in segments if segment.get("kind") == "family_reflection"]
         closing = segments[-1]
-        if not legacy_revoice and not (
+        if source_bound_preproduction:
+            if len(reflections) != 1 or closing.get("kind") != "family_reflection":
+                findings.append("EXACTLY_ONE_FINAL_FAMILY_REFLECTION_REQUIRED")
+            if packet.get("duration_status") != "ESTIMATE_PENDING_MEASURED_AUDIO" or packet.get("duration_measurement") != "PENDING_MEASURED_AUDIO":
+                findings.append("SOURCE_BOUND_DURATION_MEASUREMENT_PENDING_REQUIRED")
+            estimate = packet.get("closing_estimated_duration_s")
+            if not isinstance(estimate, (int, float)):
+                findings.append("SOURCE_BOUND_CLOSING_ESTIMATE_REQUIRED")
+            elif estimate > 10:
+                findings.append("SOURCE_BOUND_CLOSING_ESTIMATE_EXCEEDS_10_SECONDS")
+            if "closing_duration_s" in packet or "recurring_narrator" in packet or any(
+                key in closing for key in ("duration_s", "presenter", "visual_mode", "lesson_role")
+            ):
+                findings.append("SOURCE_BOUND_CLOSING_MEDIA_FACTS_FORBIDDEN")
+        elif not legacy_revoice and not (
             closing.get("kind") == "family_reflection"
             and closing.get("presenter") == LORENA["name"]
             and closing.get("visual_mode") == "generated_video"

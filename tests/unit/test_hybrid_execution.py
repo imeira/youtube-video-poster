@@ -61,7 +61,7 @@ def job(tmp_path, **changes):
         "scene",
         "first",
         "TEST",
-        "fal-ai/flux-2/klein/9b/edit",
+        "test-image",
         {"prompt": "A tree"},
         manifest(tmp_path),
         Decimal(".022"),
@@ -135,7 +135,7 @@ async def test_intent_exists_before_submit_and_unknown_intent_blocks(tmp_path):
     provider = Provider(tmp_path)
 
     async def crash(job, request_id, checkpoint):
-        assert executor.inspect(request_id)["status"] == "INTENT"
+        assert executor.inspect(request_id)["status"] == "SUBMITTING"
         raise TimeoutError("unknown remote acceptance")
 
     provider.submit = crash
@@ -144,6 +144,88 @@ async def test_intent_exists_before_submit_and_unknown_intent_blocks(tmp_path):
     with pytest.raises(RuntimeError, match="reconciliation"):
         await executor.run(request, provider)
     assert provider.recoveries == 0
+
+
+@pytest.mark.asyncio
+async def test_prepared_intent_never_posts_without_explicit_admission_transition(tmp_path):
+    request = job(tmp_path)
+    executor = Executor(tmp_path / "jobs.db", Config())
+    provider = Provider(tmp_path)
+
+    prepared = executor.prepare_intent(request)
+
+    assert prepared["status"] == "PREPARED"
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        await executor.run(request, provider)
+    assert provider.calls == 0
+    assert executor.inspect(request.request_id)["status"] == "PREPARED"
+
+
+@pytest.mark.asyncio
+async def test_prepared_fal_intent_with_submit_flag_never_posts_without_durable_ledger_admission(tmp_path):
+    request = job(tmp_path)
+    executor = Executor(tmp_path / "jobs.db", Config())
+    provider = Provider(tmp_path)
+
+    executor.prepare_intent(request)
+
+    with pytest.raises(PermissionError, match="standing-ledger admission"):
+        await executor.run(request, provider, submit_prepared=True)
+
+    assert provider.calls == 0
+    assert executor.inspect(request.request_id)["status"] == "PREPARED"
+
+
+@pytest.mark.asyncio
+async def test_fresh_fal_entry_cannot_bypass_prepared_ledger_admission(tmp_path):
+    request = job(tmp_path, endpoint="fal-ai/flux-2/klein/9b/edit")
+    executor = Executor(tmp_path / "jobs.db", Config())
+    provider = Provider(tmp_path)
+
+    with pytest.raises(RuntimeError, match="prepared intent requires admission"):
+        await executor.run(request, provider)
+
+    assert provider.calls == 0
+    assert executor.inspect(request.request_id)["status"] == "PREPARED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["wrong-request", "invalid-reservation", "scope-mismatch"])
+async def test_prepared_fal_submit_rechecks_exact_durable_ledger_binding(tmp_path, case):
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    request = job(tmp_path)
+    ledger = StandingBudgetLedger(
+        tmp_path / "standing.sqlite3",
+        policy_sha256="a" * 64,
+        episode_limit_usd="1",
+        month_limit_usd="1",
+        experiment_limit_usd="1",
+        mode="TEST",
+    )
+    executor = Executor(tmp_path / "jobs.db", Config(), standing_ledger=ledger)
+    provider = Provider(tmp_path)
+    prepared = executor.prepare_intent(request)
+    reservation_id = "different-request" if case == "wrong-request" else request.request_id
+    scope = "wrong-scope" if case == "scope-mismatch" else prepared["settlement_binding"]["auth_scope"]
+    ledger.reserve(
+        reservation_id,
+        "TEST-EP",
+        request.endpoint,
+        request.cost,
+        settlement_mode="FAL_READBACK_V2",
+        auth_scope=scope,
+        provider_request_id="UNASSIGNED",
+        authority_mode="TEST",
+    )
+    if case == "invalid-reservation":
+        ledger.mark_unknown(request.request_id)
+
+    with pytest.raises(PermissionError, match="ledger reservation|standing-ledger admission"):
+        await executor.run(request, provider, submit_prepared=True)
+
+    assert provider.calls == 0
+    assert executor.inspect(request.request_id)["status"] == "PREPARED"
 
 
 @pytest.mark.asyncio

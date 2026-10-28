@@ -1,0 +1,154 @@
+# Source-bound pre-production SDD
+
+## Scope
+
+Offline pre-production converts immutable local biblical-source bytes into a non-executable script candidate. It does not synthesize audio, select a provider, quote a price, spend money, render media, notify Telegram, or publish.
+
+## Immutable inputs
+
+- Literal prompt bytes and their request ID.
+- A local `local-biblical-source-v1` JSON document with matching mode and provenance.
+- Structured biblical facts and source references.
+- Optional `research.narrative_segments`, in source order. Every segment has a contiguous `SNNN` ID, `kind`, complete `narration`, nonempty fact list, and `motion_need`; biblical segments also have a verse reference. Exactly one family reflection is last. Both `...` and `…` endings are rejected.
+- Candidate provider records, which are descriptive only.
+
+## Closed outputs
+
+- `script/script.json` is a projection of segment narration. For a source-bound narrative it has no `target_duration_s`, `closing_duration_s`, segment `duration_s`, narrator binding, or visual-mode claim. It carries `estimated_narration_seconds`, `closing_estimated_duration_s`, and explicit `PENDING_MEASURED_AUDIO` measurement state; the closing estimate must not exceed 10 seconds at the fixed 130 WPM reference.
+- `plan/editorial-plan.json` has measured word count, a WPM-derived estimate, source references, and a segment→verse/fact/motion matrix. `prices_usd` is always `null`.
+- `qa/script-qa.json` records deterministic script QA. Source-bound QA remains `PENDING_INDEPENDENT_EDITORIAL_REVIEW`, never a synthesized PASS, and fail-closes audio/timeline/storyboard progression.
+- Request state advances only to `TTS_REQUIRED` until a real, local, decodable audio file and hash-bound timeline are supplied.
+
+## Validation and rejection
+
+- Source-bound prose is copied verbatim; no truncation marker (`...` or `…`), filler, target duration, audio/visual duration fact, or LLM rewrite is permitted.
+- Biblical and family-reflection segments remain structurally distinct. A reflection cannot be represented as a biblical promise.
+- Candidate provider records must be `UNQUALIFIED` and commercially `UNKNOWN`. Any `price`, `cost`, `usd`, or `quote` key at any nesting level rejects the source.
+- Measured audio duration is the only duration evidence for a storyboard. A word-rate value is explicitly only an estimate.
+
+## Audio boundary (currently fail-closed)
+
+`audio-preflight` is a read-only capability report. It does not read caller
+review/authorization JSON, write a QA/stage file, or return `AUDIO_AUTHORIZED`.
+`execute_authorized_audio` unconditionally **raises**
+`EXTERNAL_AUDIO_SYNTHESIS_BLOCKED` before resolving paths, constructing a
+provider, reserving state, or writing an intent. External synthesis remains
+unqualified until a separately reviewed trust root, canonical transport
+contract, WAL/reconciliation recovery protocol, and independently verifiable
+voice/evidence chain are implemented and accepted.
+
+The only useful audio operation in this slice is `import_test_audio_segment`. It accepts only an immutable `bytes` snapshot with
+the closed `audio/wav` type; it has no `source_path`/`source_file` fallback and
+no CLI route. It decodes, measures, checks PCM silence, and verifies explicit
+TEST fixture WordBoundary events against that same snapshot before caching it
+under exclusive immutable names. The API receives its existing cache root from
+trusted application composition only: payloads, remote receipts, and CLI input
+cannot select it. A receipt binds the configured root hash, namespace, exact
+derived name, audio/input hashes, measured boundaries/provenance, and literal
+`NOT_QUALIFIED` voice state; replay recomputes and compares every field and
+rejects tampering, recomputed metadata, wrong-root copies, and incomplete
+cache pairs. This is not a claim of protection from an attacker who controls
+the configured local cache root.
+
+The importer rejects silence, invalid or oversized WAV data, false/invented
+boundary receipts, and every reflection closing. It cannot advance an
+independent review/audio gate, qualify a provider, or qualify a voice.
+
+A TEST fixture never qualifies Lorena or any narrator. In particular, the
+adult `pt-BR-ThalitaNeural` default must not be routed to a child/reflection
+closing. A real closing requires separately canonical child-voice evidence,
+actual event receipts, and measured duration at most 10 seconds; none exists
+in this entrypoint.
+
+## State transitions and recovery
+
+`SOURCE_REQUIRED → SCRIPT_CANDIDATE → TTS_REQUIRED → PREPRODUCTION_VALIDATED → ASSETS_REQUIRED`.
+
+There is no `AUDIO_AUTHORIZED` transition in the current audio slice. A source-bound
+request stays blocked at `TTS_REQUIRED` until a separate, independently reviewed
+real-audio integration exists.
+
+Each source SHA-256 creates a distinct revision directory. Existing scripts, QA receipts, and revisions are never overwritten. A changed source creates a successor revision. A failed or interrupted revision is retained for audit and may only be resumed if all persisted hashes still match.
+
+## Director integration
+
+`advance_preproduction` is the sole offline entry point. It invokes `ScriptAgent` with `target_duration_s=None`, writes the immutable artifacts, and stops before TTS. Timeline/storyboard construction remains unavailable without supplied measured local audio.
+
+## TEST compiled-run handoff
+
+`autonomous run-preproduction-test` is the single TEST-only operational handoff. It takes an existing request ID and local manifest, calls `compile_preproduction`, then reopens and revalidates the frozen packet before calling the existing compiled TEST runner. It accepts no caller mode, policy, review, audio, approval, publication, or provider settings. It rejects `PREPRODUCTION`, `LIVE`, forged/mutated packet bytes, reparse paths, and non-TEST evidence before runner/provider/budget construction.
+
+The return document binds the originating `request_id`, active revision, compile receipt/packet, compiled runner request ID, and the runner's TEST gate/state. Repeating an already completed handoff returns the same binding; it never creates a second compiled run or repeats completed work. A crash after compilation and before runner start resumes from the same immutable packet. The runner exposes only its existing two explicit TEST local gate decisions; neither deterministic QA nor this command claims human review. Publication remains blocked by this handoff.
+
+## REAL read-only handoff preflight
+
+`studio autonomous real-handoff-preflight --workspace <root> --request-id <id>` consumes only the existing active `PREPRODUCTION` revision. It first rejects reparse points on every request/revision/review path it will read, reopens the request through `load_preproduction`, and rejects TEST, LIVE, unbound active-revision pointers, unblocked execution, prices, or prior provider calls. It rehashes the source, plan, script, deterministic script-QA, and active review candidate against `stages.json` before inspecting any narration, timing, or visual asset.
+
+The fixed active review location is `qa/independent-editorial-review-v4.json`. A present `independent-editorial-review-record-v1` is reported only as a hash-bound candidate after its source and script bindings validate. In the absence of a configured authenticated trust root it remains `NOT_QUALIFIED`; it neither changes the pending deterministic QA state nor authorizes TTS, LIVE, a provider, cost, Director import, render, Telegram, or publication.
+
+The result is an ephemeral sanitized report with `TTS_REQUIRED`, a structured ordered dependency list, binding hashes, explicit missing narration/timing/assets, and `next_required_action: OBTAIN_TTS_AUTHENTICATED_RECEIPT`. It never writes request/stage/cache files, creates a database/directory/lock, opens unavailable media, or constructs a provider, Director, executor, reservation, or delivery service. It does not claim production is complete or that its own report enables LIVE work.
+
+## Local immutable Director import
+
+`import_real_preproduction_handoff` is the only local materialization route from
+an active `PREPRODUCTION` revision to a Director-readable packet.  It is not an
+activation route: it never constructs a provider, executor, delivery service,
+Telegram client, renderer, publication client, budget reservation, or LIVE
+authority. `DirectorAgent.import_preproduction_handoff` is a narrow facade over
+that same verifier and returns the local receipt; it cannot dispatch or render.
+
+Before writing a byte it rejects reparse points on the request, revision,
+source, script, QA, audio, timeline, storyboard, manifest, every manifest
+asset/binding, and existing import tree. It rehashes the request-bound source
+revision; the script, deterministic QA, timeline, audio, storyboard, and
+independent-review source/script bindings; decodes and measures non-silent
+audio; verifies contiguous measured timestamps against the decoded duration;
+and verifies the existing frozen-asset manifest and contact-sheet binding.
+The manifest must be existing `LIVE` evidence and an input marked `TEST` is
+rejected rather than relabelled or promoted.
+
+All checks complete before mutation. Under an OS-released per-revision lock the
+importer copies only verified immutable bytes into a staging directory, writes a
+closed path/hash/size index and then the receipt that binds that index, fsyncs
+every file, and publishes by rename. On platforms where Python exposes directory
+`fsync`, it flushes the staging and parent directories as well. Windows has no
+POSIX directory-`fsync` primitive in Python: file flushes and rename are used,
+but power-loss durability of the directory entry remains filesystem/volume
+dependent and is not claimed. The importer reopens the published packet through
+the same materialized-byte verifier before returning success; a crash before or
+a validation failure after rename never returns success. Stale staging directories
+remain auditable until a later verified resume removes them.
+
+The packet contains the manifest, every asset and the contact-sheet binding as
+materialized bytes. Replay integrity uses only those packet bytes; it rejects an
+absent, changed, extra, reparse, or index/binding-mismatched file without opening
+the original manifest or asset source. Active-revision freshness is checked
+separately when preflight compares receipt bindings to the current revision.
+A matching final receipt is replay-idempotent; changed inputs conflict and never
+overwrite it. The receipt and Director return explicitly state
+`qualification_status: NOT_QUALIFIED`, the missing authenticated TTS/trust-root
+reasons, and blocked operations. Its `PREPRODUCTION` mode cannot promote TEST or
+otherwise authorize dispatch, render, notify Telegram, publish, or execute LIVE.
+
+## Configured WAV ingestion candidate
+
+`import_real_audio_candidate` is a local-only, `PREPRODUCTION` ingestion path; it never synthesizes, clones, downloads, sends, reserves, renders, or promotes audio. It accepts a regular WAV, a complete timing receipt, and a provider/voice/license declaration from the configured external evidence directory. All documents are read once through the strict JSON snapshot loader and all media bytes are decoded from the supplied accepted file before any staging directory is created. `provider.example` is permitted only for an explicit `TEST` candidate with fixture origin; it is never renamed REAL or QA-qualified.
+
+The closed timing receipt binds `source_sha256`, `script_sha256`, the exact WAV SHA-256, provider ID, voice ID, and every WordBoundary event. Events must be finite, ordered, non-overlapping, positive, within actual decoded duration, and their token sequence must exactly equal the selected source-bound script segment narration; silences need not be represented and no universal narration-duration quota is imposed. This is structural timing validation only: it does not establish acoustic word alignment. Without independently trusted provider timing/receipt evidence, `alignment_verification` is `NOT_VERIFIED`, `TTS_REQUIRED` remains, and no forced aligner is invented. Audio must be a bounded, decoded, non-silent PCM WAV; container headers, claimed duration, and generated timestamps are not timing evidence.
+
+The license receipt is a signed declaration that the named source authorized the declared provider/voice use. It binds the same source, script, audio, provider, and voice values and has a finite validity interval. It is not proof of legal authorization. The receipt reports separately: file integrity, cryptographic verification, `configuration_validation`, unauthenticated `provenance`, and asserted authorization. `EXTERNAL_CONFIGURATION_VALIDATED` describes only configuration validation; it is never provenance. A direct root used only through the crypto verifier is unauthenticated and cannot be called externally provenanced or authoritative.
+
+The importer uses the existing external trust-root configuration and strict snapshot/pin machinery. In the absence of an installed, pinned production root and a qualifying signed receipt, an otherwise valid candidate is materialized only as `NOT_QUALIFIED`: `TTS_REQUIRED` and all production operations remain blocked. This slice deliberately has no state transition that clears `TTS_REQUIRED` and no LIVE promotion condition.
+
+Before publication, accepted audio/timing/license bytes are copied into an immutable staging directory only after current `execution.source_sha256`, active revision, source path, and script bindings match. A closed index of relative path, size, and hash is written before a receipt that binds that index; exclusive writes are flushed and the directory is renamed atomically. Replay revalidates only the materialized package through reparse-safe strict byte snapshots, rejecting missing, extra, duplicate-JSON, changed, or deleted files before return. It reruns the closed timing binding checks and the license signature/scope/binding verification using the application-configured pinned trust root, never a packet-supplied key. Index and receipt digests are integrity checks, not authority. Replay without that configured verifier fails closed rather than claiming cryptographic verification; it still does not assert acoustic alignment. A pre-existing interrupted staging directory is preserved and blocks import for audited operator handling: there is no automatic "recovery" or deletion of a staging directory from another invocation. A successful Director handoff returns the existing blocked PREPRODUCTION contract and never activates a provider or a pipeline. Lorena's canonical config applies only to `LORENA_CLOSING` (pt-BR, canonical voice hash, maximum 10 seconds, closing-only); official narration retains its separate narrator contract and is never defaulted to Lorena.
+
+## Negative acceptance tests
+
+1. A source-bound narrative is emitted as complete, exact prose with no fixed target duration.
+2. Segment matrix entries cover every source segment and retain verse, facts, and motion need.
+3. Three unqualified candidates remain descriptive and price-free.
+4. Nested candidate `price`, `cost`, `usd`, and `quote` keys are rejected.
+5. Missing or multiple family reflections, Unicode truncation, and a closing estimate over 10 seconds are rejected.
+6. A previous rejected revision remains unchanged when a successor source is advanced.
+7. A self-emitted or stale review, or absent/rejected authorization, cannot construct a TTS provider.
+8. A TEST non-silent WAV fixture with WordBoundary data reaches the existing storyboard path; a resume reuses every hash-valid segment without synthesis.

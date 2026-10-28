@@ -43,6 +43,21 @@ modo LIVE, `dispatch_baselines()` recebe mapas de preço e autoridade por reques
 ID e os encaminha sem conversão ao executor; falta, troca ou expiração bloqueia a
 submissão antes do POST.
 
+## Ponte autônoma TEST
+
+`AutonomousCompiledTestAdapter` conecta as baselines de um `OperationalPipeline`
+ao `AutonomousTwoGateRunner` sem introduzir um segundo writer. A fábrica
+`DirectorAgent.create_autonomous_compiled_test_adapter()` exige um pipeline de
+áudio `TEST`, teto idêntico ao da política e reutiliza a mesma instância de
+`Executor` e o mesmo SQLite. O pacote do runner vincula checksum do episódio
+compilado e do manifest de referências; após `COMPLETE`, inspeção técnica local
+e QA independente TEST, o adapter projeta a decisão para o manifest aprovado
+compilado. Em seguida `stage_local_delivery()` usa o `LocalRenderer` existente,
+cria transcript/SRT/VTT TEST separados, persiste evidência hash-bound de
+manifesto, thumbnail, vídeo e sidecars, exige QA técnica independente TEST e só
+então delega a abertura do gate de thumbnail ao runner. Ele não chama entrega,
+Telegram, publicação, provider remoto nem aceita `LIVE`.
+
 Após o render, `DirectorAgent.complete_compiled_final_qa()` materializa captions
 VTT, thumbnail e metadata a partir do pacote/manifest congelados, executa a
 auditoria de evidências e só então abre o gate humano de thumbnail.
@@ -60,3 +75,22 @@ iniciar novos trabalhos com IDs sucessores.
   antes de iniciar FFmpeg.
 - Thumbnail, vídeo e publicação continuam gates humanos separados; nenhuma rota
   desta camada publica ou agenda YouTube.
+
+## CLI compilada TEST
+
+`studio autonomous start --compiled-input <packet>` materializa um snapshot de
+`compiled.json`, `manifest.json` e `policy.json`. O packet precisa conter todos
+os assets referenciados, sem links, sob o próprio diretório; o CLI valida os
+hashes antes de copiar e reata os paths para o snapshot. A política é TEST-only,
+desabilita publicação e permite unicamente `test-local-fixture`. Nenhum campo do
+packet escolhe classe de adapter, renderer, endpoint remoto ou provider.
+
+`status` e `resume` reconstroem episode, manifest, policy, pipeline, executor,
+ledger e adapter usando os mesmos SQLite/snapshot. `remediate --correction
+CENA=prompt` e `heroes` chamam os sucessores existentes no mesmo runner, não um
+novo control plane. Snapshot ou bytes de artefato divergentes bloqueiam; resume
+não reenvia recibos COMPLETE. A fixture e quaisquer `--test-*` decisões são
+rotuladas TEST e não são aprovação humana, delivery ou publicação.
+- A ponte autônoma TEST cobre baseline, sucessores de remediação, heroes, render local,
+  sidecars, QA técnica e gates ordenados no mesmo runner; segue estritamente TEST e
+  não abre autoridade LIVE.

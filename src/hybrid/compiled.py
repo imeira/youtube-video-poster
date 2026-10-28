@@ -8,6 +8,7 @@ only the next hash-bound work eligible in the durable ``Executor`` ledger.
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from dataclasses import asdict, dataclass
 from decimal import Decimal
@@ -23,7 +24,13 @@ from src.hybrid.artifacts import (
     sha256,
 )
 from src.hybrid.execution import Executor, Job, Provider
-from src.hybrid.technical_qa import inspect_image
+from src.hybrid.quality_first_motion import (
+    quality_first_motion_binding,
+    read_quality_first_motion_binding,
+    select_motion_inventory,
+    validate_quality_first_motion_inventory,
+)
+from src.hybrid.technical_qa import inspect_clip, inspect_image
 from src.hybrid.throughput import DurableQueue, run_bounded_wave
 
 
@@ -92,15 +99,24 @@ class CompiledEpisode:
         episode = raw["episode"]
         audio = FrozenAsset(**{**episode["audio"], "path": Path(episode["audio"]["path"])})
         result = cls.compile(episode["episode_id"], audio, (FrameSpec(**frame) for frame in episode["frames"]))
-        if episode.get("source_binding") is not None:
-            result = cls(result.episode_id, result.audio, result.frames, episode["source_binding"])
+        source_binding = episode.get("source_binding")
+        if source_binding is not None:
+            read_quality_first_motion_binding(source_binding)
+            result = cls(result.episode_id, result.audio, result.frames, source_binding)
         if raw.get("checksum") != result.checksum:
             raise ValueError("compiled episode checksum mismatch")
         return result
 
 
-def compile_storyboard(episode_id: str, audio: FrozenAsset, scenes) -> CompiledEpisode:
-    """Compile already-authored visual prompts; it never asks a model per frame."""
+def compile_storyboard(
+    episode_id: str, audio: FrozenAsset, scenes, *, motion_routes=None, motion_policy=None
+) -> CompiledEpisode:
+    """Compile prompts and optionally bind an offline quality-first motion inventory.
+
+    No route is dispatched here.  Packets without ``motion_routes`` remain
+    explicitly legacy-unbound for compatibility with historical compilations.
+    """
+    scenes = tuple(scenes)
     frames = []
     for scene in scenes:
         start = scene.get("start", scene.get("start_s"))
@@ -123,7 +139,19 @@ def compile_storyboard(episode_id: str, audio: FrozenAsset, scenes) -> CompiledE
                 hero=bool(scene.get("hero", False)),
             )
         )
-    return CompiledEpisode.compile(episode_id, audio, frames)
+    compiled = CompiledEpisode.compile(episode_id, audio, frames)
+    if motion_routes is None:
+        if motion_policy is not None:
+            raise ValueError("motion policy requires explicit motion routes")
+        if any("motion_requirement" in scene for scene in scenes):
+            raise ValueError("motion routes are required for an explicit motion contract")
+        return compiled
+    if motion_policy is not None and motion_policy != {"mode": "TEST"}:
+        raise ValueError("quality-first motion policy is closed to TEST until trusted LIVE evidence exists")
+    binding = quality_first_motion_binding(select_motion_inventory(scenes, motion_routes))
+    if motion_policy is not None:
+        binding["quality_first_motion_policy"] = dict(motion_policy)
+    return CompiledEpisode(compiled.episode_id, compiled.audio, compiled.frames, binding)
 
 
 class ProductionRun:
@@ -139,6 +167,7 @@ class ProductionRun:
         image_cost: Decimal,
         imported_scenes=(),
         blocked_scenes=(),
+        motion_inventory=None,
     ):
         if not endpoint.strip() or image_cost <= 0:
             raise ValueError("explicit endpoint and positive image cost required")
@@ -151,6 +180,7 @@ class ProductionRun:
         self.image_cost = image_cost
         self.imported_scenes = frozenset(imported_scenes)
         self.blocked_scenes = frozenset(blocked_scenes)
+        self.motion_inventory = motion_inventory
         if not self.imported_scenes <= self.blocked_scenes:
             raise ValueError("imported scenes must be permanently non-submittable")
         known_scenes = {frame.scene_id for frame in episode.frames}
@@ -200,8 +230,15 @@ class ProductionRun:
             predecessor=predecessor,
         )
 
+    def _require_executable_motion_inventory(self):
+        """Fail closed before a quality-first REQUIRED inventory can release work."""
+        if self.motion_inventory is not None and self.motion_inventory["status"] != "PASS":
+            raise ValueError("quality-first motion inventory is REQUIRED; dispatch blocked")
+
     def baseline_jobs(self) -> tuple[Job, ...]:
         """Return the exact baseline jobs that need current LIVE authority."""
+        if self.motion_inventory is not None and self.motion_inventory["status"] != "PASS":
+            return ()
         return tuple(self._baselines.values())
 
     async def dispatch_baselines(
@@ -213,6 +250,7 @@ class ProductionRun:
         on_completed=None,
         prefetch: int = 0,
     ):
+        self._require_executable_motion_inventory()
         if not self._baselines:
             return {}
         authorizations = authorizations or {}
@@ -268,23 +306,57 @@ class ProductionRun:
     def eligible_hero_jobs(self, cost: Decimal, endpoint: str):
         if cost <= 0 or not endpoint.strip():
             raise ValueError("explicit hero endpoint and positive cost required")
+        self._require_executable_motion_inventory()
         eligible = []
+        selected_motion = {
+            item["scene_id"]: item for item in (self.motion_inventory or {}).get("items", [])
+        }
         for frame in self.episode.frames:
-            if not frame.hero or frame.scene_id in self._heroes:
+            selected = selected_motion.get(frame.scene_id)
+            requires_i2v = selected and selected.get("motion_requirement") == "ARTICULATED"
+            if (not frame.hero and not requires_i2v) or frame.scene_id in self._heroes:
                 continue
+            if (
+                selected
+                and selected.get("motion_requirement") == "ARTICULATED"
+                and endpoint != selected["endpoint"]
+            ):
+                raise ValueError("selected I2V endpoint cannot be overridden")
             baseline = self.executor.inspect(self._active_images[frame.scene_id].request_id)
             if baseline and baseline.get("qa") is True:
-                hero = Job(
-                    scene=frame.scene_id,
-                    category="hero",
-                    mode=self.episode.audio.mode,
-                    endpoint=endpoint,
-                    payload={
+                if selected and selected.get("motion_requirement") == "ARTICULATED":
+                    hero_endpoint = selected["endpoint"]
+                    hero_payload = {
                         "episode": self.episode.episode_id,
                         "compilation": self.episode.checksum,
                         "prompt": frame.prompt,
                         "semantic_action": frame.semantic_action,
-                    },
+                        "quality_first_motion": {
+                            "route_id": selected["route_id"],
+                            "endpoint": selected["endpoint"],
+                            "model": selected["model"],
+                            "geometry": selected["geometry"],
+                            "clip_fps": selected["clip_fps"],
+                            "duration_s": selected["duration_s"],
+                            "audio_policy": selected["audio_policy"],
+                            "route_evidence_hash": selected["route_evidence_hash"],
+                            "evidence_mode": selected["evidence_mode"],
+                        },
+                    }
+                else:
+                    hero_endpoint = endpoint
+                    hero_payload = {
+                        "episode": self.episode.episode_id,
+                        "compilation": self.episode.checksum,
+                        "prompt": frame.prompt,
+                        "semantic_action": frame.semantic_action,
+                    }
+                hero = Job(
+                    scene=frame.scene_id,
+                    category="hero",
+                    mode=self.episode.audio.mode,
+                    endpoint=hero_endpoint,
+                    payload=hero_payload,
                     manifest=self.source_manifest,
                     cost=cost,
                     predecessor=self._active_images[frame.scene_id].request_id,
@@ -295,6 +367,7 @@ class ProductionRun:
         return tuple(eligible)
 
     def remediation_job(self, scene_id: str, correction_prompt: str):
+        self._require_executable_motion_inventory()
         existing = self._corrections.get(scene_id)
         if existing is not None:
             if existing.payload["prompt"] != correction_prompt:
@@ -327,6 +400,7 @@ class ProductionRun:
         on_completed=None,
     ):
         """Dispatch every rejected image correction as one bounded durable wave."""
+        self._require_executable_motion_inventory()
         if not isinstance(corrections, dict) or not corrections:
             raise ValueError("correction wave must be a nonempty scene-to-prompt mapping")
         unknown = set(corrections) - {frame.scene_id for frame in self.episode.frames}
@@ -371,10 +445,20 @@ class ProductionRun:
         return {job.scene: by_request[job.request_id] for job in jobs}
 
     def render_ready(self):
+        if self.motion_inventory is not None and self.motion_inventory["status"] != "PASS":
+            return False
         baselines = [self.executor.inspect(job.request_id) for job in self._active_images.values()]
         if not all(row and row.get("qa") is True for row in baselines):
             return False
-        if any(frame.hero and frame.scene_id not in self._heroes for frame in self.episode.frames):
+        articulated = {
+            item["scene_id"]
+            for item in (self.motion_inventory or {}).get("items", [])
+            if item.get("motion_requirement") == "ARTICULATED"
+        }
+        if any(
+            (frame.hero or frame.scene_id in articulated) and frame.scene_id not in self._heroes
+            for frame in self.episode.frames
+        ):
             return False
         heroes = [self.executor.inspect(job.request_id) for job in self._heroes.values()]
         return all(row and row.get("qa") is True for row in heroes)
@@ -398,6 +482,14 @@ class OperationalPipeline:
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.episode = episode
+        binding = read_quality_first_motion_binding(episode.source_binding)
+        self.motion_inventory = (
+            validate_quality_first_motion_inventory(
+                binding, (frame.scene_id for frame in episode.frames), episode.audio.mode
+            )
+            if binding is not None
+            else None
+        )
         self.imported_assets = dict(imported_assets or {})
         imported_scenes = frozenset(self.imported_assets)
         blocked_scenes = frozenset(blocked_scenes)
@@ -416,6 +508,7 @@ class OperationalPipeline:
             image_cost=image_cost,
             imported_scenes=imported_scenes,
             blocked_scenes=blocked_scenes,
+            motion_inventory=self.motion_inventory,
         )
         self._approved_heroes: dict[str, FrozenAsset] = {}
         self.episode.save(self.workspace / "compiled_episode.json")
@@ -500,8 +593,28 @@ class OperationalPipeline:
         )
 
     def render_ready(self):
-        """Expose the compiled run readiness at the persisted pipeline boundary."""
-        return self.run.render_ready()
+        """Expose readiness only after selected I2V clips pass technical and semantic QA."""
+        if not self.run.render_ready():
+            return False
+        for item in (self.motion_inventory or {}).get("items", []):
+            if item.get("motion_requirement") != "ARTICULATED":
+                continue
+            job = self.run._heroes.get(item["scene_id"])
+            if job is None:
+                return False
+            receipt = self.run.executor.inspect(job.request_id)
+            packet_path = self.workspace / "qa_packets" / f"{job.request_id}.json"
+            if not receipt or not packet_path.is_file():
+                return False
+            packet = json.loads(packet_path.read_text(encoding="utf-8"))
+            if (packet.get("technical_pass") is not True
+                    or packet.get("result_sha256") != receipt.get("result_sha256")
+                    or packet.get("predecessor") != job.predecessor
+                    or type(packet.get("duration")) not in {int, float}
+                    or not math.isfinite(packet["duration"])
+                    or abs(packet["duration"] - item["duration_s"]) > 1 / item["clip_fps"] + 0.02):
+                return False
+        return True
 
     def prepare_qa_packets(self, scene_ids=None):
         """Write deterministic, exact-hash technical QA packets in one pass.
@@ -547,7 +660,21 @@ class OperationalPipeline:
 
     def record_visual_qa(self, scene_id: str, result_sha256: str, approved: bool, reviewer: str):
         job = self.run._completed_job_for_result(scene_id, result_sha256)
-        if job.category not in {"hero", "hero_retry"}:
+        selected = next((item for item in (self.motion_inventory or {}).get("items", [])
+                         if item["scene_id"] == scene_id), None)
+        requires_i2v = selected and selected.get("motion_requirement") == "ARTICULATED"
+        if requires_i2v and job.category in {"hero", "hero_retry"}:
+            receipt = self.run.executor.inspect(job.request_id)
+            packet = inspect_clip(
+                Path(receipt["result"]), expected_sha256=result_sha256, geometry=selected["geometry"],
+                duration_s=selected["duration_s"], fps=selected["clip_fps"], audio_policy=selected["audio_policy"],
+                predecessor=job.predecessor, receipt_predecessor=receipt["request"]["predecessor"],
+            )
+            packet.update(scene_id=scene_id, compilation=self.episode.checksum, request_id=job.request_id)
+            atomic_json(self.workspace / "qa_packets" / f"{job.request_id}.json", packet)
+            if packet.get("technical_pass") is not True:
+                raise ValueError("clip technical QA must pass before semantic reviewer")
+        elif job.category not in {"hero", "hero_retry"}:
             packet = self.prepare_qa_packets((scene_id,)).get(scene_id)
             if (
                 not packet
@@ -576,6 +703,8 @@ class OperationalPipeline:
         """Build renderer inputs only from the active image and approved hero receipts."""
         from src.hybrid.render import Scene
 
+        if self.motion_inventory is not None and self.motion_inventory["status"] != "PASS":
+            raise ValueError("quality-first motion inventory is REQUIRED; render scenes blocked")
         if not self.render_ready():
             raise ValueError("compiled QA receipts are incomplete; render scenes blocked")
         approved = self.approved_manifest()
@@ -586,8 +715,23 @@ class OperationalPipeline:
         scenes = []
         for frame, image in zip(self.episode.frames, manifest.assets, strict=True):
             hero = self._approved_heroes.get(frame.scene_id)
-            if frame.hero and hero is None:
+            selected = next(
+                (item for item in (self.motion_inventory or {}).get("items", []) if item["scene_id"] == frame.scene_id),
+                None,
+            )
+            requires_i2v = selected and selected.get("motion_requirement") == "ARTICULATED"
+            if (frame.hero or requires_i2v) and hero is None:
                 raise ValueError("approved hero asset missing from operational pipeline")
+            if requires_i2v:
+                job = self.run._heroes.get(frame.scene_id)
+                expected = {
+                    "route_id": selected["route_id"], "endpoint": selected["endpoint"],
+                    "model": selected["model"], "geometry": selected["geometry"],
+                    "route_evidence_hash": selected["route_evidence_hash"], "evidence_mode": "TEST",
+                    "clip_fps": selected["clip_fps"], "duration_s": selected["duration_s"], "audio_policy": selected["audio_policy"],
+                }
+                if job is None or job.endpoint != selected["endpoint"] or job.payload.get("quality_first_motion") != expected:
+                    raise ValueError("approved articulated clip does not match selected I2V route")
             scenes.append(Scene(image=image, seconds=frame.end - frame.start, clip=hero))
         return tuple(scenes)
 

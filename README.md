@@ -82,8 +82,12 @@ default prices, reviewer model, destination, or human approval are supplied.
 `run`/`resume` start provider work; construction/preflight are local checks.
 The first run freezes both media, sends only the thumbnail and waits for its exact
 approval. Thumbnail approval enters `READY_VIDEO_DELIVERY`; a later `resume`
-sends the frozen video, then waits for its independent approval. Video approval
-stops at `WAITING_FINAL_APPROVAL`, with no publication action available.
+sends the frozen video, then waits for its independent approval. The delivery
+controller persists and readbacks a hash-bound receipt before advancing; an
+ambiguous send is fail-closed and must be recovered from provider evidence,
+never reposted. Changed thumbnail bytes invalidate its delivery and approval,
+so they cannot unlock video delivery. Video approval stops at
+`WAITING_FINAL_APPROVAL`, with no publication action available.
 Plans bind implementation bytes. Final encoded audio must measure -16 LUFS ±1 LU
 and <= -1 dBTP, with no subtitle streams or burned captions.
 

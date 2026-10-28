@@ -95,6 +95,8 @@ class StudioConfig:
     generative_video: GenerativeVideoConfig
     runpod: RunPodConfig
     hardware: HardwareConfig
+    approval_delivery_chat_id: str
+    approval_delivery_trusted_sender_ids: frozenset[str]
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -198,6 +200,14 @@ def load_config(config_path: str | Path | None = None) -> StudioConfig:
             encoder_preset=hw_raw.get("encoder", {}).get("preset", "veryfast"),
             encoder_crf=hw_raw.get("encoder", {}).get("crf", 20),
             lcm_lora=hw_raw.get("profiles", {}).get("LOW_VRAM_4GB", {}).get("lcm_lora", True),
+        ),
+        approval_delivery_chat_id=str(
+            raw.get("approval_delivery", {}).get("chat_id", "")
+        ),
+        approval_delivery_trusted_sender_ids=frozenset(
+            str(sender).strip()
+            for sender in raw.get("approval_delivery", {}).get("trusted_sender_ids", [])
+            if str(sender).strip()
         ),
         raw=raw,
     )

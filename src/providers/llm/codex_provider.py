@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from src.providers.llm.usage import UsageStore
 
 
 @dataclass(frozen=True)
@@ -22,16 +25,21 @@ class CodexLLMProvider:
 
     def __init__(
         self,
-        model: str = "gpt-5.6-sol",
-        reasoning_effort: str = "high",
+        model: str = "gpt-5.6-terra",
+        reasoning_effort: str = "medium",
         timeout: int = 180,
         executable: str = "codex",
+        usage_path: Path | None = None,
+        task: str = "unclassified",
     ) -> None:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.timeout = timeout
         self.executable = executable
         self.last_usage = CodexUsage()
+        self.last_usage_reported = False
+        self.usage_store = UsageStore(usage_path) if usage_path is not None else None
+        self.task = task
 
     def available(self) -> bool:
         return shutil.which(self.executable) is not None
@@ -84,6 +92,33 @@ class CodexLLMProvider:
         temperature: float = 0.7,
         model: str = "",
     ) -> str:
+        """Persist intent and sanitized usage when telemetry is configured."""
+        store = self.usage_store
+        invocation = store.begin(model=model or self.model, task=self.task,
+                                 prompt=self._build_prompt(system, prompt, max_tokens, temperature)) if store else None
+        started = time.monotonic()
+        self.last_usage_reported = False
+        try:
+            result = await self._complete(prompt, system, max_tokens, temperature, model)
+        except BaseException as error:
+            if store:
+                store.finish(invocation, status='CANCELLED' if isinstance(error, asyncio.CancelledError) else 'FAILED',
+                             usage=None, latency_s=time.monotonic() - started)
+            raise
+        if store:
+            store.finish(invocation, status='COMPLETE',
+                         usage=asdict(self.last_usage) if self.last_usage_reported else None,
+                         latency_s=time.monotonic() - started)
+        return result
+
+    async def _complete(
+        self,
+        prompt: str,
+        system: str = "",
+        max_tokens: int = 2000,
+        temperature: float = 0.7,
+        model: str = "",
+    ) -> str:
         """Return the final Codex agent message.
 
         ``max_tokens`` and ``temperature`` remain in the shared provider contract;
@@ -118,6 +153,13 @@ class CodexLLMProvider:
             raise RuntimeError(f"Codex completion failed with exit {process.returncode}: {summary}")
 
         self.last_usage = self.extract_usage(output)
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get('type') == 'turn.completed' and isinstance(event.get('usage'), dict):
+                self.last_usage_reported = True
         return self.extract_message(output)
 
     @staticmethod

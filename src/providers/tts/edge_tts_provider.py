@@ -8,12 +8,11 @@ B5: Measured RTF 0.048x (1.8s gen for 36.5s audio)
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 import subprocess
-import time
 import tempfile
+import time
 from pathlib import Path
 
 from src.providers.base import TTSProvider, TTSResult
@@ -112,7 +111,13 @@ class EdgeTTSProvider(TTSProvider):
             word_timestamps=word_timestamps,
             cost=0.0,
             generation_time=gen_time,
-            metadata={"voice": voice, "rate": rate, "pitch": pitch, "rtf": gen_time / duration if duration > 0 else 0},
+            metadata={
+                "voice": voice,
+                "rate": rate,
+                "pitch": pitch,
+                "rtf": gen_time / duration if duration > 0 else 0,
+                "boundary_source": "WordBoundary",
+            },
         )
 
     @staticmethod
@@ -154,10 +159,10 @@ class EdgeTTSProvider(TTSProvider):
         try:
             r = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", audio_path],
-                capture_output=True, text=True, timeout=10,
+                check=False, capture_output=True, text=True, timeout=10,
             )
             return float(r.stdout.strip()) if r.stdout.strip() else 0.0
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired, ValueError):
             return 0.0
 
     async def word_align(self, audio_path: str, language: str = "pt") -> list[dict]:

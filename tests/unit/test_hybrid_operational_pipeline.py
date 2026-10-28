@@ -1,5 +1,9 @@
 import asyncio
+import json
+import subprocess
 from decimal import Decimal
+from hashlib import sha256
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -20,6 +24,16 @@ def source_manifest(tmp_path):
     )
 
 
+def real_test_audio(path):
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i",
+            "sine=frequency=440:sample_rate=48000:duration=2", "-ac", "2", str(path),
+        ],
+        check=True,
+    )
+
+
 class ImageProvider:
     mode = "TEST"
 
@@ -37,6 +51,91 @@ class ImageProvider:
 
     async def recover(self, job, request_id, provider_id, partial, checkpoint):
         raise AssertionError("unexpected recovery")
+
+
+@pytest.mark.asyncio
+async def test_test_compiled_adapter_runs_the_real_pipeline_jobs_through_durable_runner(
+    tmp_path,
+):
+    from src.hybrid.autonomous import (
+        AutonomousCompiledTestAdapter,
+        AutonomousPolicy,
+        AutonomousTwoGateRunner,
+    )
+    from src.hybrid.compiled import OperationalPipeline, compile_storyboard
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    audio = tmp_path / "approved.wav"
+    audio.write_bytes(b"approved audio")
+    episode = compile_storyboard(
+        "TEST-EPX",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        [{"scene_id": "R001", "start": 0, "end": 2, "image_prompt": "céu", "action": "céu"}],
+    )
+    executor = Executor(tmp_path / "control.db", Config(limit=Decimal("1.00")))
+    pipeline = OperationalPipeline(
+        episode, executor, source_manifest(tmp_path), workspace=tmp_path / "compiled",
+        endpoint="test-image", image_cost=Decimal(".02"),
+    )
+    policy_document = {
+        "schema": 1, "version": "test-v1", "mode": "TEST", "episode_cap_usd": "1.00",
+        "month_cap_usd": "1.00", "experiment_cap_usd": "1.00",
+        "allowed_providers": ["test-image"], "publication": {"enabled": False},
+    }
+    policy = AutonomousPolicy.from_dict(policy_document)
+    budget = StandingBudgetLedger(
+        tmp_path / "budget.sqlite3", policy_sha256=policy.digest,
+        episode_limit_usd=policy.episode_cap_usd, month_limit_usd=policy.month_cap_usd,
+        experiment_limit_usd=policy.experiment_cap_usd, mode="TEST",
+    )
+    runner = AutonomousTwoGateRunner(tmp_path / "runner", "TEST-EPX", policy, executor, budget)
+    adapter = AutonomousCompiledTestAdapter(runner, pipeline)
+
+    assert adapter.start()["state"] == "READY"
+    result = await adapter.resume(
+        ImageProvider(tmp_path),
+        lambda receipt: {
+            "approved": True, "reviewer": "independent-test-qa",
+            "reviewer_identity": {"subject": "test-qa", "issuer": "TEST"},
+            "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"],
+        },
+    )
+
+    assert result["state"] == "MEDIA_PENDING"
+    assert pipeline.render_ready() is True
+    manifest = pipeline.approved_manifest()
+    assert manifest.assets[0].sha256 == executor.inspect(pipeline.baseline_jobs()[0].request_id)["result_sha256"]
+
+
+def test_director_builds_test_compiled_adapter_with_the_pipeline_executor(tmp_path):
+    from src.agents.director import DirectorAgent
+    from src.hybrid.compiled import OperationalPipeline, compile_storyboard
+
+    audio = tmp_path / "approved.wav"
+    audio.write_bytes(b"approved audio")
+    episode = compile_storyboard(
+        "TEST-EPX",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        [{"scene_id": "R001", "start": 0, "end": 2, "image_prompt": "céu", "action": "céu"}],
+    )
+    executor = Executor(tmp_path / "control.db", Config(limit=Decimal("1.00")))
+    pipeline = OperationalPipeline(
+        episode, executor, source_manifest(tmp_path), workspace=tmp_path / "compiled",
+        endpoint="test-image", image_cost=Decimal(".02"),
+    )
+    policy_document = {
+        "schema": 1, "version": "test-v1", "mode": "TEST", "episode_cap_usd": "1.00",
+        "month_cap_usd": "1.00", "experiment_cap_usd": "1.00",
+        "allowed_providers": ["test-image"], "publication": {"enabled": False},
+    }
+    director = DirectorAgent.__new__(DirectorAgent)
+
+    adapter = director.create_autonomous_compiled_test_adapter(
+        pipeline, tmp_path / "runner", policy_document
+    )
+
+    assert adapter.runner.executor is executor
+    assert adapter.runner.episode_id == "TEST-EPX"
 
 
 def test_compiled_packet_round_trips_exact_audio_and_semantic_storyboard(tmp_path):
@@ -483,3 +582,240 @@ def test_director_issues_live_preflight_for_compiled_baselines(tmp_path, monkeyp
 
     with pytest.raises(ValueError, match="nonempty"):
         director.issue_compiled_live_preflight("EPX", pipeline, Resolver(), reviewer="budget-qa")
+
+
+@pytest.mark.asyncio
+async def test_compiled_adapter_renders_local_sidecars_and_stages_two_separate_test_gates_after_fresh_resume(tmp_path):
+    """The compiled bridge reaches actual local media without manufacturing a human decision."""
+    from src.hybrid.autonomous import (
+        AutonomousCompiledTestAdapter,
+        AutonomousPolicy,
+        AutonomousTwoGateRunner,
+    )
+    from src.hybrid.compiled import OperationalPipeline, compile_storyboard
+    from src.hybrid.render import LocalRenderer
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    audio = tmp_path / "approved.wav"
+    real_test_audio(audio)
+    episode = compile_storyboard(
+        "TEST-EPX", FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        [{"scene_id": "R001", "start": 0, "end": 2, "image_prompt": "céu", "action": "céu"}],
+    )
+    executor = Executor(tmp_path / "control.db", Config(limit=Decimal("1.00")))
+    pipeline = OperationalPipeline(
+        episode, executor, source_manifest(tmp_path), workspace=tmp_path / "compiled",
+        endpoint="test-image", image_cost=Decimal(".02"),
+    )
+    parsed = AutonomousPolicy.from_dict({
+        "schema": 1, "version": "test-v1", "mode": "TEST", "episode_cap_usd": "1.00",
+        "month_cap_usd": "1.00", "experiment_cap_usd": "1.00",
+        "allowed_providers": ["test-image"], "publication": {"enabled": False},
+    })
+    budget = StandingBudgetLedger(
+        tmp_path / "budget.sqlite3", policy_sha256=parsed.digest,
+        episode_limit_usd=parsed.episode_cap_usd, month_limit_usd=parsed.month_cap_usd,
+        experiment_limit_usd=parsed.experiment_cap_usd, mode="TEST",
+    )
+    root = tmp_path / "runner"
+    adapter = AutonomousCompiledTestAdapter(
+        AutonomousTwoGateRunner(root, "TEST-EPX", parsed, executor, budget), pipeline
+    )
+    adapter.start()
+    await adapter.resume(
+        ImageProvider(tmp_path),
+        lambda receipt: {
+            "approved": True, "reviewer": "independent-image-test-qa",
+            "reviewer_identity": {"subject": "image-qa", "issuer": "TEST"},
+            "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"],
+        },
+    )
+
+    # A new process reloads the durable executor/runner facts and does not rerun image work.
+    resumed = AutonomousCompiledTestAdapter(
+        AutonomousTwoGateRunner(root, "TEST-EPX", parsed, executor, budget), pipeline
+    )
+    assert (await resumed.resume(ImageProvider(tmp_path), lambda _: pytest.fail("QA reran")))["state"] == "MEDIA_PENDING"
+    renderer = LocalRenderer(width=320, height=180)
+    with pytest.raises(ValueError, match="independent TEST media QA rejected"):
+        resumed.stage_local_delivery(
+            renderer,
+            lambda evidence: {
+                "approved": False, "mode": "TEST", "reviewer": "independent-media-test-qa",
+                "reviewer_identity": {"subject": "media-qa", "issuer": "TEST"},
+                "manifest_sha256": evidence["manifest_sha256"],
+                "thumbnail_sha256": evidence["thumbnail_sha256"],
+                "video_sha256": evidence["video_sha256"],
+                "sidecars_sha256": {kind: item["sha256"] for kind, item in evidence["sidecars"].items()},
+            },
+            hold=3,
+        )
+    assert resumed.runner._load()["state"] == "MEDIA_PENDING"
+    master = tmp_path / "compiled" / "delivery" / "master.mp4"
+    master_sha256 = sha256(master.read_bytes()).hexdigest()
+    staged = resumed.stage_local_delivery(
+        object(),  # Resume consumes verified evidence; it must not render again.
+        lambda evidence: {
+            "approved": True, "mode": "TEST", "reviewer": "independent-media-test-qa",
+            "reviewer_identity": {"subject": "media-qa", "issuer": "TEST"},
+            "manifest_sha256": evidence["manifest_sha256"],
+            "thumbnail_sha256": evidence["thumbnail_sha256"],
+            "video_sha256": evidence["video_sha256"],
+            "sidecars_sha256": {kind: item["sha256"] for kind, item in evidence["sidecars"].items()},
+        },
+        hold=3,
+    )
+
+    assert staged["state"] == "WAITING_THUMBNAIL_APPROVAL"
+    assert sha256(master.read_bytes()).hexdigest() == master_sha256
+    evidence = json.loads((tmp_path / "compiled" / "delivery" / "evidence.json").read_text())
+    assert evidence["mode"] == "TEST"
+    assert set(evidence["sidecars"]) == {"transcript", "srt", "vtt"}
+    assert (tmp_path / "compiled" / "delivery" / "master.mp4").is_file()
+    assert resumed.runner.record_human_gate(
+        "thumbnail", Path(staged["media"]["thumbnail"]["path"]), approved=True, reviewer="TEST decision"
+    )["state"] == "WAITING_VIDEO_APPROVAL"
+    assert resumed.runner.record_human_gate(
+        "video", Path(staged["media"]["video"]["path"]), approved=True, reviewer="TEST decision"
+    )["state"] == "READY_TO_PUBLISH"
+
+
+@pytest.mark.asyncio
+async def test_compiled_adapter_preserves_rejected_baseline_then_resumes_remediation_hero_and_two_gates(tmp_path):
+    """A rejected image is retired; only its hash-bound successor can reach render."""
+    from src.hybrid.autonomous import (
+        AutonomousCompiledTestAdapter,
+        AutonomousPolicy,
+        AutonomousTwoGateRunner,
+    )
+    from src.hybrid.compiled import OperationalPipeline, compile_storyboard
+    from src.hybrid.render import LocalRenderer
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    class MixedProvider(ImageProvider):
+        async def submit(self, job, request_id, checkpoint):
+            self.calls += 1
+            checkpoint(provider_id=f"provider-{request_id}")
+            if job.category == "hero":
+                output = self.root / f"{request_id}.mp4"
+                await asyncio.to_thread(
+                    subprocess.run,
+                    [
+                        "ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i",
+                        "color=c=red:s=1280x720:d=5", "-f", "lavfi", "-i",
+                        "anullsrc=r=48000:cl=stereo", "-shortest", "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", str(output),
+                    ],
+                    check=True,
+                )
+            else:
+                output = self.root / f"{request_id}.png"
+                Image.new("RGB", (1280, 720), "blue").save(output)
+            return ProviderResult(output, job.cost)
+
+    audio = tmp_path / "approved.wav"
+    await asyncio.to_thread(
+        subprocess.run,
+        [
+            "ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i",
+            "sine=frequency=440:sample_rate=48000:duration=7", "-ac", "2", str(audio),
+        ],
+        check=True,
+    )
+    episode = compile_storyboard(
+        "TEST-RECOVERY",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        [
+            {"scene_id": "R001", "start": 0, "end": 2, "image_prompt": "céu", "action": "céu"},
+            {"scene_id": "R002", "start": 2, "end": 7, "image_prompt": "mar", "action": "mar", "hero": True},
+        ],
+    )
+    executor = Executor(tmp_path / "control.db", Config(limit=Decimal("1.00")))
+    pipeline = OperationalPipeline(
+        episode, executor, source_manifest(tmp_path), workspace=tmp_path / "compiled",
+        endpoint="test-image", image_cost=Decimal(".02"),
+    )
+    parsed = AutonomousPolicy.from_dict({
+        "schema": 1, "version": "test-v1", "mode": "TEST", "episode_cap_usd": "1.00",
+        "month_cap_usd": "1.00", "experiment_cap_usd": "1.00",
+        "allowed_providers": ["test-image"], "publication": {"enabled": False},
+    })
+    budget = StandingBudgetLedger(
+        tmp_path / "budget.sqlite3", policy_sha256=parsed.digest,
+        episode_limit_usd=parsed.episode_cap_usd, month_limit_usd=parsed.month_cap_usd,
+        experiment_limit_usd=parsed.experiment_cap_usd, mode="TEST",
+    )
+    root = tmp_path / "runner"
+    adapter = AutonomousCompiledTestAdapter(
+        AutonomousTwoGateRunner(root, "TEST-RECOVERY", parsed, executor, budget), pipeline
+    )
+    provider = MixedProvider(tmp_path)
+    adapter.start()
+    rejected = await adapter.resume(
+        provider,
+        lambda receipt: {
+            "approved": receipt["request"]["scene"] != "R001", "reviewer": "independent-image-qa",
+            "reviewer_identity": {"subject": "image-qa", "issuer": "TEST"},
+            "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"],
+            "codes": ["SEMANTIC_REJECT"],
+        },
+    )
+    rejected_id = next(job.request_id for job in pipeline.baseline_jobs() if job.scene == "R001")
+    assert rejected["state"] == "REJECTED"
+    assert executor.inspect(rejected_id)["qa"] is False
+
+    remediated = await adapter.remediate(
+        {"R001": "céu sem defeito"}, provider,
+        lambda receipt: {
+            "approved": True, "reviewer": "independent-image-qa",
+            "reviewer_identity": {"subject": "image-qa", "issuer": "TEST"},
+            "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"],
+        },
+    )
+    correction = pipeline.run._active_images["R001"]
+    assert remediated["state"] == "MEDIA_PENDING"
+    assert correction.predecessor == rejected_id
+    assert correction.request_id != rejected_id
+    assert executor.inspect(rejected_id)["qa"] is False
+
+    heroed = await adapter.run_heroes(
+        Decimal(".02"), "test-image", provider,
+        lambda receipt: {
+            "approved": True, "reviewer": "independent-hero-qa",
+            "reviewer_identity": {"subject": "hero-qa", "issuer": "TEST"},
+            "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"],
+        },
+    )
+    assert heroed["state"] == "MEDIA_PENDING"
+    assert pipeline.render_ready() is True
+
+    fresh_executor = Executor(tmp_path / "control.db", Config(limit=Decimal("1.00")))
+    fresh_pipeline = OperationalPipeline(
+        episode, fresh_executor, source_manifest(tmp_path), workspace=tmp_path / "compiled",
+        endpoint="test-image", image_cost=Decimal(".02"),
+    )
+    fresh_budget = StandingBudgetLedger(
+        tmp_path / "budget.sqlite3", policy_sha256=parsed.digest,
+        episode_limit_usd=parsed.episode_cap_usd, month_limit_usd=parsed.month_cap_usd,
+        experiment_limit_usd=parsed.experiment_cap_usd, mode="TEST",
+    )
+    fresh = AutonomousCompiledTestAdapter(
+        AutonomousTwoGateRunner(root, "TEST-RECOVERY", parsed, fresh_executor, fresh_budget), fresh_pipeline
+    )
+    calls_before_resume = provider.calls
+    assert (await fresh.resume(provider, lambda _: pytest.fail("completed QA reran")))["state"] == "MEDIA_PENDING"
+    assert provider.calls == calls_before_resume
+    staged = fresh.stage_local_delivery(
+        LocalRenderer(width=320, height=180),
+        lambda evidence: {
+            "approved": True, "mode": "TEST", "reviewer": "independent-media-qa",
+            "reviewer_identity": {"subject": "media-qa", "issuer": "TEST"},
+            "manifest_sha256": evidence["manifest_sha256"],
+            "thumbnail_sha256": evidence["thumbnail_sha256"],
+            "video_sha256": evidence["video_sha256"],
+            "sidecars_sha256": {kind: item["sha256"] for kind, item in evidence["sidecars"].items()},
+        }, hold=3,
+    )
+    assert staged["state"] == "WAITING_THUMBNAIL_APPROVAL"
+    assert fresh.runner.record_human_gate("thumbnail", Path(staged["media"]["thumbnail"]["path"]), approved=True, reviewer="TEST decision")["state"] == "WAITING_VIDEO_APPROVAL"
+    assert fresh.runner.record_human_gate("video", Path(staged["media"]["video"]["path"]), approved=True, reviewer="TEST decision")["state"] == "READY_TO_PUBLISH"

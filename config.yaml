@@ -11,6 +11,12 @@ project:
   default_channel: "@EraUmaVezBibliaAnimada"
   version: "0.1.0"
 
+# Delivery gates require a configured, trusted destination; an empty value blocks sends.
+approval_delivery:
+  chat_id: ""
+  # Configured identities only; absent trusted inbound transport remains fail-closed.
+  trusted_sender_ids: []
+
 # --- §2 LOCAL-FIRST + CLOUD-ON-DEMAND ---
 production:
   strategy: comfy_cloud_reference_first
