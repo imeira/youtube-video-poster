@@ -201,6 +201,16 @@ class DirectorAgent:
         self.inbound_approval_source = inbound_approval_source
         self._agents: dict[str, Any] = {}
         self._episodes: dict[str, dict] = {}  # in-memory cache
+        # One flight owns an episode's non-idempotent local encode until its
+        # synchronous renderer has returned, even if its original caller is
+        # cancelled.  This is intentionally not a new executor: LocalRenderer
+        # retains ownership of its bounded scene/encoder worker pool.
+        self._compiled_render_flights: dict[str, tuple[str, asyncio.Task]] = {}
+        # This is deliberately a process-local, fixed one-render pool.  It does
+        # not claim a host-wide CPU limit; LocalRenderer retains its bounded
+        # internal scene parallelism and FFmpeg thread settings.
+        self._compiled_render_pool_size = 1
+        self._compiled_render_admission: asyncio.Semaphore | None = None
 
     def __getattr__(self, name: str):
         """Initialize legacy agents only on the path that actually needs them."""
@@ -784,43 +794,248 @@ class DirectorAgent:
             state.save(fs.paths.state_json)
         return {"approved": approved, "state": state.current_state.value}
 
+    def _compiled_render_contract(self, episode_id: str, pipeline, renderer, hold: int) -> dict[str, Any]:
+        """Close every mutable render input before ownership or recovery reuse."""
+        if hold not in (3, 4, 5):
+            raise ValueError("compiled render closing hold must be 3 to 5 seconds")
+        manifest = pipeline.approved_manifest()
+        audio = pipeline.episode.audio
+        scenes = pipeline.render_scenes(manifest)
+        scene_hashes = []
+        for scene in scenes:
+            image_sha256 = getattr(getattr(scene, "image", None), "sha256", None)
+            clip = getattr(scene, "clip", None)
+            clip_sha256 = getattr(clip, "sha256", None)
+            if not isinstance(image_sha256, str) or (clip is not None and not isinstance(clip_sha256, str)):
+                raise TypeError("compiled render scene hash is unavailable")
+            scene_hashes.append({"image_sha256": image_sha256, "clip_sha256": clip_sha256})
+        config = self.__dict__.get("config")
+        canonical_root = None
+        if config is not None:
+            # Do not resolve: receipt reads reject reparse points before opening.
+            canonical_root = str(EpisodeFS(episode_id, config).paths.root.absolute())
+        renderer_config = {
+            name: getattr(renderer, name, None)
+            for name in (
+                "width", "height", "fps", "filter_complex_threads",
+                "scene_workers", "encoder_threads",
+            )
+        }
+        if not isinstance(getattr(manifest, "checksum", None), str) or not isinstance(
+            getattr(audio, "sha256", None), str
+        ):
+            raise TypeError("compiled render immutable input hash is unavailable")
+        return {
+            "schema": "compiled-render-contract-v1",
+            "canonical_episode_root": canonical_root,
+            "manifest_sha256": manifest.checksum,
+            "audio_sha256": audio.sha256,
+            "scene_hashes": scene_hashes,
+            "renderer_config": renderer_config,
+            "hold_seconds": hold,
+        }
+
+    @staticmethod
+    def _compiled_render_contract_sha256(contract: dict[str, Any]) -> str:
+        return hashlib.sha256(
+            json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _canonical_render_json(value: dict[str, Any]) -> bytes:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+    @classmethod
+    def _read_canonical_render_json(
+        cls, path: Path, required_keys: set[str], label: str, *, canonical_episode_root: Path,
+    ) -> tuple[dict[str, Any], str]:
+        """Read canonical evidence from one reparse-safe immutable byte snapshot."""
+        from src.hybrid.external_trust_root import (
+            TrustRootVerificationError,
+            load_strict_json_snapshot,
+        )
+
+        try:
+            value, file_sha256, raw = load_strict_json_snapshot(
+                path, label, contained_by=canonical_episode_root, include_bytes=True,
+            )
+        except TrustRootVerificationError as error:
+            raise ValueError(f"{label} is unavailable") from error
+        if not isinstance(value, dict) or set(value) != required_keys or raw != cls._canonical_render_json(value):
+            raise ValueError(f"{label} is not strict canonical evidence")
+        return value, file_sha256
+
+    @classmethod
+    def _write_exclusive_render_json(
+        cls, path: Path, value: dict[str, Any], label: str, *, canonical_episode_root: Path,
+    ) -> None:
+        """Write only below the guarded lexical episode root."""
+        from src.hybrid.external_trust_root import (
+            TrustRootVerificationError,
+            load_strict_json_snapshot,
+        )
+        from src.hybrid.locks import reject_reparse_path
+
+        encoded = cls._canonical_render_json(value)
+        try:
+            root = reject_reparse_path(Path(canonical_episode_root))
+            candidate = reject_reparse_path(Path(path))
+            candidate.relative_to(root)
+        except ValueError as error:
+            raise ValueError(f"{label} rejects symlink or path outside canonical episode") from error
+        try:
+            descriptor = os.open(
+                candidate,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except FileExistsError as error:
+            try:
+                _existing, _existing_sha256, raw = load_strict_json_snapshot(
+                    candidate, label, contained_by=root, include_bytes=True,
+                )
+            except TrustRootVerificationError as snapshot_error:
+                raise ValueError(f"{label} is unavailable") from snapshot_error
+            if raw == encoded:
+                return
+            raise ValueError(f"{label} already exists") from error
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def _compiled_render_recovery_evidence(
+        self, fs, render_contract, contract_sha256, intent_path, completion_path,
+    ) -> tuple[dict[str, Any], str, dict[str, Any], str]:
+        """Authenticate the prepared intent, renderer completion and final bytes."""
+        from src.hybrid.artifacts import sha256
+
+        canonical_episode_root = Path(render_contract["canonical_episode_root"])
+        intent_keys = {"schema", "render_contract", "render_contract_sha256"}
+        intent, intent_sha256 = self._read_canonical_render_json(
+            intent_path, intent_keys, "compiled render intent",
+            canonical_episode_root=canonical_episode_root,
+        )
+        if (
+            intent["schema"] != "compiled-render-intent-v1"
+            or intent["render_contract"] != render_contract
+            or intent["render_contract_sha256"] != contract_sha256
+        ):
+            raise ValueError("compiled render intent does not bind current inputs; successor required")
+        completion_keys = {
+            "schema", "intent_sha256", "render_contract_sha256", "output_sha256",
+            "renderer_receipt", "renderer_receipt_sha256",
+        }
+        completion, completion_sha256 = self._read_canonical_render_json(
+            completion_path, completion_keys, "renderer completion receipt",
+            canonical_episode_root=canonical_episode_root,
+        )
+        renderer_receipt = completion["renderer_receipt"]
+        if (
+            completion["schema"] != "compiled-renderer-completion-v1"
+            or completion["intent_sha256"] != intent_sha256
+            or completion["render_contract_sha256"] != contract_sha256
+            or not isinstance(renderer_receipt, dict)
+            or completion["renderer_receipt_sha256"]
+            != hashlib.sha256(self._canonical_render_json(renderer_receipt)).hexdigest()
+            or renderer_receipt.get("output_sha256") != completion["output_sha256"]
+            or not isinstance(completion["output_sha256"], str)
+            or len(completion["output_sha256"]) != 64
+            or not fs.paths.final_video.is_file()
+            or sha256(fs.paths.final_video) != completion["output_sha256"]
+        ):
+            raise ValueError("renderer completion receipt is not bound to current final bytes")
+        return intent, intent_sha256, renderer_receipt, completion_sha256
+
+    @staticmethod
+    def _advance_compiled_render_state(state: EpisodeStateStore) -> None:
+        if state.current_state is EpisodeState.PLANNING_ANIMATION:
+            state.transition_to(EpisodeState.LOCAL_ANIMATION, agent="CompiledRecovery")
+        if state.current_state is EpisodeState.LOCAL_ANIMATION:
+            state.transition_to(EpisodeState.ASSEMBLING, agent="CompiledRecovery")
+        if state.current_state is EpisodeState.ASSEMBLING:
+            state.transition_to(EpisodeState.FINAL_QA, agent="CompiledRecovery")
+        if state.current_state is not EpisodeState.FINAL_QA:
+            raise ValueError("compiled rendering requires PLANNING_ANIMATION state")
+
     def render_compiled_video(
-        self, episode_id: str, pipeline, renderer, *, hold: int = 4
+        self, episode_id: str, pipeline, renderer, *, hold: int = 4,
+        _expected_render_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Compose a subtitle-free local delivery master from the approved manifest only."""
+        from src.hybrid.locks import file_lock
+
         fs = EpisodeFS(episode_id, self.config)
+        # The crash-released OS lock covers recovery validation, rendering,
+        # receipt publication and state persistence, across processes.
+        with file_lock(fs.paths.qa_dir / ".compiled-render.lock"):
+            return self._render_compiled_video_locked(
+                episode_id, pipeline, renderer, hold=hold,
+                expected_render_contract=_expected_render_contract,
+            )
+
+    def _render_compiled_video_locked(
+        self, episode_id: str, pipeline, renderer, *, hold: int,
+        expected_render_contract: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        fs = EpisodeFS(episode_id, self.config)
+        render_contract = self._compiled_render_contract(episode_id, pipeline, renderer, hold)
+        if expected_render_contract is not None and render_contract != expected_render_contract:
+            raise ValueError("compiled render contract changed while waiting for admission")
+        contract_sha256 = self._compiled_render_contract_sha256(render_contract)
         state = EpisodeStateStore.load(fs.paths.state_json)
         receipt_path = fs.paths.qa_dir / "compiled_render_receipt.json"
-        if (
-            state.current_state
-            in {
-                EpisodeState.ASSEMBLING,
-                EpisodeState.LOCAL_ANIMATION,
-                EpisodeState.FINAL_QA,
+        intent_path = fs.paths.qa_dir / "compiled_render_intent.json"
+        completion_path = fs.paths.qa_dir / "renderer_completion_receipt.json"
+        director_receipt_keys = {
+            "schema", "intent_sha256", "completion_sha256", "render_contract",
+            "render_contract_sha256", "renderer_receipt",
+        }
+        if intent_path.is_file() and completion_path.is_file():
+            intent, intent_sha256, renderer_receipt, completion_sha256 = self._compiled_render_recovery_evidence(
+                fs, render_contract, contract_sha256, intent_path, completion_path
+            )
+            director_receipt = {
+                "schema": "compiled-director-render-receipt-v1",
+                "intent_sha256": intent_sha256,
+                "completion_sha256": completion_sha256,
+                "render_contract": render_contract,
+                "render_contract_sha256": contract_sha256,
+                "renderer_receipt": renderer_receipt,
             }
-            and fs.paths.final_video.is_file()
-            and receipt_path.is_file()
-        ):
-            receipt = _read_json_file(receipt_path)
-            if receipt.get("hold_seconds") not in (3, 4, 5):
-                raise ValueError("compiled render recovery receipt is invalid")
-            if receipt.get("output_sha256"):
-                from src.hybrid.artifacts import sha256
-
-                if receipt["output_sha256"] != sha256(fs.paths.final_video):
-                    raise ValueError("compiled render recovery hash mismatch")
-            if state.current_state is EpisodeState.LOCAL_ANIMATION:
-                state.transition_to(EpisodeState.ASSEMBLING, agent="CompiledRecovery")
-            if state.current_state is EpisodeState.ASSEMBLING:
-                state.transition_to(EpisodeState.FINAL_QA, agent="CompiledRecovery")
-                state.save(fs.paths.state_json)
-            return receipt
+            if receipt_path.is_file():
+                persisted, _persisted_sha256 = self._read_canonical_render_json(
+                    receipt_path, director_receipt_keys, "compiled Director receipt",
+                    canonical_episode_root=Path(render_contract["canonical_episode_root"]),
+                )
+                if persisted != director_receipt:
+                    raise ValueError("compiled Director receipt does not bind renderer completion")
+            else:
+                self._write_exclusive_render_json(
+                    receipt_path, director_receipt, "compiled Director receipt",
+                    canonical_episode_root=Path(render_contract["canonical_episode_root"]),
+                )
+            self._advance_compiled_render_state(state)
+            state.save(fs.paths.state_json)
+            return director_receipt
+        if intent_path.exists() or completion_path.exists() or fs.paths.final_video.exists():
+            raise ValueError("unbound render artifacts are quarantined; successor required")
         if state.current_state is not EpisodeState.PLANNING_ANIMATION:
             raise ValueError("compiled rendering requires PLANNING_ANIMATION state")
         if hold not in (3, 4, 5):
             raise ValueError("compiled render closing hold must be 3 to 5 seconds")
         manifest = pipeline.approved_manifest()
         scenes = pipeline.render_scenes(manifest)
+        intent = {
+            "schema": "compiled-render-intent-v1",
+            "render_contract": render_contract,
+            "render_contract_sha256": contract_sha256,
+        }
+        self._write_exclusive_render_json(
+            intent_path, intent, "compiled render intent",
+            canonical_episode_root=Path(render_contract["canonical_episode_root"]),
+        )
+        intent_sha256 = hashlib.sha256(self._canonical_render_json(intent)).hexdigest()
         state.transition_to(
             EpisodeState.LOCAL_ANIMATION,
             agent="CompiledProduction",
@@ -841,25 +1056,94 @@ class DirectorAgent:
             None,
             fs.paths.final_video,
             hold=hold,
+            completion_receipt_path=completion_path,
+            render_intent_sha256=intent_sha256,
+            render_contract_sha256=contract_sha256,
+            canonical_episode_root=Path(render_contract["canonical_episode_root"]),
         )
-        if receipt.get("subtitles_sha256") is not None:
-            raise ValueError("compiled delivery must not burn subtitles")
-        if not fs.paths.final_video.is_file():
-            raise ValueError("compiled renderer did not create final video")
-        _write_json_file(fs.paths.qa_dir / "compiled_render_receipt.json", receipt)
-        state.transition_to(
-            EpisodeState.FINAL_QA,
-            agent="CompiledProduction",
-            note="compiled master ready for final QA",
+        # The renderer must have committed the completion before returning;
+        # return values and present media alone are intentionally unauthenticated.
+        _intent, _intent_sha256, renderer_receipt, _completion_sha256 = self._compiled_render_recovery_evidence(
+            fs, render_contract, contract_sha256, intent_path, completion_path
         )
-        state.save(fs.paths.state_json)
-        return receipt
+        if receipt != renderer_receipt or receipt.get("subtitles_sha256") is not None:
+            raise ValueError("compiled renderer return does not match durable completion")
+        return self._render_compiled_video_locked(
+            episode_id, pipeline, renderer, hold=hold, expected_render_contract=render_contract
+        )
+
+    def _compiled_render_state(
+        self,
+    ) -> tuple[dict[str, tuple[str, asyncio.Task]], asyncio.Semaphore]:
+        """Support lightweight Director test instances created without __init__."""
+        flights = self.__dict__.get("_compiled_render_flights")
+        if flights is None:
+            flights = self.__dict__["_compiled_render_flights"] = {}
+        semaphore = self.__dict__.get("_compiled_render_admission")
+        if semaphore is None:
+            capacity = self.__dict__.get("_compiled_render_pool_size", 1)
+            if type(capacity) is not int or capacity < 1:
+                raise ValueError("compiled render pool size must be a positive integer")
+            semaphore = self.__dict__["_compiled_render_admission"] = asyncio.Semaphore(capacity)
+        return flights, semaphore
+
+    async def _admit_compiled_render(
+        self, episode_id: str, pipeline, renderer, hold: int, render_contract: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Run exactly one synchronous render while holding its full thread budget."""
+        _flights, semaphore = self._compiled_render_state()
+        acquired = False
+        try:
+            # One atomic permit avoids partial weighted-acquisition deadlocks.
+            await semaphore.acquire()
+            acquired = True
+            # Keep all FFmpeg setup, scene encoding, muxing, and receipt writes
+            # together in the renderer's synchronous unit. Shielding happens at
+            # the caller boundary so cancellation never frees episode ownership
+            # while this worker thread still runs.
+            return await asyncio.to_thread(
+                self.render_compiled_video, episode_id, pipeline, renderer, hold=hold,
+                _expected_render_contract=render_contract,
+            )
+        finally:
+            if acquired:
+                semaphore.release()
+
+    async def render_compiled_video_async(
+        self, episode_id: str, pipeline, renderer, *, hold: int = 4
+    ) -> dict[str, Any]:
+        """Await a single-writer, cancellation-safe off-thread compiled render."""
+        flights, _admission = self._compiled_render_state()
+        render_contract = self._compiled_render_contract(episode_id, pipeline, renderer, hold)
+        contract_sha256 = self._compiled_render_contract_sha256(render_contract)
+        existing = flights.get(episode_id)
+        if existing is None:
+            flight = asyncio.create_task(
+                self._admit_compiled_render(episode_id, pipeline, renderer, hold, render_contract),
+                name=f"compiled-render:{episode_id}",
+            )
+            flights[episode_id] = (contract_sha256, flight)
+
+            def release_owner(completed: asyncio.Task) -> None:
+                if flights.get(episode_id) == (contract_sha256, completed):
+                    flights.pop(episode_id, None)
+
+            flight.add_done_callback(release_owner)
+        else:
+            active_contract_sha256, flight = existing
+            if active_contract_sha256 != contract_sha256:
+                raise ValueError("compiled render contract conflict for in-flight episode")
+        # A cancelled caller must not cancel the owned encode. The retained
+        # flight remains the retry target until its thread has fully unwound.
+        return await asyncio.shield(flight)
 
     async def finalize_compiled_delivery(
         self, episode_id: str, pipeline, renderer, *, hold: int = 4
     ) -> dict[str, Any]:
         """Render a compiled master and materialize all evidence required by final QA."""
-        receipt = self.render_compiled_video(episode_id, pipeline, renderer, hold=hold)
+        receipt = await self.render_compiled_video_async(
+            episode_id, pipeline, renderer, hold=hold
+        )
         sidecars = await self.prepare_delivery_sidecars(episode_id, pipeline)
         return {"render_receipt": receipt, "sidecars": sidecars}
 
