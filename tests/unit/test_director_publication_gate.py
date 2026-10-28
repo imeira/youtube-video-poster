@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -14,6 +16,7 @@ from src.agents.director import DirectorAgent
 from src.approval.inbound import AuthenticatedApprovalReply
 from src.approval.receipts import ApprovalReceipt, save_approval_receipt
 from src.config.loader import get_config
+from src.hybrid.render import commit_renderer_completion
 from src.pipeline.revision import RevisionRegistry
 from src.providers.base import PublishResult
 from src.qa.final_render import FinalRenderQAResult
@@ -48,16 +51,49 @@ def delivery_director() -> DirectorAgent:
     )
 
 
-def test_compiled_render_recovery_returns_existing_receipt_without_rerender(tmp_path, monkeypatch):
+def compiled_render_inputs():
+    """Provide the immutable surface Director binds into a render contract."""
+    manifest = SimpleNamespace(checksum="manifest-sha256")
+    scene = SimpleNamespace(image=SimpleNamespace(sha256="image-sha256"), clip=None)
+    return SimpleNamespace(
+        episode=SimpleNamespace(audio=SimpleNamespace(sha256="audio-sha256")),
+        approved_manifest=lambda: manifest,
+        render_scenes=lambda received_manifest: [scene],
+    )
+
+
+def compiled_renderer(render=None):
+    return SimpleNamespace(
+        width=1920,
+        height=1080,
+        fps=30,
+        filter_complex_threads=1,
+        scene_workers=1,
+        encoder_threads=1,
+        render_compiled=render,
+    )
+
+
+def test_compiled_render_recovery_rejects_legacy_receipt_without_renderer_completion(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
     director = delivery_director()
     fs = EpisodeFS("EP8", director.config)
     fs.create_dirs()
     EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.FINAL_QA).save(fs.paths.state_json)
     fs.paths.final_video.write_bytes(b"existing-final")
-    (fs.paths.qa_dir / "compiled_render_receipt.json").write_text(json.dumps({"hold_seconds": 4}), encoding="utf-8")
+    pipeline = compiled_render_inputs()
+    renderer = compiled_renderer()
+    contract = director._compiled_render_contract("EP8", pipeline, renderer, 4)
+    receipt = {
+        "hold_seconds": 4,
+        "output_sha256": hashlib.sha256(fs.paths.final_video.read_bytes()).hexdigest(),
+        "render_contract": contract,
+        "render_contract_sha256": director._compiled_render_contract_sha256(contract),
+    }
+    (fs.paths.qa_dir / "compiled_render_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
 
-    assert director.render_compiled_video("EP8", pipeline=None, renderer=None) == {"hold_seconds": 4}
+    with pytest.raises(ValueError, match="quarantined"):
+        director.render_compiled_video("EP8", pipeline=pipeline, renderer=renderer)
 
 
 @pytest.mark.asyncio
@@ -367,16 +403,41 @@ async def test_director_builds_caption_thumbnail_and_metadata_sidecars_from_comp
 
 
 @pytest.mark.asyncio
-async def test_compiled_delivery_finalizer_runs_sidecars_after_render():
-    director = DirectorAgent()
-    director.render_compiled_video = Mock(return_value={"render": "receipt"})
+async def test_compiled_delivery_finalizer_runs_sidecars_after_render(tmp_path, monkeypatch):
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
+    director = delivery_director()
+    fs = EpisodeFS("EP8", director.config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="EP8", current_state=EpisodeState.PLANNING_ANIMATION).save(fs.paths.state_json)
+    pipeline = compiled_render_inputs()
+    render_calls = []
+
+    def render_compiled(*args, **kwargs):
+        render_calls.append((args, kwargs))
+        fs.paths.final_video.write_bytes(b"rendered-final")
+        receipt = {
+            "hold_seconds": kwargs["hold"],
+            "output_sha256": hashlib.sha256(fs.paths.final_video.read_bytes()).hexdigest(),
+            "subtitles_sha256": None,
+        }
+        commit_renderer_completion(
+            kwargs["completion_receipt_path"],
+            intent_sha256=kwargs["render_intent_sha256"],
+            render_contract_sha256=kwargs["render_contract_sha256"],
+            receipt=receipt,
+        )
+        return receipt
+
+    renderer = compiled_renderer(render_compiled)
     director.prepare_delivery_sidecars = AsyncMock(return_value={"thumbnail": "thumbnail.png"})
 
-    result = await director.finalize_compiled_delivery("EP8", pipeline="pipeline", renderer="renderer")
+    result = await director.finalize_compiled_delivery("EP8", pipeline=pipeline, renderer=renderer)
 
-    assert result == {"render_receipt": {"render": "receipt"}, "sidecars": {"thumbnail": "thumbnail.png"}}
-    director.render_compiled_video.assert_called_once_with("EP8", "pipeline", "renderer", hold=4)
-    director.prepare_delivery_sidecars.assert_awaited_once_with("EP8", "pipeline")
+    assert result["render_receipt"]["renderer_receipt"]["output_sha256"] == hashlib.sha256(b"rendered-final").hexdigest()
+    assert result["sidecars"] == {"thumbnail": "thumbnail.png"}
+    assert len(render_calls) == 1
+    assert (fs.paths.qa_dir / "compiled_render_receipt.json").is_file()
+    director.prepare_delivery_sidecars.assert_awaited_once_with("EP8", pipeline)
 
 
 @pytest.mark.asyncio
