@@ -997,3 +997,319 @@ async def test_cancelled_executor_run_marks_reservation_unknown_and_propagates(t
     assert provider.submits == 1
     assert budget.claim(candidate.request_id)["state"] == "UNKNOWN"
     assert budget.claim(candidate.request_id)["settlement_mode"] == "FAL_READBACK_V2"
+
+
+@pytest.mark.asyncio
+async def test_bounded_async_runner_qa_starts_before_slow_independent_job_and_fresh_resume_repeats_nothing(tmp_path, monkeypatch):
+    """The runner dispatches only independent ready work, not a serial batch barrier."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    monkeypatch.setattr(Job, "request_id", property(lambda candidate: {"slow": "a", "fast": "b"}[candidate.scene]))
+
+    class DelayedProvider(FixtureProvider):
+        def __init__(self, root):
+            super().__init__(root)
+            self.active = 0
+            self.peak = 0
+            self.started = []
+
+        async def submit(self, candidate, request_id, checkpoint):
+            self.calls += 1
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            self.started.append(request_id)
+            try:
+                checkpoint(provider_id="TEST-" + request_id)
+                if candidate.scene == "slow":
+                    await slow_release.wait()
+                else:
+                    fast_submitted.set()
+                result = self.root / f"{request_id}.bin"
+                result.write_bytes(candidate.scene.encode())
+                return ProviderResult(result, candidate.cost)
+            finally:
+                self.active -= 1
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    database = tmp_path / "jobs.db"
+    slow = Job("slow", "first", "TEST", "test-image", {"prompt": "slow"}, manifest(tmp_path), Decimal("0.10"))
+    fast = Job("fast", "first", "TEST", "test-image", {"prompt": "fast"}, manifest(tmp_path), Decimal("0.10"))
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(database, Config(limit=Decimal("1.00"), concurrency=2)), ledger(tmp_path, parsed),
+        provider_concurrency=2, cpu_concurrency=1,
+    )
+    runner.start({"packet": "parallel"}, [slow, fast])
+    provider = DelayedProvider(tmp_path)
+    slow_release = asyncio.Event()
+    fast_submitted = asyncio.Event()
+    fast_qa_started = asyncio.Event()
+    qa_order = []
+    qa_active = {"now": 0, "peak": 0}
+
+    async def qa(receipt):
+        qa_order.append((receipt["scene"], provider.active))
+        qa_active["now"] += 1
+        qa_active["peak"] = max(qa_active["peak"], qa_active["now"])
+        try:
+            if receipt["scene"] == "fast":
+                fast_qa_started.set()
+            return {
+            "approved": True, "reviewer": "independent-test-qa",
+            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
+                "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+            }
+        finally:
+            qa_active["now"] -= 1
+
+    task = asyncio.create_task(runner.resume(provider, qa))
+    try:
+        await asyncio.wait_for(fast_submitted.wait(), timeout=2)
+        await asyncio.wait_for(fast_qa_started.wait(), timeout=2)
+        assert provider.active == 1
+        slow_release.set()
+        completed = await asyncio.wait_for(task, timeout=2)
+    finally:
+        slow_release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert completed["state"] == "MEDIA_PENDING"
+    assert provider.peak == 2
+    assert qa_order[0] == ("fast", 1)
+    assert qa_order[-1][0] == "slow"
+    assert qa_active["peak"] == 1
+    assert provider.calls == 2
+
+    fresh = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(database, Config(limit=Decimal("1.00"), concurrency=2)), ledger(tmp_path, parsed),
+        provider_concurrency=2, cpu_concurrency=1,
+    )
+    resumed = await fresh.resume(provider, lambda _: (_ for _ in ()).throw(AssertionError("QA repeated")))
+    assert resumed["state"] == "MEDIA_PENDING"
+    assert provider.calls == 2
+
+    thumbnail, video = final_media(tmp_path)
+    fresh.stage_delivery(thumbnail, video, qa={"approved": True, "mode": "TEST", "subject": "technical-test", "issuer": "TEST"})
+    assert fresh.record_human_gate("thumbnail", thumbnail, approved=True, reviewer="human")["state"] == "WAITING_VIDEO_APPROVAL"
+    assert fresh.record_human_gate("video", video, approved=True, reviewer="human")["state"] == "READY_TO_PUBLISH"
+
+
+@pytest.mark.asyncio
+async def test_async_runner_blocks_dependent_render_path_after_qa_failure_and_persists_default_limits(tmp_path):
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    parent = Job("parent", "first", "TEST", "test-image", {"prompt": "parent"}, manifest(tmp_path), Decimal("0.10"))
+    child = Job("child", "first", "TEST", "test-image", {"prompt": "child", "depends_on": [parent.request_id]}, manifest(tmp_path), Decimal("0.10"))
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)), ledger(tmp_path, parsed),
+    )
+    started = runner.start({"packet": "dependency"}, [parent, child])
+    assert started["scheduler"] == {"provider_concurrency": 1, "cpu_concurrency": 1}
+    provider = FixtureProvider(tmp_path)
+    rejected = await runner.resume(provider, lambda receipt: {
+        "approved": False, "reviewer": "independent-test-qa",
+        "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
+        "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": ["IDENTITY_DRIFT"],
+    })
+    assert rejected["state"] == "REJECTED"
+    assert provider.calls == 1
+    assert runner.executor.inspect(child.request_id) is None
+    with pytest.raises(ValueError, match="media staging"):
+        runner.stage_delivery(tmp_path / "none.png", tmp_path / "none.mp4", qa={})
+
+
+@pytest.mark.asyncio
+async def test_deterministic_fixture_benchmark_reports_bounded_parallel_latency(tmp_path):
+    """Fixture-only timing comparison; it makes no provider or production claim."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    class TimedProvider(FixtureProvider):
+        async def submit(self, candidate, request_id, checkpoint):
+            self.calls += 1
+            checkpoint(provider_id="TEST-" + request_id)
+            await asyncio.sleep(0.25)
+            result = self.root / f"{request_id}.bin"
+            result.write_bytes(candidate.scene.encode())
+            return ProviderResult(result, candidate.cost)
+
+    async def measure(name, limit):
+        parsed = AutonomousPolicy.from_dict(policy())
+        root = tmp_path / name
+        root.mkdir()
+        first = Job("one", "first", "TEST", "test-image", {"prompt": name + "-one"}, manifest(root), Decimal("0.10"))
+        second = Job("two", "first", "TEST", "test-image", {"prompt": name + "-two"}, manifest(root), Decimal("0.10"))
+        runner = AutonomousTwoGateRunner(
+            root / "run", "TEST-EP", parsed,
+            Executor(root / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)), ledger(root, parsed),
+            provider_concurrency=limit, cpu_concurrency=limit,
+        )
+        runner.start({"packet": name}, [first, second])
+        started = time.monotonic()
+        await runner.resume(TimedProvider(root), lambda receipt: {
+            "approved": True, "reviewer": "benchmark-qa",
+            "reviewer_identity": {"subject": "benchmark-qa", "issuer": "TEST"},
+            "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+        })
+        return time.monotonic() - started
+
+    serial_s = await measure("serial", 1)
+    parallel_s = await measure("parallel", 2)
+    print({"fixture_serial_s": round(serial_s, 3), "fixture_parallel_s": round(parallel_s, 3), "provider_cpu_limits": [1, 2]})
+    assert parallel_s < serial_s * 0.8, {"fixture_serial_s": serial_s, "fixture_parallel_s": parallel_s, "limits": [1, 2]}
+
+
+
+@pytest.mark.asyncio
+async def test_large_ready_dag_keeps_scheduler_task_window_bounded(tmp_path, monkeypatch):
+    """The scheduler bounds created work tasks, not merely provider submissions."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    jobs = [
+        Job(f"S{index:03}", "first", "TEST", "test-image", {"prompt": str(index)}, manifest(tmp_path), Decimal("0.01"))
+        for index in range(20)
+    ]
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=1)), ledger(tmp_path, parsed),
+        provider_concurrency=1, cpu_concurrency=2,
+    )
+    runner.start({"packet": "large-dag"}, jobs)
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class BlockingProvider(FixtureProvider):
+        async def submit(self, candidate, request_id, checkpoint):
+            self.calls += 1
+            checkpoint(provider_id="TEST-" + request_id)
+            entered.set()
+            await release.wait()
+            result = self.root / f"{request_id}.bin"
+            result.write_bytes(candidate.scene.encode())
+            return ProviderResult(result, candidate.cost)
+
+    inflight_tasks = 0
+    peak_inflight_tasks = 0
+    original_create_task = asyncio.create_task
+
+    def observe(coro, *args, **kwargs):
+        nonlocal inflight_tasks, peak_inflight_tasks
+        task = original_create_task(coro, *args, **kwargs)
+        inflight_tasks += 1
+        peak_inflight_tasks = max(peak_inflight_tasks, inflight_tasks)
+
+        def completed(_):
+            nonlocal inflight_tasks
+            inflight_tasks -= 1
+
+        task.add_done_callback(completed)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", observe)
+    task = original_create_task(runner.resume(BlockingProvider(tmp_path), lambda receipt: {
+        "approved": True, "reviewer": "window-qa",
+        "reviewer_identity": {"subject": "window-qa", "issuer": "TEST"},
+        "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+    }))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.sleep(0)
+        assert inflight_tasks <= 3
+        release.set()
+        completed = await asyncio.wait_for(task, timeout=20)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert completed["state"] == "MEDIA_PENDING"
+    assert peak_inflight_tasks <= 3
+
+
+def test_start_rejects_two_node_dependency_cycle_without_persisting_running_state(tmp_path, monkeypatch):
+    """Invalid DAGs are rejected before they can create execution state."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    monkeypatch.setattr(Job, "request_id", property(lambda self: self.scene))
+    first = Job("one", "first", "TEST", "test-image", {"prompt": "one", "depends_on": ["two"]}, manifest(tmp_path), Decimal("0.10"))
+    second = Job(
+        "two", "first", "TEST", "test-image",
+        {"prompt": "two", "depends_on": ["one"]}, manifest(tmp_path), Decimal("0.10"),
+    )
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed),
+    )
+
+    with pytest.raises(ValueError, match="cycle"):
+        runner.start({"packet": "cycle"}, [first, second])
+    assert not runner.path.exists()
+    assert runner.executor.inspect(first.request_id) is None
+    assert runner.executor.inspect(second.request_id) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_artifact_tampered_after_persisted_qa_before_provider_or_render(tmp_path):
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    database = tmp_path / "jobs.db"
+    candidate = job(tmp_path)
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(database, Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed),
+    )
+    runner.start({"packet": "qa"}, [candidate])
+    await runner.resume(FixtureProvider(tmp_path), lambda receipt: {
+        "approved": True, "reviewer": "independent-test-qa",
+        "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
+        "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+    })
+    receipt = runner.executor.inspect(candidate.request_id)
+    Path(receipt["result"]).write_bytes(b"tampered-after-qa")
+    fresh = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(database, Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed),
+    )
+    provider = FixtureProvider(tmp_path)
+
+    with pytest.raises(ValueError, match="persisted QA"):
+        await fresh.resume(provider, lambda _: (_ for _ in ()).throw(AssertionError("stale QA must not rerun")))
+    assert provider.calls == 0
+    assert fresh._load()["state"] == "REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_resume_owned_requires_runtime_fencing_not_a_caller_flag(tmp_path):
+    from src.hybrid.autonomous import (
+        AutonomousPolicy,
+        AutonomousTwoGateRunner,
+        RunnerOwnership,
+    )
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    asserted = []
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed),
+        ownership_assertion=lambda ownership: asserted.append(ownership.fencing_token) or ownership.fencing_token == 7,
+    )
+    runner.start({"packet": "owned"}, [job(tmp_path)])
+    provider = FixtureProvider(tmp_path)
+    with pytest.raises(PermissionError, match="fenced ownership"):
+        runner.stage_delivery(tmp_path / "thumbnail.png", tmp_path / "video.mp4", qa={})
+    with pytest.raises(PermissionError, match="rejected"):
+        await runner.resume_owned(provider, lambda receipt: receipt, RunnerOwnership("TEST-EP", "worker", 6))
+    assert provider.calls == 0
+    completed = await runner.resume_owned(provider, lambda receipt: {
+        "approved": True, "reviewer": "independent-test-qa",
+        "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
+        "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+    }, RunnerOwnership("TEST-EP", "worker", 7))
+    assert completed["state"] == "MEDIA_PENDING"
+    assert asserted.count(7) >= 2

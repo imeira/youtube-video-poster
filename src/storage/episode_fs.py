@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.config.loader import StudioConfig
+from src.path_guard import reject_reparse_path
+from src.storage.episode_id import validate_episode_id
 
 # Directory names within an episode (§15)
 EPISODE_SUBDIRS = [
@@ -78,9 +80,12 @@ class EpisodeFS:
     """Filesystem manager for an episode (§15)."""
 
     def __init__(self, episode_id: str, config: StudioConfig):
-        self.episode_id = episode_id
+        self.episode_id = validate_episode_id(episode_id)
         self.config = config
-        self.root = config.episodes_dir / episode_id
+        episodes_dir = reject_reparse_path(Path(config.episodes_dir))
+        self.root = reject_reparse_path(episodes_dir / self.episode_id)
+        if self.root.parent != episodes_dir:
+            raise ValueError("episode root must be directly beneath configured episodes_dir")
         self.paths = self._build_paths()
 
     def _build_paths(self) -> EpisodePaths:
@@ -117,9 +122,12 @@ class EpisodeFS:
 
     def create_dirs(self) -> None:
         """Create all episode directories (§15)."""
-        self.root.mkdir(parents=True, exist_ok=True)
+        reject_reparse_path(self.root).mkdir(parents=True, exist_ok=True)
+        reject_reparse_path(self.root)
         for subdir in EPISODE_SUBDIRS:
-            (self.root / subdir).mkdir(parents=True, exist_ok=True)
+            directory = reject_reparse_path(self.root / subdir)
+            directory.mkdir(parents=True, exist_ok=True)
+            reject_reparse_path(directory)
 
     def save_request(self, theme: str, language: str = "", channel: str = "") -> None:
         """Save the user's request (§5)."""
@@ -130,7 +138,8 @@ class EpisodeFS:
             "youtube_channel": channel or self.config.default_channel,
             "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         }
-        with open(self.paths.request_json, "w", encoding="utf-8") as f:
+        request_path = reject_reparse_path(self.paths.request_json)
+        with open(request_path, "w", encoding="utf-8") as f:
             json.dump(request, f, indent=2, ensure_ascii=False)
 
     def image_path(self, scene_id: str, suffix: str = "") -> Path:
@@ -148,4 +157,4 @@ class EpisodeFS:
 
     def exists(self) -> bool:
         """Check if episode directory exists (for resume, §14)."""
-        return self.root.exists()
+        return reject_reparse_path(self.root).exists()

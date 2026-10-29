@@ -5,11 +5,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shutil
 import subprocess
+import time
+import uuid
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image, ImageDraw
 
@@ -144,7 +148,7 @@ class FixtureProvider:
         raise RuntimeError("TEST fixture cannot remotely recover")
 
 
-def runner(root, rid):
+def runner(root, rid, *, ownership_assertion=None):
     parsed = policy()
     ledger = StandingBudgetLedger(
         root.parent.parent / "TEST-budget.sqlite3",
@@ -160,6 +164,7 @@ def runner(root, rid):
         parsed,
         Executor(root / "jobs.db", Config(limit=Decimal("1.00"))),
         ledger,
+        ownership_assertion=ownership_assertion,
     )
 
 
@@ -313,18 +318,34 @@ def _under(path: Path, root: Path) -> Path:
     return path
 
 
+def _compiled_read_bytes(path: Path) -> bytes:
+    """Read one compiled input only after re-checking its lexical path chain."""
+    path = _reject_reparse_path(Path(path))
+    if not path.is_file():
+        raise ValueError("compiled input requires a regular local file")
+    # Re-check immediately before opening: a prior directory check never
+    # authorizes a later open after a junction/symlink replacement.
+    return _reject_reparse_path(path).read_bytes()
+
+
+def _compiled_json(path: Path) -> dict:
+    value = json.loads(_compiled_read_bytes(path).decode("utf-8"))
+    if not isinstance(value, dict):
+        raise TypeError("compiled input JSON must be an object")
+    return value
+
+
 def _packet_policy(path: Path):
-    """Validate untrusted packet metadata without granting it execution authority."""
-    path = _reject_reparse_path(path)
-    data = json.loads(path.read_text(encoding="utf-8"))
-    parsed = AutonomousPolicy.from_dict(data)
-    if (
-        parsed.mode != "TEST"
-        or parsed.publication_enabled
-        or parsed.allowed_providers != {TEST_COMPILED_PROVIDER}
-        or parsed.episode_cap_usd < TEST_COMPILED_COST
-    ):
-        raise ValueError("compiled CLI accepts only declared local TEST policy with publication disabled")
+    """Validate packet evidence, while internal allowlisted policy stays authoritative."""
+    data = _compiled_json(path)
+    # Parse first to retain closed-schema/type validation, then require the
+    # complete supplied authority document to be byte-for-byte semantic equal
+    # to the built-in TEST authority.  A packet cannot tune any ceiling,
+    # provider, version, or publication field while still reaching the factory.
+    AutonomousPolicy.from_dict(data)
+    internal = compiled_policy_document()
+    if data != internal:
+        raise ValueError("compiled packet policy must exactly match internal TEST authority")
     return data, compiled_policy()
 
 
@@ -374,7 +395,8 @@ def _snapshot_compiled_input(source: Path, destination: Path) -> tuple[dict, str
 
 def _compiled_root(workspace: Path, rid: str) -> Path:
     # Keep the durable namespace short enough for Windows' legacy path limit.
-    return Path(workspace).resolve() / "TC" / rid[:16]
+    workspace = _reject_reparse_path(Path(workspace))
+    return _reject_reparse_path(workspace / "TC" / rid[:16])
 
 
 def _compiled_public(root: Path, adapter, document: dict) -> dict:
@@ -411,38 +433,57 @@ def _compiled_status(root: Path, rid: str) -> dict:
     }
 
 
-def _load_compiled(workspace: Path, rid: str):
+def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None):
     from src.agents.director import DirectorAgent
     from src.hybrid.compiled import CompiledEpisode, OperationalPipeline
 
     if len(rid) != 64 or any(char not in "0123456789abcdef" for char in rid):
         raise ValueError("request-id must be lowercase sha256")
+    workspace = _reject_reparse_path(Path(workspace))
     root = _compiled_root(workspace, rid)
-    meta_path, inputs = root / "compiled-harness.json", root / "inputs"
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta_path = _reject_reparse_path(root / "compiled-harness.json")
+    inputs = _reject_reparse_path(root / "inputs")
+    meta = _compiled_json(meta_path)
     if meta.get("kind") != "compiled-test" or meta.get("mode") != "TEST" or meta.get("request_id") != rid:
         raise ValueError("not a compiled TEST request")
-    observed = {name: sha256((inputs / name).read_bytes()).hexdigest() for name in COMPILED_PACKET_FILES}
+    input_paths = {name: _reject_reparse_path(inputs / name) for name in COMPILED_PACKET_FILES}
+    observed = {name: sha256(_compiled_read_bytes(path)).hexdigest() for name, path in input_paths.items()}
     if observed != meta.get("input_sha256"):
         raise ValueError("compiled input snapshot hash mismatch")
-    _policy_data, parsed = _packet_policy(inputs / "policy.json")
+    _policy_data, parsed = _packet_policy(input_paths["policy.json"])
     if parsed.digest != meta.get("policy_sha256"):
         raise ValueError("compiled policy hash mismatch")
-    episode, manifest = CompiledEpisode.load(inputs / "compiled.json"), Manifest.load(inputs / "manifest.json")
+    # The loaders reopen these paths, so guard their full ancestor chains at
+    # the exact read boundary rather than trusting the earlier hash pass.
+    episode_path = _reject_reparse_path(input_paths["compiled.json"])
+    manifest_path = _reject_reparse_path(input_paths["manifest.json"])
+    episode, manifest = CompiledEpisode.load(episode_path), Manifest.load(manifest_path)
     if episode.checksum != meta.get("compiled_sha256") or manifest.checksum != meta.get("source_manifest_sha256"):
         raise ValueError("compiled input binding mismatch")
     for asset in (episode.audio, *manifest.assets, manifest.sheet):
         _under(asset.path, inputs)
-    executor = Executor(root / "executor.sqlite3", Config(limit=parsed.episode_cap_usd))
-    pipeline = OperationalPipeline(episode, executor, manifest, workspace=root / "compiled", endpoint=TEST_COMPILED_PROVIDER, image_cost=TEST_COMPILED_COST)
+    executor_path = _reject_reparse_path(root / "executor.sqlite3")
+    runner_workspace = _reject_reparse_path(root / "runner")
+    pipeline_workspace = _reject_reparse_path(runner_workspace / "compiled")
+    executor = Executor(executor_path, Config(limit=parsed.episode_cap_usd))
+    pipeline = OperationalPipeline(episode, executor, manifest, workspace=pipeline_workspace, endpoint=TEST_COMPILED_PROVIDER, image_cost=TEST_COMPILED_COST)
     # The TEST packet's allowlisted policy is still checked above; bind its
     # runner through the Director factory without loading runtime configuration
     # that could select a provider, destination, or LIVE route.
     director = DirectorAgent.__new__(DirectorAgent)
-    adapter = director.create_autonomous_compiled_test_adapter(
-        pipeline, root / "runner", _policy_data
-    )
-    return root, adapter, adapter.runner._load() if adapter.runner.path.is_file() else None
+    director.config = SimpleNamespace(episodes_dir=workspace / "episodes")
+    # Never pass packet bytes as authority into the factory after validation.
+    factory_args = (pipeline, runner_workspace, compiled_policy_document())
+    if ownership_assertion is None:
+        adapter = director.create_autonomous_compiled_test_adapter(*factory_args)
+    else:
+        adapter = director.create_autonomous_compiled_test_adapter(
+            *factory_args, ownership_assertion=ownership_assertion
+        )
+    # The runner state is another untrusted read.  Guard it after the factory
+    # has selected only the internal TEST adapter and immediately before load.
+    runner_path = _reject_reparse_path(adapter.runner.path)
+    return root, adapter, adapter.runner._load() if runner_path.is_file() else None
 
 
 def _compiled_image_qa(reject_scene: str | None = None):
@@ -456,27 +497,31 @@ def _compiled_media_qa(evidence):
 
 
 def _stage_compiled(adapter, document):
-    if document["state"] == "MEDIA_PENDING" and adapter.pipeline.render_ready():
-        from src.hybrid.render import LocalRenderer
-        return adapter.stage_local_delivery(LocalRenderer(width=320, height=180), _compiled_media_qa, hold=3)
-    return document
+    """Never revive the legacy unowned compiled renderer from the CLI."""
+    raise ValueError(
+        "compiled mutation is blocked: no Director-owned worker render contract is available"
+    )
 
 
 def start_compiled(workspace: Path, packet: Path, reject_scene: str | None):
+    from src.hybrid.compiled import CompiledEpisode
+
     packet = _reject_reparse_path(Path(packet))
+    # Parse and validate the literal episode storage key before deriving a
+    # workspace path, creating a directory, or constructing any SQLite service.
     packet_files = tuple(_reject_reparse_path(packet / name) for name in COMPILED_PACKET_FILES)
+    CompiledEpisode.load(packet_files[0])
     seed = b"autonomous-compiled-test-v1\0" + b"".join(path.read_bytes() for path in packet_files)
     rid, root = sha256(seed).hexdigest(), _compiled_root(workspace, sha256(seed).hexdigest())
     if root.exists():
         raise ValueError("request namespace already exists; never overwrite")
     root.mkdir(parents=True)
     snapshot, compiled_sha = _snapshot_compiled_input(packet, root / "inputs")
-    _atomic_json(root / "compiled-harness.json", {"kind": "compiled-test", "mode": "TEST", "request_id": rid, "input_sha256": snapshot["input_sha256"], "policy_sha256": snapshot["policy_sha256"], "compiled_sha256": compiled_sha, "source_manifest_sha256": Manifest.load(root / "inputs" / "manifest.json").checksum})
+    _atomic_json(root / "compiled-harness.json", {"kind": "compiled-test", "mode": "TEST", "request_id": rid, "compiled_episode_id": CompiledEpisode.load(root / "inputs" / "compiled.json").episode_id, "input_sha256": snapshot["input_sha256"], "policy_sha256": snapshot["policy_sha256"], "compiled_sha256": compiled_sha, "source_manifest_sha256": Manifest.load(root / "inputs" / "manifest.json").checksum, "test_reject_scene": reject_scene})
     # Reload only after metadata exists: this proves the fresh-process reconstruction contract.
     _, adapter, _ = _load_compiled(workspace, rid)
-    adapter.start()
-    document = asyncio.run(adapter.resume(FixtureProvider(root.parent / "provider"), _compiled_image_qa(reject_scene)))
-    return _compiled_public(root, adapter, _stage_compiled(adapter, document))
+    document = adapter.start()
+    return _compiled_public(root, adapter, document)
 
 
 def run_preproduction_test(workspace: Path, request_id: str, manifest_path: Path) -> dict:
@@ -504,14 +549,29 @@ def run_preproduction_test(workspace: Path, request_id: str, manifest_path: Path
     # second CLI invocation a read-only recovery of the first TEST run.
     with file_lock(revision_path / ".run-preproduction-test.lock"):
         if _compiled_root(workspace, runner_id).exists():
-            _root, _adapter, document = _load_compiled(workspace, runner_id)
+            _root, adapter, document = _load_compiled(workspace, runner_id)
             if document is None:
                 raise ValueError("compiled TEST runner exists without durable state")
         else:
             start_compiled(workspace, packet, None)
-            _root, _adapter, document = _load_compiled(workspace, runner_id)
+            _root, adapter, document = _load_compiled(workspace, runner_id)
             if document is None:
                 raise ValueError("compiled TEST runner did not persist durable state")
+        # The CLI may create the closed TEST packet, but only the fenced durable
+        # worker may mutate its runner.  Keep this handoff functional by
+        # enqueueing the configured workspace and executing one bounded worker
+        # turn, rather than reviving the former unowned direct resume path.
+        from src.hybrid.worker import DurableEpisodeWorker, EpisodeTaskQueue
+
+        queue = EpisodeTaskQueue(_reject_reparse_path(Path(workspace) / "TEST" / "worker.sqlite3"))
+        queued = queue.enqueue(adapter.runner.episode_id, str(_reject_reparse_path(Path(workspace))), "compiled")
+        if queued["status"] in {"PENDING", "RUNNING"}:
+            asyncio.run(
+                DurableEpisodeWorker(
+                    queue, f"preproduction-{os.getpid()}", _fixture_worker_handler
+                ).run_once()
+            )
+        _root, adapter, document = _load_compiled(workspace, runner_id)
     state = document["state"]
     gate = {
         "state": state,
@@ -532,9 +592,187 @@ def run_preproduction_test(workspace: Path, request_id: str, manifest_path: Path
     }
 
 
+async def _fixture_worker_handler(_task: dict) -> dict:
+    """Resume one existing fixture or Director-owned compiled TEST runner."""
+    from src.hybrid.autonomous import RunnerOwnership
+
+    if _task["kind"] == "compiled":
+        from src.agents.director import DirectorAgent
+        from src.hybrid.render import LocalRenderer
+        from src.state.machine import EpisodeState, EpisodeStateStore
+        from src.storage.episode_fs import EpisodeFS
+
+        # Queue root is the configured workspace, never the mutable packet root.
+        root_value = _task["root"]
+        if not isinstance(root_value, (str, Path)):
+            raise RuntimeError("compiled worker configured workspace is invalid")
+        workspace = _reject_reparse_path(Path(root_value))
+        ownership = RunnerOwnership(_task["episode_id"], _task["_worker_id"], _task["fencing_token"])
+        _task["_lease_assertion"](ownership)
+        matches = []
+        candidates_root = _reject_reparse_path(workspace / "TC")
+        for candidate in candidates_root.glob("*/compiled-harness.json"):
+            _task["_lease_assertion"](ownership)
+            # Reject every candidate's full lexical ancestry before glob results
+            # are parsed; a Windows junction must not reach metadata or SQLite.
+            candidate = _reject_reparse_path(candidate)
+            meta = _compiled_json(candidate)
+            if meta.get("request_id") and meta.get("compiled_episode_id") == ownership.episode_id:
+                matches.append(meta["request_id"])
+        if len(matches) != 1:
+            raise RuntimeError("configured workspace has no unique compiled runner for queue episode")
+        root, adapter, document = _load_compiled(
+            workspace, matches[0], ownership_assertion=_task["_lease_assertion"],
+        )
+        if adapter.runner.episode_id != ownership.episode_id:
+            raise RuntimeError("compiled runner episode identity does not match queue lease")
+        if document["state"] in {"READY", "RUNNING", "MEDIA_PENDING"}:
+            document = await adapter.resume_owned(
+                FixtureProvider(root / "provider"),
+                _compiled_image_qa(_compiled_json(_reject_reparse_path(root / "compiled-harness.json")).get("test_reject_scene")),
+                ownership,
+            )
+        if document["state"] == "MEDIA_PENDING":
+            # The canonical Director episode tree is configured from workspace;
+            # it is never derived from the packet/runner tree.
+            director = DirectorAgent.__new__(DirectorAgent)
+            director.config = SimpleNamespace(episodes_dir=workspace / "episodes")
+            fs = EpisodeFS(ownership.episode_id, director.config)
+            _task["_lease_assertion"](ownership)
+            fs.create_dirs()
+            if not fs.paths.state_json.exists():
+                state = EpisodeStateStore(ownership.episode_id)
+                state.current_state = EpisodeState.PLANNING_ANIMATION
+                state.save(fs.paths.state_json)
+            renderer = LocalRenderer(width=1280, height=720, fps=24)
+            await director.render_compiled_video_async(
+                ownership.episode_id, adapter.pipeline, renderer, ownership_assertion=lambda: _task["_lease_assertion"](ownership),
+            )
+            # The renderer return is not authority.  The adapter owns the
+            # configured EpisodeFS root and reopens canonical evidence itself.
+            _task["_lease_assertion"](ownership)
+            document = adapter.stage_director_delivery_owned(
+                _compiled_media_qa, ownership=ownership,
+            )
+    elif _task["kind"] == "fixture":
+        root = Path(_task["root"])
+        ownership = RunnerOwnership(_task["episode_id"], _task["_worker_id"], _task["fencing_token"])
+        rid = _task["episode_id"].removeprefix("TEST-")
+        run = runner(root, rid, ownership_assertion=_task["_lease_assertion"])
+        document = run._load()
+        if document["state"] in {"READY", "RUNNING", "MEDIA_PENDING"}:
+            document = await run.resume_owned(
+                FixtureProvider(root),
+                lambda receipt: {
+                    "approved": True,
+                    "reviewer": "independent-test-qa",
+                    "reviewer_identity": {"subject": "test-independent-qa", "issuer": "TEST assertion, not cryptographic authentication"},
+                    "request_id": receipt["request_id"],
+                    "result_sha256": receipt["result_sha256"],
+                    "codes": ["TEST_FIXTURE_PASS"],
+                },
+                ownership,
+            )
+        if document["state"] == "MEDIA_PENDING":
+            thumbnail, video = render(root)
+            document = run.stage_delivery_owned(
+                thumbnail, video,
+                qa={"approved": True, "mode": "TEST", "subject": "test-technical-qa", "issuer": "TEST assertion", "codes": ["PIL_PASS", "FFPROBE_PASS"]},
+                ownership=ownership,
+            )
+    else:
+        raise RuntimeError("worker task kind is not a closed TEST adapter")
+    transitions = {
+        "WAITING_THUMBNAIL_APPROVAL": "HUMAN_THUMBNAIL",
+        "WAITING_VIDEO_APPROVAL": "HUMAN_VIDEO",
+        "READY_TO_PUBLISH": "TERMINAL",
+        "PUBLISHED": "TERMINAL",
+        "REJECTED": "TERMINAL",
+    }
+    action = transitions.get(document["state"])
+    if action is None:
+        raise RuntimeError(f"fixture runner did not reach a durable gate: {document['state']}")
+    result = {"state": document["state"], "next_action": action}
+    if action.startswith("HUMAN_"):
+        kind = "thumbnail" if action == "HUMAN_THUMBNAIL" else "video"
+        artifact = document.get("media", {}).get(kind, {})
+        digest = artifact.get("sha256")
+        if not isinstance(digest, str) or sha256(Path(artifact.get("path", "")).read_bytes()).hexdigest() != digest:
+            raise RuntimeError("durable queued gate requires the current staged artifact hash")
+        result["gate_hash"] = digest
+    return result
+
+
+def _worker_episode_id(root: Path) -> str:
+    document = json.loads((root / "runner.json").read_text(encoding="utf-8"))
+    episode_id = document.get("episode_id")
+    if not isinstance(episode_id, str) or not episode_id.startswith("TEST-"):
+        raise ValueError("existing runner has no TEST episode identity")
+    return episode_id
+
+
+def _approve_compiled_gate(workspace: Path, request_id: str, kind: str):
+    """Mutate one gate only under the queue's existing episode lease."""
+    from src.hybrid.autonomous import RunnerOwnership
+    from src.hybrid.worker import EpisodeTaskQueue
+
+    workspace = _reject_reparse_path(Path(workspace))
+    root = _compiled_root(workspace, request_id)
+    harness = _compiled_json(_reject_reparse_path(root / "compiled-harness.json"))
+    episode_id = harness.get("compiled_episode_id")
+    if not isinstance(episode_id, str) or not episode_id:
+        raise RuntimeError("compiled harness lacks a durable episode identity")
+    queue_path = _reject_reparse_path(workspace / "TEST" / "worker.sqlite3")
+    if not queue_path.is_file():
+        raise RuntimeError("compiled approval requires an existing durable worker queue")
+    queue = EpisodeTaskQueue(queue_path)
+    if queue.status(episode_id).get("status") != "WAITING":
+        raise RuntimeError("compiled approval requires a waiting durable queue task")
+    worker_id = f"cli-approval-{os.getpid()}"
+    lease = queue.leases.acquire(
+        episode_id, f"{worker_id}:{uuid.uuid4().hex}", now=time.time(), ttl_seconds=30,
+    )
+    ownership = RunnerOwnership(episode_id, worker_id, lease.fencing_token)
+
+    def assert_current(candidate):
+        if candidate != ownership:
+            raise PermissionError("approval ownership does not match exact episode lease")
+        queue.leases.assert_active(lease, now=time.time())
+
+    try:
+        assert_current(ownership)
+        root, adapter, document = _load_compiled(
+            workspace, request_id, ownership_assertion=assert_current
+        )
+        if adapter.runner.episode_id != episode_id:
+            raise RuntimeError("compiled runner episode identity does not match queue lease")
+        artifact = Path(document["media"][kind]["path"])
+        assert_current(ownership)
+        document = adapter.record_human_gate_owned(
+            kind, artifact, approved=True,
+            reviewer="TEST gate assertion (not human approval)", ownership=ownership,
+        )
+        gate = document.get("gates", {}).get(kind, {})
+        digest = gate.get("artifact_sha256")
+        artifact = _reject_reparse_path(Path(gate.get("artifact_path", "")))
+        if not isinstance(digest, str) or sha256(_compiled_read_bytes(artifact)).hexdigest() != digest:
+            raise RuntimeError("approval receipt is not bound to the current durable artifact")
+        assert_current(ownership)
+        queue.wake_gate(episode_id, kind)
+        return root, adapter, document
+    finally:
+        # Do not release a superseded fence; recovery must retain it.
+        try:
+            assert_current(ownership)
+        except RuntimeError:
+            pass
+        else:
+            queue.leases.release(lease, now=time.time())
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("start", "preproduce", "advance", "audio-preflight", "real-handoff-preflight", "compile-preproduction", "run-preproduction-test", "status", "resume", "remediate", "heroes", "approve", "publish"))
+    p.add_argument("action", choices=("start", "enqueue", "run", "serve", "worker-status", "preproduce", "advance", "audio-preflight", "real-handoff-preflight", "compile-preproduction", "run-preproduction-test", "status", "resume", "remediate", "heroes", "approve", "publish"))
     p.add_argument("--workspace", required=True, type=Path)
     p.add_argument("--prompt-file", type=Path)
     p.add_argument("--source-file", type=Path)
@@ -551,9 +789,56 @@ def main(argv=None):
     p.add_argument("--test-publish", action="store_true")
     p.add_argument("--test-reject-scene")
     p.add_argument("--correction", action="append", default=[])
+    p.add_argument("--once", action="store_true", help="run at most one queued TEST task")
     a = p.parse_args(argv)
     try:
-        if a.action == "preproduce":
+        if a.action == "worker-status":
+            if not a.request_id:
+                p.error("worker-status requires --request-id")
+            # This branch is deliberately before EpisodeTaskQueue construction:
+            # status is an external, filesystem-only JSON projection.
+            from src.hybrid.worker import EpisodeTaskQueue
+            queue_path = Path(a.workspace).resolve() / "TEST" / "worker.sqlite3"
+            fixture_root = Path(a.workspace).resolve() / "TEST" / a.request_id
+            compiled_root = _compiled_root(a.workspace, a.request_id)
+            root = fixture_root if fixture_root.is_dir() else compiled_root / "runner"
+            result = EpisodeTaskQueue.read_status(queue_path, _worker_episode_id(root))
+            result.pop("root", None)
+        elif a.action in {"enqueue", "run", "serve"}:
+            from src.hybrid.worker import DurableEpisodeWorker, EpisodeTaskQueue
+
+            queue_path = Path(a.workspace).resolve() / "TEST" / "worker.sqlite3"
+            if a.action == "enqueue":
+                if not a.request_id:
+                    p.error("enqueue requires --request-id for an existing TEST runner")
+                fixture_root = Path(a.workspace).resolve() / "TEST" / a.request_id
+                compiled_root = _compiled_root(a.workspace, a.request_id)
+                if fixture_root.is_dir():
+                    queue = EpisodeTaskQueue(queue_path)
+                    result = queue.enqueue(_worker_episode_id(fixture_root), str(fixture_root), "fixture")
+                elif compiled_root.is_dir():
+                    _root, adapter, _document = _load_compiled(a.workspace, a.request_id)
+                    queue = EpisodeTaskQueue(queue_path)
+                    # Store the configured workspace; the handler re-discovers a
+                    # unique hash-bound packet by durable episode identity.
+                    result = queue.enqueue(adapter.runner.episode_id, str(Path(a.workspace).resolve()), "compiled")
+                else:
+                    raise ValueError("enqueue requires an existing durable TEST runner")
+            else:
+                if a.action == "run" and not a.once:
+                    p.error("run requires --once; use serve for the bounded worker loop")
+                queue = EpisodeTaskQueue(queue_path)
+                worker = DurableEpisodeWorker(queue, f"cli-{__import__('os').getpid()}", _fixture_worker_handler)
+                if a.action == "run":
+                    result = asyncio.run(worker.run_once()) or {"status": "IDLE", "mode": "TEST"}
+                else:
+                    try:
+                        asyncio.run(worker.serve())
+                    except KeyboardInterrupt:
+                        result = {"status": "STOPPED", "mode": "TEST"}
+                    else:
+                        result = {"status": "STOPPED", "mode": "TEST"}
+        elif a.action == "preproduce":
             if a.prompt_file is None or a.compiled_input is not None:
                 p.error("preproduce requires --prompt-file and does not accept --compiled-input")
             from src.hybrid.preproduction import start_preproduction
@@ -620,10 +905,19 @@ def main(argv=None):
             elif _compiled_root(a.workspace, a.request_id).exists() and a.action == "status":
                 result = _compiled_status(_compiled_root(a.workspace, a.request_id), a.request_id)
             elif _compiled_root(a.workspace, a.request_id).exists():
+                if a.action not in {"status", "approve"}:
+                    raise ValueError(
+                        "compiled direct resume/remediate/heroes is blocked; use the owned queue worker"
+                    )
                 root, adapter, doc = _load_compiled(a.workspace, a.request_id)
-                run = adapter.runner
                 if a.action == "resume":
-                    doc = asyncio.run(adapter.resume(FixtureProvider(root.parent / "provider"), _compiled_image_qa()))
+                    harness = json.loads((root / "compiled-harness.json").read_text(encoding="utf-8"))
+                    doc = asyncio.run(
+                        adapter.resume(
+                            FixtureProvider(root.parent / "provider"),
+                            _compiled_image_qa(harness.get("test_reject_scene")),
+                        )
+                    )
                     doc = _stage_compiled(adapter, doc)
                 elif a.action == "remediate":
                     corrections = {}
@@ -642,7 +936,7 @@ def main(argv=None):
                 elif a.action == "approve":
                     if not a.test_approval or not a.kind:
                         raise ValueError("only explicit --test-approval can label a TEST compiled gate decision")
-                    doc = run.record_human_gate(a.kind, Path(doc["media"][a.kind]["path"]), approved=True, reviewer="TEST gate assertion (not human approval)")
+                    root, adapter, doc = _approve_compiled_gate(a.workspace, a.request_id, a.kind)
                 elif a.action == "publish":
                     raise ValueError("compiled TEST policy disables publication; no publication path exists")
                 result = _compiled_public(root, adapter, doc)
@@ -657,6 +951,22 @@ def main(argv=None):
                     if not a.test_approval or not a.kind:
                         raise ValueError("only explicit --test-approval can approve TEST fixture media")
                     doc = run.record_human_gate(a.kind, Path(doc["media"][a.kind]["path"]), approved=True, reviewer="TEST local assertion")
+                    queue_db = Path(a.workspace).resolve() / "TEST" / "worker.sqlite3"
+                    if queue_db.exists():
+                        from src.hybrid.worker import EpisodeTaskQueue
+
+                        queue = EpisodeTaskQueue(queue_db)
+                        try:
+                            waiting = queue.status(run.episode_id)
+                        except ValueError:
+                            waiting = None
+                        if waiting is not None and waiting["status"] == "WAITING":
+                            gate = doc.get("gates", {}).get(a.kind, {})
+                            digest = gate.get("artifact_sha256")
+                            artifact = Path(gate.get("artifact_path", ""))
+                            if not isinstance(digest, str) or not artifact.is_file() or sha256(artifact.read_bytes()).hexdigest() != digest:
+                                raise RuntimeError("approval receipt is not bound to the current durable artifact")
+                            queue.wake_gate(run.episode_id, a.kind)
                 elif a.action == "publish":
                     if not a.test_publish:
                         raise ValueError("only explicit --test-publish can publish TEST fixture media")

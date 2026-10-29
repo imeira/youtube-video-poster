@@ -32,6 +32,7 @@ from src.hybrid.quality_first_motion import (
 )
 from src.hybrid.technical_qa import inspect_clip, inspect_image
 from src.hybrid.throughput import DurableQueue, run_bounded_wave
+from src.storage.episode_id import validate_episode_id
 
 
 @dataclass(frozen=True)
@@ -65,8 +66,7 @@ class CompiledEpisode:
 
     @classmethod
     def compile(cls, episode_id: str, audio: FrozenAsset, frames):
-        if not episode_id.strip():
-            raise ValueError("episode_id required")
+        episode_id = validate_episode_id(episode_id)
         frames = tuple(frames)
         if not frames:
             raise ValueError("at least one semantic frame required")
