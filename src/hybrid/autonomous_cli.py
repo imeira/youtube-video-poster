@@ -509,8 +509,8 @@ def start_compiled(workspace: Path, packet: Path, reject_scene: str | None):
     packet = _reject_reparse_path(Path(packet))
     # Parse and validate the literal episode storage key before deriving a
     # workspace path, creating a directory, or constructing any SQLite service.
-    CompiledEpisode.load(_reject_reparse_path(packet / "compiled.json"))
     packet_files = tuple(_reject_reparse_path(packet / name) for name in COMPILED_PACKET_FILES)
+    CompiledEpisode.load(packet_files[0])
     seed = b"autonomous-compiled-test-v1\0" + b"".join(path.read_bytes() for path in packet_files)
     rid, root = sha256(seed).hexdigest(), _compiled_root(workspace, sha256(seed).hexdigest())
     if root.exists():
@@ -549,14 +549,29 @@ def run_preproduction_test(workspace: Path, request_id: str, manifest_path: Path
     # second CLI invocation a read-only recovery of the first TEST run.
     with file_lock(revision_path / ".run-preproduction-test.lock"):
         if _compiled_root(workspace, runner_id).exists():
-            _root, _adapter, document = _load_compiled(workspace, runner_id)
+            _root, adapter, document = _load_compiled(workspace, runner_id)
             if document is None:
                 raise ValueError("compiled TEST runner exists without durable state")
         else:
             start_compiled(workspace, packet, None)
-            _root, _adapter, document = _load_compiled(workspace, runner_id)
+            _root, adapter, document = _load_compiled(workspace, runner_id)
             if document is None:
                 raise ValueError("compiled TEST runner did not persist durable state")
+        # The CLI may create the closed TEST packet, but only the fenced durable
+        # worker may mutate its runner.  Keep this handoff functional by
+        # enqueueing the configured workspace and executing one bounded worker
+        # turn, rather than reviving the former unowned direct resume path.
+        from src.hybrid.worker import DurableEpisodeWorker, EpisodeTaskQueue
+
+        queue = EpisodeTaskQueue(_reject_reparse_path(Path(workspace) / "TEST" / "worker.sqlite3"))
+        queued = queue.enqueue(adapter.runner.episode_id, str(_reject_reparse_path(Path(workspace))), "compiled")
+        if queued["status"] in {"PENDING", "RUNNING"}:
+            asyncio.run(
+                DurableEpisodeWorker(
+                    queue, f"preproduction-{os.getpid()}", _fixture_worker_handler
+                ).run_once()
+            )
+        _root, adapter, document = _load_compiled(workspace, runner_id)
     state = document["state"]
     gate = {
         "state": state,
