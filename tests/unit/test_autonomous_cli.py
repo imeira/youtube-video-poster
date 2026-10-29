@@ -117,6 +117,80 @@ def test_cli_refuses_live_and_non_test_approval(tmp_path):
     assert code == 1 and blocked["status"] == "BLOCKED"
 
 
+def test_cli_worker_runs_existing_fixture_once_through_explicit_two_gates(tmp_path):
+    """The durable worker resumes a real runner; gates require separate CLI approvals."""
+    from decimal import Decimal
+
+    from src.hybrid.autonomous_cli import manifest, packet, runner
+    from src.hybrid.execution import Job
+
+    workspace = tmp_path / "workspace"
+    raw = b"Poste um video no @test\nIdioma: pt-BR\nPlaylist: TEST\nTema: worker fixture\n"
+    request_id = sha256(b"worker-cli-fixture\0" + raw).hexdigest()
+    root = workspace / "TEST" / request_id
+    root.mkdir(parents=True)
+    (root / "prompt.txt").write_bytes(raw)
+    request = {"channel": "@test", "language": "pt-BR", "playlist": "TEST", "theme": "worker fixture"}
+    job = Job("TEST-WORKER-S001", "first", "TEST", "test-local-fixture", {"fixture": "local-only"}, manifest(root), Decimal("0.01"))
+    run = runner(root, request_id)
+    run.start(packet(raw, request), [job])
+    (root / "harness.json").write_text(json.dumps({"request_id": request_id, "prompt_sha256": sha256(raw).hexdigest(), "request": request}), encoding="utf-8")
+
+    code, queued = run_cli("enqueue", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, queued
+    code, first = run_cli("run", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, first
+    assert first["status"] == "WAITING"
+    assert first["next_action"] == "HUMAN_THUMBNAIL"
+    assert (root / "thumbnail.TEST.png").is_file()
+    assert (root / "video.TEST.mp4").is_file()
+
+    code, thumbnail = run_cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "thumbnail", "--test-approval")
+    assert code == 0, thumbnail
+    code, second = run_cli("run", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, second
+    assert second["status"] == "WAITING"
+    assert second["next_action"] == "HUMAN_VIDEO"
+    code, video = run_cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "video", "--test-approval")
+    assert code == 0, video
+    code, final = run_cli("run", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, final
+    assert final["status"] == "DONE"
+    assert final["state"] == "READY_TO_PUBLISH"
+
+
+def test_cli_worker_status_reads_writer_snapshot_without_touching_queue_files(tmp_path):
+    """Status is a JSON projection, not SQLite bootstrap or a live WAL read."""
+    from src.hybrid.worker import EpisodeTaskQueue
+
+    workspace = tmp_path / "workspace"
+    request_id = "a" * 64
+    root = workspace / "TEST" / request_id
+    root.mkdir(parents=True)
+    (root / "runner.json").write_text(json.dumps({"episode_id": "TEST-SNAPSHOT"}), encoding="utf-8")
+    queue = EpisodeTaskQueue(workspace / "TEST" / "worker.sqlite3")
+    queue.enqueue("TEST-SNAPSHOT", str(root), "fixture")
+    before = {
+        path.relative_to(workspace): path.read_bytes()
+        for path in workspace.rglob("*") if path.is_file()
+    }
+
+    code, result = run_cli(
+        "worker-status", "--workspace", str(workspace), "--request-id", request_id
+    )
+    after = {
+        path.relative_to(workspace): path.read_bytes()
+        for path in workspace.rglob("*") if path.is_file()
+    }
+
+    assert code == 0, result
+    assert result["episode_id"] == "TEST-SNAPSHOT"
+    assert result["status"] == "PENDING"
+    assert result["snapshot"] == "CURRENT"
+    assert "root" not in result
+    assert before == after
+
+
 def test_cli_compiled_test_packet_rehydrates_successors_and_rejects_mutation(tmp_path):
     """A fresh CLI process uses only a copied TEST packet and the durable executor."""
     from PIL import Image

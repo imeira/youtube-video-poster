@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -27,11 +28,25 @@ from src.hybrid.artifacts import FrozenAsset, Manifest
 from src.hybrid.cas import content_key
 from src.hybrid.execution import Executor, Job
 from src.hybrid.locks import file_lock, file_slot
-from src.hybrid.standing_budget import StandingBudgetLedger
+from src.hybrid.standing_budget import BudgetDenied, StandingBudgetLedger
 
 
 class PolicyError(ValueError):
     """A policy is missing, malformed, or insufficient to authorize an action."""
+
+
+@dataclass(frozen=True)
+class RunnerOwnership:
+    """Opaque worker lease identity, checked by a runtime-bound assertion."""
+
+    episode_id: str
+    worker_id: str
+    fencing_token: int
+
+
+_ACTIVE_RUNNER_OWNERSHIP: ContextVar[RunnerOwnership | None] = ContextVar(
+    "active_runner_ownership", default=None
+)
 
 
 def _decimal(value: object, field: str) -> Decimal:
@@ -615,6 +630,10 @@ class AutonomousTwoGateRunner:
         policy: AutonomousPolicy,
         executor: Executor,
         ledger: StandingBudgetLedger | None = None,
+        *,
+        provider_concurrency: int = 1,
+        cpu_concurrency: int = 1,
+        ownership_assertion: Callable[[RunnerOwnership], object] | None = None,
     ):
         if ledger is None:
             raise PolicyError("a compatible TEST standing budget ledger is required")
@@ -631,6 +650,15 @@ class AutonomousTwoGateRunner:
             raise PolicyError("standing budget ledger is incompatible with TEST policy")
         if not episode_id.startswith("TEST-"):
             raise PolicyError("TEST runner requires a TEST episode namespace")
+        if (
+            type(provider_concurrency) is not int
+            or type(cpu_concurrency) is not int
+            or not 1 <= provider_concurrency <= 32
+            or not 1 <= cpu_concurrency <= 32
+        ):
+            raise ValueError("scheduler limits must be bounded positive integers (1..32)")
+        if ownership_assertion is not None and not callable(ownership_assertion):
+            raise TypeError("runner ownership assertion must be callable")
         executor._attach_standing_ledger(ledger)
         self.root = Path(root)
         self.episode_id = episode_id
@@ -641,6 +669,32 @@ class AutonomousTwoGateRunner:
         self.lock_path = self.root / "runner.lock"
         self.metrics = OperationalMetricsLedger(self.root / "operational-metrics.sqlite3")
         self._jobs: dict[str, Job] = {}
+        self.scheduler = {
+            "provider_concurrency": provider_concurrency,
+            "cpu_concurrency": cpu_concurrency,
+        }
+        # Runtime wiring may assert an active queue lease. It is deliberately
+        # not policy or LIVE authority; this runner remains TEST-only.
+        self._ownership_assertion = ownership_assertion
+
+    def _assert_ownership(self, ownership: RunnerOwnership | None) -> None:
+        if ownership is None:
+            if self._ownership_assertion is not None:
+                raise PermissionError("configured runner requires fenced ownership")
+            return
+        if (
+            not isinstance(ownership, RunnerOwnership)
+            or ownership.episode_id != self.episode_id
+            or not isinstance(ownership.worker_id, str)
+            or not ownership.worker_id
+            or type(ownership.fencing_token) is not int
+            or ownership.fencing_token < 1
+        ):
+            raise PermissionError("runner ownership is malformed or for another episode")
+        if self._ownership_assertion is None:
+            raise PermissionError("owned resume requires a runtime lease assertion")
+        if self._ownership_assertion(ownership) is False:
+            raise PermissionError("runtime lease assertion rejected runner ownership")
 
     def _load(self) -> dict[str, Any]:
         if not self.path.is_file():
@@ -653,6 +707,11 @@ class AutonomousTwoGateRunner:
         return data
 
     def _save(self, document: dict[str, Any]) -> dict[str, Any]:
+        # A task spawned by resume_owned inherits this context, so every runner
+        # JSON replacement rechecks the same live runtime fence.
+        ownership = _ACTIVE_RUNNER_OWNERSHIP.get()
+        if ownership is not None:
+            self._assert_ownership(ownership)
         _atomic_json(self.path, document)
         return document
 
@@ -736,6 +795,11 @@ class AutonomousTwoGateRunner:
             if job.request_id in seen:
                 raise ValueError("jobs must have unique request ids")
             seen.add(job.request_id)
+        # Validate the entire graph before policy checks or a runner-state write.
+        # request IDs bind the dependency declarations, so this is also the
+        # durable graph that later resume must execute.
+        self._topological_order(jobs)
+        for job in jobs:
             if job.mode != "TEST":
                 raise PolicyError(
                     "LIVE is not qualified by this runner; use existing production path"
@@ -761,6 +825,7 @@ class AutonomousTwoGateRunner:
                 "packet_sha256": _digest_json(packet),
                 "jobs": serialized,
                 "job_specs": [self._job_spec(job) for job in jobs],
+                "scheduler": self.scheduler,
                 "qa": {},
                 "media": {},
                 "delivery": {},
@@ -817,8 +882,288 @@ class AutonomousTwoGateRunner:
         independent_qa: Callable[[dict], dict],
         jobs: list[Job] | None = None,
     ) -> dict[str, Any]:
-        async with file_slot([self.lock_path]):
-            return await self._resume(provider, independent_qa, jobs)
+        return await self._resume_with_ownership(provider, independent_qa, None, jobs)
+
+    async def resume_owned(
+        self,
+        provider,
+        independent_qa: Callable[[dict], dict],
+        ownership: RunnerOwnership,
+        jobs: list[Job] | None = None,
+    ) -> dict[str, Any]:
+        """Resume under a runtime-asserted worker lease and fencing token."""
+        return await self._resume_with_ownership(provider, independent_qa, ownership, jobs)
+
+    async def _resume_with_ownership(self, provider, independent_qa, ownership, jobs):
+        self._assert_ownership(ownership)
+        token = _ACTIVE_RUNNER_OWNERSHIP.set(ownership)
+        try:
+            # Stable runner ownership is acquired before executor request ownership.
+            # It remains held through task cancellation/unwind, preventing a second
+            # process from overwriting QA while the first still owns this episode.
+            async with file_slot([self.lock_path]):
+                self._assert_ownership(ownership)
+                return await self._resume_parallel(provider, independent_qa, jobs, ownership)
+        finally:
+            _ACTIVE_RUNNER_OWNERSHIP.reset(token)
+
+    @staticmethod
+    def _dependencies(job: Job, known: set[str]) -> tuple[str, ...]:
+        dependencies = job.payload.get("depends_on", [])
+        if not isinstance(dependencies, list) or not all(
+            isinstance(item, str) and item in known for item in dependencies
+        ):
+            raise ValueError("job dependencies must be bound request IDs")
+        if job.request_id in dependencies or len(set(dependencies)) != len(dependencies):
+            raise ValueError("job dependencies must be unique non-self request IDs")
+        return tuple(dependencies)
+
+    @classmethod
+    def _topological_order(cls, jobs: list[Job]) -> tuple[str, ...]:
+        """Return the bound DAG order or reject it before execution state exists."""
+        known = {job.request_id for job in jobs}
+        if len(known) != len(jobs):
+            raise ValueError("jobs must have unique request ids")
+        dependencies = {job.request_id: cls._dependencies(job, known) for job in jobs}
+        remaining = {request_id: set(edges) for request_id, edges in dependencies.items()}
+        ordered: list[str] = []
+        while remaining:
+            ready = sorted(request_id for request_id, edges in remaining.items() if not edges)
+            if not ready:
+                raise ValueError("job dependency graph contains a cycle")
+            ordered.extend(ready)
+            for request_id in ready:
+                del remaining[request_id]
+            completed = set(ready)
+            for edges in remaining.values():
+                edges.difference_update(completed)
+        return tuple(ordered)
+
+    def _validate_persisted_qa(self, request_id: str, qa: dict[str, Any]) -> None:
+        """Re-open the exact executor artifact before trusting persisted QA."""
+        receipt = self.executor.inspect(request_id)
+        path = Path((receipt or {}).get("result", ""))
+        identity = qa.get("reviewer_identity") if isinstance(qa, dict) else None
+        valid = (
+            isinstance(qa, dict)
+            and qa.get("approved") is True
+            and isinstance(receipt, dict)
+            and receipt.get("status") == "COMPLETE"
+            and receipt.get("request_id") == request_id
+            and isinstance(receipt.get("result_sha256"), str)
+            and path.is_file()
+            and sha256(path.read_bytes()).hexdigest() == receipt["result_sha256"]
+            and qa.get("result_sha256") == receipt["result_sha256"]
+            and receipt.get("qa") is True
+            and isinstance(qa.get("reviewer"), str)
+            and bool(qa["reviewer"].strip())
+            and isinstance(identity, dict)
+            and all(isinstance(identity.get(key), str) and identity[key].strip() for key in ("subject", "issuer"))
+            and identity["subject"] != "generator"
+        )
+        if not valid:
+            raise ValueError("persisted QA does not bind the exact completed artifact")
+
+    async def _resume_parallel(self, provider, independent_qa, jobs=None, ownership=None) -> dict[str, Any]:
+        """Run ready work concurrently under one durable runner owner."""
+        document = self._load()
+        if document.get("scheduler") != self.scheduler:
+            raise PolicyError("scheduler limits differ from hash-bound runner state")
+        if jobs is not None:
+            self.validate_resume_jobs(jobs)
+        else:
+            self._rebuild_jobs(document)
+        if document["state"] not in {"READY", "RUNNING"}:
+            # Even an apparently terminal resume is a promotion boundary:
+            # never return a stale QA PASS whose artifact was replaced later.
+            try:
+                for request_id, verdict in document["qa"].items():
+                    if verdict.get("approved") is True:
+                        self._validate_persisted_qa(request_id, verdict)
+            except ValueError:
+                document["state"] = "REJECTED"
+                self._save(document)
+                raise
+            return document
+        document["state"] = "RUNNING"
+        self._save(document)
+        ordered = self._topological_order(list(self._jobs.values()))
+        known = set(ordered)
+        dependencies = {request_id: self._dependencies(job, known) for request_id, job in self._jobs.items()}
+        provider_slots = asyncio.Semaphore(self.scheduler["provider_concurrency"])
+        cpu_slots = asyncio.Semaphore(self.scheduler["cpu_concurrency"])
+
+        class FencedProvider:
+            """Assert the live runner fence at the provider boundary itself."""
+
+            mode = getattr(provider, "mode", None)
+
+            async def submit(_, *args, **kwargs):
+                self._assert_ownership(ownership)
+                return await provider.submit(*args, **kwargs)
+
+            async def recover(_, *args, **kwargs):
+                self._assert_ownership(ownership)
+                return await provider.recover(*args, **kwargs)
+
+        fenced_provider = FencedProvider()
+
+        def checkpoint_provider_binding(local_id: str, remote_id: str) -> None:
+            self._assert_ownership(ownership)
+            self.ledger.bind_provider_request_id(local_id, remote_id)
+
+        def mark_unknown_if_reserved(request_id: str) -> None:
+            try:
+                self.ledger.claim(request_id)
+            except BudgetDenied:
+                return
+            self.ledger.mark_unknown(request_id)
+
+        async def complete_one(request_id: str) -> tuple[str, dict, dict | None]:
+            job = self._jobs[request_id]
+            receipt = self.executor.inspect(request_id)
+            try:
+                if receipt is None:
+                    self._assert_ownership(ownership)
+                    prepared = self.executor.prepare_intent(job, auth_scope="TEST_LOCAL_ONLY")
+                    self._assert_ownership(ownership)
+                    self.ledger.reserve(
+                        request_id, self.episode_id, job.endpoint, job.cost,
+                        settlement_mode="FAL_READBACK_V2",
+                        auth_scope=prepared["settlement_binding"]["auth_scope"],
+                        provider_request_id=prepared["settlement_binding"]["provider_request_id"],
+                        authority_mode=prepared["settlement_binding"]["authority_mode"],
+                    )
+                    async with provider_slots:
+                        self._assert_ownership(ownership)
+                        await self.executor.run(
+                            job, fenced_provider,
+                            settlement_checkpoint=checkpoint_provider_binding,
+                            submit_prepared=True,
+                        )
+                elif receipt.get("status") == "PREPARED" and not receipt.get("provider_id"):
+                    async with provider_slots:
+                        self._assert_ownership(ownership)
+                        await self.executor.run(
+                            job, fenced_provider,
+                            settlement_checkpoint=checkpoint_provider_binding,
+                            submit_prepared=True,
+                        )
+                elif receipt.get("provider_id"):
+                    self._assert_ownership(ownership)
+                    self.ledger.bind_provider_request_id(request_id, receipt["provider_id"])
+                    async with provider_slots:
+                        self._assert_ownership(ownership)
+                        await self.executor.run(
+                            job, fenced_provider,
+                            settlement_checkpoint=checkpoint_provider_binding,
+                        )
+            except asyncio.CancelledError:
+                mark_unknown_if_reserved(request_id)
+                raise
+            except Exception:
+                mark_unknown_if_reserved(request_id)
+                raise
+            receipt = self.executor.inspect(request_id)
+            if receipt is None or receipt.get("status") != "COMPLETE":
+                self.ledger.mark_unknown(request_id)
+                raise RuntimeError("incomplete job requires reconciliation; no ambiguous resubmit")
+            result_path = Path(receipt.get("result", ""))
+            if not result_path.is_file() or sha256(result_path.read_bytes()).hexdigest() != receipt.get("result_sha256"):
+                self.ledger.mark_unknown(request_id)
+                raise ValueError("completed receipt output hash mismatch")
+            self.ledger.mark_unknown(request_id)
+            self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
+            if request_id in document["qa"]:
+                return request_id, receipt, None
+            async with cpu_slots:
+                verdict = independent_qa(receipt)
+                if asyncio.iscoroutine(verdict):
+                    verdict = await verdict
+            return request_id, receipt, verdict
+
+        # At most this many coroutine objects exist at once.  Provider and QA
+        # semaphores remain independent; the window only prevents a huge ready
+        # DAG from allocating one task per node.
+        window = self.scheduler["provider_concurrency"] + self.scheduler["cpu_concurrency"]
+        inflight: dict[asyncio.Task, str] = {}
+        try:
+            while True:
+                document = self._load()
+                qa = document["qa"]
+                active_request_ids = {
+                    binding["request_id"]
+                    for binding in document["jobs"]
+                    if "superseded_by" not in binding
+                }
+                try:
+                    for request_id, verdict in qa.items():
+                        if verdict.get("approved") is True:
+                            self._validate_persisted_qa(request_id, verdict)
+                except ValueError:
+                    document["state"] = "REJECTED"
+                    self._save(document)
+                    raise
+                if any(
+                    qa.get(request_id, {}).get("approved") is False
+                    for request_id in active_request_ids
+                ):
+                    document["state"] = "REJECTED"
+                    return self._save(document)
+                pending = [request_id for request_id in ordered if request_id not in qa and request_id not in inflight.values()]
+                if not pending and not inflight:
+                    if not all(
+                        qa.get(request_id, {}).get("approved") is True
+                        for request_id in active_request_ids
+                    ):
+                        raise RuntimeError("active jobs have no reusable QA verdict")
+                    document["state"] = "MEDIA_PENDING"
+                    return self._save(document)
+                blocked = [request_id for request_id in pending if any(qa.get(dep, {}).get("approved") is False for dep in dependencies[request_id])]
+                if blocked:
+                    document["state"] = "REJECTED"
+                    return self._save(document)
+                ready = [request_id for request_id in pending if all(qa.get(dep, {}).get("approved") is True for dep in dependencies[request_id])]
+                for request_id in ready[:max(0, window - len(inflight))]:
+                    task = asyncio.create_task(complete_one(request_id))
+                    inflight[task] = request_id
+                if not inflight:
+                    raise RuntimeError("unfinished jobs have unresolved dependency QA")
+                done, _ = await asyncio.wait(inflight, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    inflight.pop(task)
+                    request_id, receipt, verdict = await task
+                    if verdict is None:
+                        continue
+                    identity = verdict.get("reviewer_identity") if isinstance(verdict, dict) else None
+                    valid = (
+                        isinstance(verdict, dict)
+                        and verdict.get("request_id") == request_id
+                        and verdict.get("result_sha256") == receipt["result_sha256"]
+                        and isinstance(identity, dict)
+                        and all(isinstance(identity.get(key), str) and identity[key].strip() for key in ("subject", "issuer"))
+                        and identity["subject"] != "generator"
+                    )
+                    document = self._load()
+                    if not valid:
+                        document["qa"][request_id] = {"approved": False, "codes": ["QA_CONTRACT_INVALID"]}
+                    elif verdict.get("approved") is not True or not isinstance(verdict.get("reviewer"), str) or not verdict["reviewer"].strip():
+                        document["qa"][request_id] = {"approved": False, "codes": verdict.get("codes", ["QA_FAIL"]), "request_id": request_id, "result_sha256": receipt["result_sha256"], "reviewer": verdict.get("reviewer", ""), "reviewer_identity": identity}
+                    else:
+                        self._assert_ownership(ownership)
+                        self.executor.qa(request_id, receipt["result_sha256"], True, verdict["reviewer"])
+                        document["qa"][request_id] = {"approved": True, "result_sha256": receipt["result_sha256"], "reviewer": verdict["reviewer"], "reviewer_identity": identity, "codes": verdict.get("codes", [])}
+                    self._save(document)
+                # Let task completion callbacks drain before expanding the next
+                # bounded ready window; external observers then see the same
+                # in-flight ceiling as the scheduler's durable map.
+                await asyncio.sleep(0)
+        except BaseException:
+            for task in inflight:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*inflight, return_exceptions=True)
+            raise
 
     async def _resume(
         self,
@@ -1012,7 +1357,19 @@ class AutonomousTwoGateRunner:
     def stage_delivery(
         self, thumbnail: Path, video: Path, *, qa: dict[str, Any]
     ) -> dict[str, Any]:
+        # A runner wired to a worker lease never permits the public bypass.
+        # Standalone TEST runners legitimately retain their own OS lock.
+        self._assert_ownership(None)
         with file_lock(self.lock_path):
+            return self._stage_delivery(thumbnail, video, qa=qa)
+
+    def stage_delivery_owned(
+        self, thumbnail: Path, video: Path, *, qa: dict[str, Any], ownership: RunnerOwnership
+    ) -> dict[str, Any]:
+        """Stage only while the injected runtime fence still owns this episode."""
+        self._assert_ownership(ownership)
+        with file_lock(self.lock_path):
+            self._assert_ownership(ownership)
             return self._stage_delivery(thumbnail, video, qa=qa)
 
     def _stage_delivery(

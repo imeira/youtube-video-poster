@@ -144,7 +144,7 @@ class FixtureProvider:
         raise RuntimeError("TEST fixture cannot remotely recover")
 
 
-def runner(root, rid):
+def runner(root, rid, *, ownership_assertion=None):
     parsed = policy()
     ledger = StandingBudgetLedger(
         root.parent.parent / "TEST-budget.sqlite3",
@@ -160,6 +160,7 @@ def runner(root, rid):
         parsed,
         Executor(root / "jobs.db", Config(limit=Decimal("1.00"))),
         ledger,
+        ownership_assertion=ownership_assertion,
     )
 
 
@@ -532,9 +533,69 @@ def run_preproduction_test(workspace: Path, request_id: str, manifest_path: Path
     }
 
 
+async def _fixture_worker_handler(_task: dict) -> dict:
+    """Resume one existing fixture runner under its exact durable worker lease."""
+    from src.hybrid.autonomous import RunnerOwnership
+
+    if _task["kind"] != "fixture":
+        raise RuntimeError("compiled worker activation awaits an owned compiled adapter API")
+    root = Path(_task["root"])
+    rid = _task["episode_id"].removeprefix("TEST-")
+    ownership = RunnerOwnership(_task["episode_id"], _task["_worker_id"], _task["fencing_token"])
+    run = runner(root, rid, ownership_assertion=_task["_lease_assertion"])
+    document = run._load()
+    if document["state"] in {"READY", "RUNNING", "MEDIA_PENDING"}:
+        document = await run.resume_owned(
+            FixtureProvider(root),
+            lambda receipt: {
+                "approved": True,
+                "reviewer": "independent-test-qa",
+                "reviewer_identity": {"subject": "test-independent-qa", "issuer": "TEST assertion, not cryptographic authentication"},
+                "request_id": receipt["request_id"],
+                "result_sha256": receipt["result_sha256"],
+                "codes": ["TEST_FIXTURE_PASS"],
+            },
+            ownership,
+        )
+    if document["state"] == "MEDIA_PENDING":
+        thumbnail, video = render(root)
+        document = run.stage_delivery_owned(
+            thumbnail, video,
+            qa={"approved": True, "mode": "TEST", "subject": "test-technical-qa", "issuer": "TEST assertion", "codes": ["PIL_PASS", "FFPROBE_PASS"]},
+            ownership=ownership,
+        )
+    transitions = {
+        "WAITING_THUMBNAIL_APPROVAL": "HUMAN_THUMBNAIL",
+        "WAITING_VIDEO_APPROVAL": "HUMAN_VIDEO",
+        "READY_TO_PUBLISH": "TERMINAL",
+        "PUBLISHED": "TERMINAL",
+        "REJECTED": "TERMINAL",
+    }
+    action = transitions.get(document["state"])
+    if action is None:
+        raise RuntimeError(f"fixture runner did not reach a durable gate: {document['state']}")
+    result = {"state": document["state"], "next_action": action}
+    if action.startswith("HUMAN_"):
+        kind = "thumbnail" if action == "HUMAN_THUMBNAIL" else "video"
+        artifact = document.get("media", {}).get(kind, {})
+        digest = artifact.get("sha256")
+        if not isinstance(digest, str) or sha256(Path(artifact.get("path", "")).read_bytes()).hexdigest() != digest:
+            raise RuntimeError("durable queued gate requires the current staged artifact hash")
+        result["gate_hash"] = digest
+    return result
+
+
+def _worker_episode_id(root: Path) -> str:
+    document = json.loads((root / "runner.json").read_text(encoding="utf-8"))
+    episode_id = document.get("episode_id")
+    if not isinstance(episode_id, str) or not episode_id.startswith("TEST-"):
+        raise ValueError("existing runner has no TEST episode identity")
+    return episode_id
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("start", "preproduce", "advance", "audio-preflight", "real-handoff-preflight", "compile-preproduction", "run-preproduction-test", "status", "resume", "remediate", "heroes", "approve", "publish"))
+    p.add_argument("action", choices=("start", "enqueue", "run", "serve", "worker-status", "preproduce", "advance", "audio-preflight", "real-handoff-preflight", "compile-preproduction", "run-preproduction-test", "status", "resume", "remediate", "heroes", "approve", "publish"))
     p.add_argument("--workspace", required=True, type=Path)
     p.add_argument("--prompt-file", type=Path)
     p.add_argument("--source-file", type=Path)
@@ -551,9 +612,51 @@ def main(argv=None):
     p.add_argument("--test-publish", action="store_true")
     p.add_argument("--test-reject-scene")
     p.add_argument("--correction", action="append", default=[])
+    p.add_argument("--once", action="store_true", help="run at most one queued task (reserved pending runner ownership API)")
     a = p.parse_args(argv)
     try:
-        if a.action == "preproduce":
+        if a.action == "worker-status":
+            if not a.request_id:
+                p.error("worker-status requires --request-id")
+            # This branch is deliberately before EpisodeTaskQueue construction:
+            # status is an external, filesystem-only JSON projection.
+            from src.hybrid.worker import EpisodeTaskQueue
+            queue_path = Path(a.workspace).resolve() / "TEST" / "worker.sqlite3"
+            fixture_root = Path(a.workspace).resolve() / "TEST" / a.request_id
+            compiled_root = _compiled_root(a.workspace, a.request_id)
+            root = fixture_root if fixture_root.is_dir() else compiled_root / "runner"
+            result = EpisodeTaskQueue.read_status(queue_path, _worker_episode_id(root))
+            result.pop("root", None)
+        elif a.action in {"enqueue", "run", "serve"}:
+            from src.hybrid.worker import DurableEpisodeWorker, EpisodeTaskQueue
+
+            queue_path = Path(a.workspace).resolve() / "TEST" / "worker.sqlite3"
+            queue = EpisodeTaskQueue(queue_path)
+            if a.action == "enqueue":
+                if not a.request_id:
+                    p.error("enqueue requires --request-id for an existing TEST runner")
+                fixture_root = Path(a.workspace).resolve() / "TEST" / a.request_id
+                compiled_root = _compiled_root(a.workspace, a.request_id)
+                if fixture_root.is_dir():
+                    result = queue.enqueue(_worker_episode_id(fixture_root), str(fixture_root), "fixture")
+                elif compiled_root.is_dir():
+                    raise RuntimeError("compiled worker activation is unavailable: Director compiled adapter has no owned resume/stage API")
+                else:
+                    raise ValueError("enqueue requires an existing durable TEST runner")
+            else:
+                if a.action == "run" and not a.once:
+                    p.error("run requires --once; use serve for the bounded worker loop")
+                worker = DurableEpisodeWorker(queue, f"cli-{__import__('os').getpid()}", _fixture_worker_handler)
+                if a.action == "run":
+                    result = asyncio.run(worker.run_once()) or {"status": "IDLE", "mode": "TEST"}
+                else:
+                    try:
+                        asyncio.run(worker.serve())
+                    except KeyboardInterrupt:
+                        result = {"status": "STOPPED", "mode": "TEST"}
+                    else:
+                        result = {"status": "STOPPED", "mode": "TEST"}
+        elif a.action == "preproduce":
             if a.prompt_file is None or a.compiled_input is not None:
                 p.error("preproduce requires --prompt-file and does not accept --compiled-input")
             from src.hybrid.preproduction import start_preproduction
@@ -657,6 +760,22 @@ def main(argv=None):
                     if not a.test_approval or not a.kind:
                         raise ValueError("only explicit --test-approval can approve TEST fixture media")
                     doc = run.record_human_gate(a.kind, Path(doc["media"][a.kind]["path"]), approved=True, reviewer="TEST local assertion")
+                    queue_db = Path(a.workspace).resolve() / "TEST" / "worker.sqlite3"
+                    if queue_db.exists():
+                        from src.hybrid.worker import EpisodeTaskQueue
+
+                        queue = EpisodeTaskQueue(queue_db)
+                        try:
+                            waiting = queue.status(run.episode_id)
+                        except ValueError:
+                            waiting = None
+                        if waiting is not None and waiting["status"] == "WAITING":
+                            gate = doc.get("gates", {}).get(a.kind, {})
+                            digest = gate.get("artifact_sha256")
+                            artifact = Path(gate.get("artifact_path", ""))
+                            if not isinstance(digest, str) or not artifact.is_file() or sha256(artifact.read_bytes()).hexdigest() != digest:
+                                raise RuntimeError("approval receipt is not bound to the current durable artifact")
+                            queue.wake_gate(run.episode_id, a.kind)
                 elif a.action == "publish":
                     if not a.test_publish:
                         raise ValueError("only explicit --test-publish can publish TEST fixture media")
