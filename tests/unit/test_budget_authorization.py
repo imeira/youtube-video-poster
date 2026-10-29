@@ -323,6 +323,18 @@ def test_bridge_requires_a_child_operation_id_and_hides_raw_ledger(tmp_path):
         bridge.reserve(provider="test-image", quoted_cap_usd="0.10")
 
 
+def test_bridge_owns_serialized_unknown_transition_without_exposing_ledger(tmp_path):
+    service, _, _, receipt = _authorized(tmp_path)
+    bridge = service.authorized_bridge(receipt.path)
+    bridge.reserve(operation_id="image-scene-001", provider="test-image", quoted_cap_usd="0.10")
+
+    unknown = bridge.mark_submission_unknown(request_id="image-scene-001")
+
+    assert unknown["request_id"] == "image-scene-001"
+    assert unknown["state"] == "UNKNOWN"
+    assert not hasattr(bridge, "ledger")
+
+
 def test_standing_authorization_allows_distinct_child_operations_and_rejects_changed_identity(tmp_path):
     service, _, _, receipt = _authorized(tmp_path)
     bridge = service.authorized_bridge(receipt.path)
