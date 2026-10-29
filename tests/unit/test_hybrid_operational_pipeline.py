@@ -11,6 +11,7 @@ from PIL import Image
 from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
 from src.hybrid.execution import Executor, ProviderResult
 from src.hybrid.planner import Config
+from src.hybrid.render import commit_renderer_completion
 
 
 def source_manifest(tmp_path):
@@ -479,7 +480,21 @@ async def test_director_dispatches_compiled_baselines_to_independent_visual_qa(t
     assert EpisodeStateStore.load(fs.paths.state_json).current_state == EpisodeState.PLANNING_ANIMATION
 
     class Renderer:
-        def render_compiled(self, production, scenes, manifest, audio, srt, output, *, hold):
+        def render_compiled(
+            self,
+            production,
+            scenes,
+            manifest,
+            audio,
+            srt,
+            output,
+            *,
+            hold,
+            completion_receipt_path,
+            render_intent_sha256,
+            render_contract_sha256,
+            canonical_episode_root,
+        ):
             assert production is pipeline
             assert len(scenes) == 1
             assert manifest.checksum == pipeline.approved_manifest().checksum
@@ -487,11 +502,24 @@ async def test_director_dispatches_compiled_baselines_to_independent_visual_qa(t
             assert srt is None
             assert hold == 4
             output.write_bytes(b"render")
-            return {"subtitles_sha256": None, "hold_seconds": hold, "audio_operation": "derived_master"}
+            receipt = {
+                "output_sha256": sha256(output.read_bytes()).hexdigest(),
+                "subtitles_sha256": None,
+                "hold_seconds": hold,
+                "audio_operation": "derived_master",
+            }
+            commit_renderer_completion(
+                completion_receipt_path,
+                intent_sha256=render_intent_sha256,
+                render_contract_sha256=render_contract_sha256,
+                receipt=receipt,
+                canonical_episode_root=canonical_episode_root,
+            )
+            return receipt
 
     receipt = director.render_compiled_video("EPX", pipeline, Renderer())
 
-    assert receipt["subtitles_sha256"] is None
+    assert receipt["renderer_receipt"]["subtitles_sha256"] is None
     assert fs.paths.final_video.is_file()
     assert EpisodeStateStore.load(fs.paths.state_json).current_state == EpisodeState.FINAL_QA
 

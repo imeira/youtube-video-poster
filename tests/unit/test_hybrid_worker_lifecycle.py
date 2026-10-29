@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import multiprocessing
+import os
 import sqlite3
+import subprocess
 from datetime import UTC, datetime
+from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
@@ -141,6 +146,64 @@ def test_wake_gate_requires_persisted_approved_runner_receipt(tmp_path):
     queue.complete("TEST-EP", "worker", lease, {"state": "WAIT", "next_action": "HUMAN_THUMBNAIL", "gate_hash": "a" * 64}, now=1.5)
     with pytest.raises(RuntimeError, match="receipt"):
         queue.wake_gate("TEST-EP", "thumbnail")
+    assert queue.status("TEST-EP")["status"] == "WAITING"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junctions are native reparse points")
+def test_wake_gate_rejects_junction_swap_before_runner_read_without_transition(tmp_path, monkeypatch):
+    """A candidate swapped after glob cannot read outside the configured root."""
+
+    workspace, external = tmp_path / "workspace", tmp_path / "external"
+    runner = workspace / "TC" / "request" / "runner" / "runner.json"
+    runner.parent.mkdir(parents=True)
+    artifact = workspace / "delivery" / "thumbnail.png"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"approved thumbnail")
+    digest = sha256(artifact.read_bytes()).hexdigest()
+    runner.write_text(json.dumps({"episode_id": "TEST-EP", "gates": {"thumbnail": {
+        "artifact_path": str(artifact), "artifact_sha256": digest, "approved": True, "reviewer": "reviewer",
+    }}}), encoding="utf-8")
+    (external / "request" / "runner").mkdir(parents=True)
+    (external / "request" / "runner" / "runner.json").write_text(runner.read_text(encoding="utf-8"), encoding="utf-8")
+
+    queue = EpisodeTaskQueue(tmp_path / "worker.sqlite3")
+    queue.enqueue("TEST-EP", str(workspace), "compiled")
+    lease = queue.leases.acquire("TEST-EP", "worker:run", now=1.0, ttl_seconds=10)
+    queue.claim("TEST-EP", "worker", lease, now=1.5)
+    queue.complete("TEST-EP", "worker", lease, {"state": "WAIT", "next_action": "HUMAN_THUMBNAIL", "gate_hash": digest}, now=1.5)
+
+    original_glob, original_read_bytes, original_read_text = Path.glob, Path.read_bytes, Path.read_text
+    swapped, outside_reads = False, []
+
+    def swap_after_glob(self, pattern):
+        nonlocal swapped
+        for candidate in original_glob(self, pattern):
+            yield candidate
+            if self == workspace / "TC" and not swapped:
+                swapped = True
+                import shutil
+                shutil.rmtree(self)
+                created = subprocess.run(["cmd", "/c", "mklink", "/J", str(self), str(external)], capture_output=True, check=False)
+                assert created.returncode == 0, created.stderr.decode(errors="replace")
+
+    def trap_read_bytes(self, *args, **kwargs):
+        if external in self.parents:
+            outside_reads.append(self)
+        return original_read_bytes(self, *args, **kwargs)
+
+    def trap_read_text(self, *args, **kwargs):
+        if external in self.parents:
+            outside_reads.append(self)
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "glob", swap_after_glob)
+    monkeypatch.setattr(Path, "read_bytes", trap_read_bytes)
+    monkeypatch.setattr(Path, "read_text", trap_read_text)
+    with pytest.raises((RuntimeError, ValueError), match="reparse|receipt"):
+        queue.wake_gate("TEST-EP", "thumbnail")
+
+    assert swapped
+    assert outside_reads == []
     assert queue.status("TEST-EP")["status"] == "WAITING"
 
 

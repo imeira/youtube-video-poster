@@ -12,6 +12,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -27,7 +28,7 @@ from typing import Any
 from src.hybrid.artifacts import FrozenAsset, Manifest
 from src.hybrid.cas import content_key
 from src.hybrid.execution import Executor, Job
-from src.hybrid.locks import file_lock, file_slot
+from src.hybrid.locks import file_lock, file_slot, reject_reparse_path
 from src.hybrid.standing_budget import BudgetDenied, StandingBudgetLedger
 
 
@@ -1446,7 +1447,26 @@ class AutonomousTwoGateRunner:
     def record_human_gate(
         self, kind: str, artifact: Path, *, approved: bool, reviewer: str
     ) -> dict[str, Any]:
+        """Record a standalone gate; lease-wired runners must use the owned API."""
+        self._assert_ownership(None)
         with file_lock(self.lock_path):
+            return self._record_human_gate(
+                kind, artifact, approved=approved, reviewer=reviewer
+            )
+
+    def record_human_gate_owned(
+        self,
+        kind: str,
+        artifact: Path,
+        *,
+        approved: bool,
+        reviewer: str,
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Record one gate under an existing lease while retaining the OS lock."""
+        self._assert_ownership(ownership)
+        with file_lock(self.lock_path):
+            self._assert_ownership(ownership)
             return self._record_human_gate(
                 kind, artifact, approved=approved, reviewer=reviewer
             )
@@ -1583,9 +1603,15 @@ class AutonomousCompiledTestAdapter:
     LIVE work.
     """
 
-    def __init__(self, runner: AutonomousTwoGateRunner, pipeline):
+    def __init__(
+        self, runner: AutonomousTwoGateRunner, pipeline, *, canonical_episode_root: Path | None = None,
+    ):
         self.runner = runner
         self.pipeline = pipeline
+        self._canonical_episode_root = (
+            reject_reparse_path(Path(canonical_episode_root))
+            if canonical_episode_root is not None else None
+        )
         if runner.episode_id != pipeline.episode.episode_id:
             raise ValueError("runner and compiled pipeline episode IDs must match")
         if pipeline.episode.audio.mode != "TEST":
@@ -1629,6 +1655,15 @@ class AutonomousCompiledTestAdapter:
 
     async def resume(self, provider, independent_qa: Callable[[dict], dict]) -> dict[str, Any]:
         """Resume runner dispatch, then promote only its exact completed QA PASSes."""
+        return await self._resume(provider, independent_qa, None)
+
+    async def resume_owned(
+        self, provider, independent_qa: Callable[[dict], dict], ownership: RunnerOwnership
+    ) -> dict[str, Any]:
+        """Resume only through the exact worker lease wired into this runner."""
+        return await self._resume(provider, independent_qa, ownership)
+
+    async def _resume(self, provider, independent_qa, ownership):
 
         async def qa_after_technical_check(receipt: dict) -> dict:
             scene_id = receipt.get("request", {}).get("scene")
@@ -1656,13 +1691,54 @@ class AutonomousCompiledTestAdapter:
                 verdict = await verdict
             return verdict
 
-        document = await self.runner.resume(provider, qa_after_technical_check)
-        self._synchronize_runner_qa(document)
+        if ownership is None:
+            document = await self.runner.resume(provider, qa_after_technical_check)
+        else:
+            document = await self.runner.resume_owned(
+                provider, qa_after_technical_check, ownership
+            )
+        self._synchronize_runner_qa(document, ownership)
         if document["state"] == "MEDIA_PENDING":
-            self._promote_runner_passes(document)
+            self._promote_runner_passes(document, ownership)
         return document
 
-    def _synchronize_runner_qa(self, document: dict[str, Any]) -> None:
+    def _fenced_mutation(self, ownership: RunnerOwnership | None) -> None:
+        """Recheck the exact queue lease immediately before a compiled write."""
+        if ownership is not None:
+            self.runner._assert_ownership(ownership)
+
+    def record_human_gate(
+        self, kind: str, artifact: Path, *, approved: bool, reviewer: str
+    ) -> dict[str, Any]:
+        """Record a gate only for a standalone compiled TEST runner.
+
+        A compiled adapter constructed with a queue ownership assertion has no
+        unowned approval bypass; its worker must retain that lease and call the
+        owned companion below.
+        """
+        if self.runner._ownership_assertion is not None:
+            raise PermissionError("lease-wired compiled runner requires owned human gate")
+        return self.runner.record_human_gate(
+            kind, artifact, approved=approved, reviewer=reviewer
+        )
+
+    def record_human_gate_owned(
+        self,
+        kind: str,
+        artifact: Path,
+        *,
+        approved: bool,
+        reviewer: str,
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Record a compiled gate under the worker's existing fenced lease."""
+        return self.runner.record_human_gate_owned(
+            kind, artifact, approved=approved, reviewer=reviewer, ownership=ownership
+        )
+
+    def _synchronize_runner_qa(
+        self, document: dict[str, Any], ownership: RunnerOwnership | None = None
+    ) -> None:
         """Project durable runner verdicts into the compiled lineage exactly once."""
         for request_id, verdict in document.get("qa", {}).items():
             receipt = self.runner.executor.inspect(request_id)
@@ -1680,6 +1756,7 @@ class AutonomousCompiledTestAdapter:
             reviewer = verdict.get("reviewer")
             if not isinstance(reviewer, str) or not reviewer.strip():
                 raise ValueError("runner QA reviewer is missing")
+            self._fenced_mutation(ownership)
             self.pipeline.record_visual_qa(
                 job.scene,
                 receipt["result_sha256"],
@@ -1713,7 +1790,9 @@ class AutonomousCompiledTestAdapter:
         self.runner.add_successors(list(jobs))
         return await self.resume(provider, independent_qa)
 
-    def _promote_runner_passes(self, document: dict[str, Any]) -> None:
+    def _promote_runner_passes(
+        self, document: dict[str, Any], ownership: RunnerOwnership | None = None
+    ) -> None:
         for request_id, verdict in document.get("qa", {}).items():
             if verdict.get("approved") is not True:
                 continue
@@ -1731,6 +1810,7 @@ class AutonomousCompiledTestAdapter:
             )
             if job.request_id != request_id:
                 raise ValueError("runner PASS is not the active compiled receipt")
+            self._fenced_mutation(ownership)
             self.pipeline.record_visual_qa(
                 job.scene,
                 receipt["result_sha256"],
@@ -1739,8 +1819,20 @@ class AutonomousCompiledTestAdapter:
             )
 
     @staticmethod
-    def _file_digest(path: Path) -> str:
-        return sha256(Path(path).read_bytes()).hexdigest()
+    def _file_digest(path: Path, *, root: Path | None = None, label: str = "delivery") -> str:
+        candidate = Path(path)
+        if root is not None:
+            if not candidate.is_absolute():
+                raise ValueError(f"{label} path must be absolute")
+            try:
+                root = reject_reparse_path(Path(root))
+                candidate = reject_reparse_path(candidate)
+                candidate.relative_to(root)
+                if not stat.S_ISREG(os.lstat(candidate).st_mode):
+                    raise ValueError("not regular")
+            except (OSError, ValueError) as error:
+                raise ValueError(f"{label} path is outside delivery root or unsafe") from error
+        return sha256(candidate.read_bytes()).hexdigest()
 
     def _sidecars(self, directory: Path) -> dict[str, dict[str, str]]:
         """Create TEST-labelled, separate caption sidecars from compiled timing."""
@@ -1779,15 +1871,97 @@ class AutonomousCompiledTestAdapter:
         }
 
     def _verify_existing_delivery(self, evidence: dict[str, Any], manifest) -> None:
-        if evidence.get("mode") != "TEST" or evidence.get("manifest_sha256") != manifest.checksum:
+        root = self.pipeline.workspace / "delivery"
+        media, sidecars, receipt = evidence.get("media"), evidence.get("sidecars"), evidence.get("render_receipt")
+        if (
+            evidence.get("schema") != "compiled-test-local-delivery-v1"
+            or evidence.get("mode") != "TEST"
+            or evidence.get("manifest_sha256") != manifest.checksum
+            or not isinstance(media, dict) or set(media) != {"thumbnail", "video"}
+            or not isinstance(sidecars, dict) or set(sidecars) != {"transcript", "srt", "vtt"}
+            or not isinstance(receipt, dict)
+        ):
             raise ValueError("existing delivery evidence does not bind this compiled manifest")
-        for kind, item in {**evidence.get("media", {}), **evidence.get("sidecars", {})}.items():
-            path = Path(item.get("path", ""))
-            if not path.is_file() or self._file_digest(path) != item.get("sha256"):
+        for kind, item in {**media, **sidecars}.items():
+            if not isinstance(item, dict) or not isinstance(item.get("sha256"), str):
+                raise TypeError(f"existing {kind} evidence is malformed")
+            if self._file_digest(Path(item.get("path", "")), root=root, label=kind) != item["sha256"]:
                 raise ValueError(f"existing {kind} bytes do not match delivery evidence")
+        renderer_receipt = receipt.get("renderer_receipt", receipt)
+        if (
+            evidence.get("thumbnail_sha256") != media["thumbnail"]["sha256"]
+            or evidence.get("video_sha256") != media["video"]["sha256"]
+            or not isinstance(renderer_receipt, dict)
+            or renderer_receipt.get("manifest_sha256") != manifest.checksum
+            or renderer_receipt.get("output_sha256") != media["video"]["sha256"]
+            or (
+                receipt.get("schema") == "compiled-director-render-receipt-v1"
+                and (
+                    receipt.get("render_contract", {}).get("manifest_sha256") != manifest.checksum
+                    or set(receipt) != {"schema", "intent_sha256", "completion_sha256", "render_contract", "render_contract_sha256", "renderer_receipt"}
+                )
+            )
+            or (
+                receipt.get("schema") != "compiled-director-render-receipt-v1"
+                and renderer_receipt.get("output") != media["video"]["path"]
+            )
+        ):
+            raise ValueError("existing delivery evidence does not cross-bind render receipt")
 
     def stage_local_delivery(
         self, renderer, independent_media_qa: Callable[[dict], dict], *, hold: int = 4
+    ) -> dict[str, Any]:
+        return self._stage_local_delivery(renderer, independent_media_qa, hold, None)
+
+    def stage_local_delivery_owned(
+        self, renderer, independent_media_qa: Callable[[dict], dict], *, hold: int = 4,
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Render and stage TEST media only while the worker fence is current."""
+        self.runner._assert_ownership(ownership)
+        return self._stage_local_delivery(renderer, independent_media_qa, hold, ownership)
+
+    def stage_director_delivery_owned(
+        self, independent_media_qa: Callable[[dict], dict], *, ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Copy only the configured EpisodeFS master after fresh local recovery.
+
+        The stage API has no receipt, media path, callback, class, token, or
+        capability input.  It reopens the canonical immutable lineage from the
+        root selected when this TEST adapter was built.
+        """
+        from src.hybrid.compiled_render_recovery import reopen_compiled_director_receipt
+
+        if self._canonical_episode_root is None:
+            raise PolicyError("Director delivery requires configured canonical episode storage")
+        try:
+            director_receipt, canonical_video = reopen_compiled_director_receipt(
+                self._canonical_episode_root, self.runner.episode_id, self.pipeline,
+            )
+        except (OSError, TypeError, ValueError, KeyError) as error:
+            raise PolicyError("Director delivery canonical recovery is unavailable") from error
+        contract = director_receipt["render_contract"]
+        return self._stage_local_delivery(
+            None, independent_media_qa, int(contract.get("hold_seconds", 0)), ownership,
+            canonical_video=canonical_video, renderer_receipt=director_receipt,
+        )
+
+    async def stage_local_delivery_owned_async(
+        self, renderer, independent_media_qa: Callable[[dict], dict], *, hold: int = 4,
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Keep the worker event loop responsive while the existing renderer encodes."""
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.stage_local_delivery_owned, renderer, independent_media_qa,
+                hold=hold, ownership=ownership,
+            )
+        )
+        return await asyncio.shield(task)
+
+    def _stage_local_delivery(
+        self, renderer, independent_media_qa, hold, ownership,
+        *, canonical_video: Path | None = None, renderer_receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Render approved TEST pixels locally, preserve sidecars, then open gate one.
 
@@ -1805,35 +1979,53 @@ class AutonomousCompiledTestAdapter:
             if document["state"] in {
                 "WAITING_THUMBNAIL_APPROVAL", "WAITING_VIDEO_APPROVAL", "READY_TO_PUBLISH"
             } and evidence_path.is_file():
-                evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                evidence = json.loads(
+                    self._file_digest(evidence_path.absolute(), root=delivery, label="evidence")
+                    and evidence_path.read_text(encoding="utf-8")
+                )
                 self._verify_existing_delivery(evidence, manifest)
                 return document
             raise ValueError("local delivery requires completed compiled image QA")
         if evidence_path.is_file():
+            self._file_digest(evidence_path.absolute(), root=delivery, label="evidence")
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             self._verify_existing_delivery(evidence, manifest)
             media = evidence["media"]
         else:
+            self._fenced_mutation(ownership)
             delivery.mkdir(parents=True, exist_ok=True)
             thumbnail = delivery / "thumbnail.TEST.png"
             video = delivery / "master.mp4"
             if thumbnail.exists() or video.exists():
                 raise ValueError("partial delivery exists without hash-bound evidence")
             source = manifest.assets[0].path
+            self._fenced_mutation(ownership)
             shutil.copyfile(source, thumbnail)
             if self._file_digest(thumbnail) != manifest.assets[0].sha256:
                 raise ValueError("local thumbnail copy hash mismatch")
-            receipt = renderer.render_compiled(
-                self.pipeline,
-                self.pipeline.render_scenes(manifest),
-                manifest,
-                self.pipeline.episode.audio,
-                None,
-                video,
-                hold=hold,
-            )
-            if self._file_digest(video) != receipt.get("output_sha256"):
+            self._fenced_mutation(ownership)
+            if canonical_video is None:
+                receipt = renderer.render_compiled(
+                    self.pipeline,
+                    self.pipeline.render_scenes(manifest),
+                    manifest,
+                    self.pipeline.episode.audio,
+                    None,
+                    video,
+                    hold=hold,
+                )
+            else:
+                if renderer is not None or not canonical_video.is_file():
+                    raise ValueError("Director delivery requires one canonical completed video")
+                self._fenced_mutation(ownership)
+                shutil.copyfile(canonical_video, video)
+                receipt = renderer_receipt
+            output_receipt = receipt.get("renderer_receipt", receipt) if isinstance(receipt, dict) else None
+            if not isinstance(output_receipt, dict) or self._file_digest(video) != output_receipt.get("output_sha256"):
                 raise ValueError("renderer receipt does not bind local master bytes")
+            # The Director receipt originates from strict JSON and may use
+            # Decimal during validation; delivery evidence remains JSON bytes.
+            receipt = json.loads(json.dumps(receipt, default=float, allow_nan=False))
             media = {
                 "thumbnail": {"path": str(thumbnail.resolve()), "sha256": self._file_digest(thumbnail)},
                 "video": {"path": str(video.resolve()), "sha256": self._file_digest(video)},
@@ -1871,8 +2063,8 @@ class AutonomousCompiledTestAdapter:
             raise ValueError("independent TEST media QA rejected or did not bind delivery evidence")
         evidence["independent_technical_qa"] = verdict
         _atomic_json(evidence_path, evidence)
-        return self.runner.stage_delivery(
-            Path(media["thumbnail"]["path"]), Path(media["video"]["path"]), qa={
+        kwargs = {
+            "qa": {
                 "approved": True,
                 "mode": "TEST",
                 "subject": identity["subject"],
@@ -1880,4 +2072,12 @@ class AutonomousCompiledTestAdapter:
                 "reviewer": verdict["reviewer"],
                 "evidence_sha256": self._file_digest(evidence_path),
             }
+        }
+        if ownership is None:
+            return self.runner.stage_delivery(
+                Path(media["thumbnail"]["path"]), Path(media["video"]["path"]), **kwargs
+            )
+        return self.runner.stage_delivery_owned(
+            Path(media["thumbnail"]["path"]), Path(media["video"]["path"]),
+            ownership=ownership, **kwargs,
         )

@@ -16,7 +16,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from src.hybrid.lease import EpisodeLeaseStore
-from src.hybrid.locks import file_lock
+from src.hybrid.locks import file_lock, reject_reparse_path
 
 
 class EpisodeTaskQueue:
@@ -251,12 +251,41 @@ class EpisodeTaskQueue:
     def wake_gate(self, episode_id: str, gate: str) -> dict:
         expected = {"thumbnail":"HUMAN_THUMBNAIL", "video":"HUMAN_VIDEO"}.get(gate)
         if expected is None: raise ValueError("durable gate kind is required")
-        root = Path(self.status(episode_id)["root"]).resolve()
+        # Do not resolve, glob, read, or hash through a queue-supplied root
+        # until every existing lexical ancestor has been rejected as a reparse
+        # point.  Repeat immediately before each open because a junction can be
+        # swapped after discovery.
+        root = reject_reparse_path(Path(self.status(episode_id)["root"]))
+        root = reject_reparse_path(root.resolve())
+        # Compiled tasks retain the configured workspace as their queue root so
+        # handler recovery cannot derive authority from a packet directory.
+        # Locate exactly one durable runner by its stored episode identity.
+        runner_root = root
+        runner_json = reject_reparse_path(runner_root / "runner.json")
+        if not runner_json.is_file():
+            candidates = []
+            candidates_root = reject_reparse_path(root / "TC")
+            for runner_json in candidates_root.glob("*/runner/runner.json"):
+                candidate_root = reject_reparse_path(runner_json.parent)
+                runner_json = reject_reparse_path(candidate_root / "runner.json")
+                try:
+                    raw = reject_reparse_path(runner_json).read_bytes()
+                    if json.loads(raw.decode("utf-8")).get("episode_id") == episode_id:
+                        candidates.append(candidate_root)
+                except (OSError, json.JSONDecodeError):
+                    continue
+            if len(candidates) != 1:
+                raise RuntimeError("configured workspace has no unique durable runner receipt")
+            runner_root = candidates[0]
         try:
-            receipt = json.loads((root / "runner.json").read_text(encoding="utf-8"))["gates"][gate]
+            runner_root = reject_reparse_path(runner_root)
+            runner_json = reject_reparse_path(runner_root / "runner.json")
+            receipt = json.loads(reject_reparse_path(runner_json).read_bytes().decode("utf-8"))["gates"][gate]
             if set(receipt) != {"artifact_path", "artifact_sha256", "approved", "reviewer"}: raise ValueError
-            artifact, approved_hash = Path(receipt["artifact_path"]).resolve(), receipt["artifact_sha256"]
-            if root not in artifact.parents or not artifact.is_file() or sha256(artifact.read_bytes()).hexdigest() != approved_hash or receipt["approved"] is not True or type(receipt["approved"]) is not bool or not isinstance(receipt["reviewer"], str) or not receipt["reviewer"].strip(): raise ValueError
+            artifact = reject_reparse_path(Path(receipt["artifact_path"]))
+            artifact = reject_reparse_path(artifact.resolve())
+            approved_hash = receipt["artifact_sha256"]
+            if root not in artifact.parents or not artifact.is_file() or sha256(reject_reparse_path(artifact).read_bytes()).hexdigest() != approved_hash or receipt["approved"] is not True or type(receipt["approved"]) is not bool or not isinstance(receipt["reviewer"], str) or not receipt["reviewer"].strip(): raise ValueError
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise RuntimeError("persisted approved runner receipt is missing or invalid") from error
         with file_lock(self.writer_lock), self._db() as db:

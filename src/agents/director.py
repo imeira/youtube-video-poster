@@ -37,6 +37,7 @@ from src.providers.llm.core_model_router import CoreModelRouter
 from src.providers.llm.usage import track_episode_usage
 from src.state.machine import EpisodeState, EpisodeStateStore
 from src.storage.episode_fs import EpisodeFS
+from src.storage.episode_id import validate_episode_id
 from src.telegram.approval_gate import TelegramApprovalGate, format_decision_message
 
 logger = logging.getLogger(__name__)
@@ -343,7 +344,7 @@ class DirectorAgent:
         )
 
     def create_autonomous_compiled_test_adapter(
-        self, pipeline, workspace: Path, policy_document: dict
+        self, pipeline, workspace: Path, policy_document: dict, *, ownership_assertion=None
     ):
         """Attach an existing TEST compiled pipeline to the durable runner.
 
@@ -360,6 +361,7 @@ class DirectorAgent:
 
         if pipeline.episode.audio.mode != "TEST":
             raise ValueError("autonomous compiled adapter is TEST-only")
+        validate_episode_id(pipeline.episode.episode_id)
         policy = AutonomousPolicy.from_dict(policy_document)
         executor = pipeline.run.executor
         if executor.config.limit != policy.episode_cap_usd:
@@ -380,8 +382,17 @@ class DirectorAgent:
             policy,
             executor,
             ledger,
+            ownership_assertion=ownership_assertion,
         )
-        return AutonomousCompiledTestAdapter(runner, pipeline)
+        config = self.__dict__.get("config")
+        return AutonomousCompiledTestAdapter(
+            runner,
+            pipeline,
+            canonical_episode_root=(
+                EpisodeFS(pipeline.episode.episode_id, config).paths.root.absolute()
+                if config is not None else None
+            ),
+        )
 
     def import_preproduction_handoff(self, workspace: Path, request_id: str, manifest_path: Path):
         """Verify one local PREPRODUCTION import without activating production.
@@ -843,7 +854,16 @@ class DirectorAgent:
 
     @staticmethod
     def _canonical_render_json(value: dict[str, Any]) -> bytes:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        from decimal import Decimal
+
+        def json_value(item):
+            if isinstance(item, Decimal):
+                return float(item)
+            raise TypeError(f"render evidence cannot encode {type(item).__name__}")
+
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False, default=json_value,
+        ).encode("utf-8")
 
     @classmethod
     def _read_canonical_render_json(
@@ -947,6 +967,7 @@ class DirectorAgent:
             raise ValueError("renderer completion receipt is not bound to current final bytes")
         return intent, intent_sha256, renderer_receipt, completion_sha256
 
+
     @staticmethod
     def _advance_compiled_render_state(state: EpisodeStateStore) -> None:
         if state.current_state is EpisodeState.PLANNING_ANIMATION:
@@ -961,6 +982,7 @@ class DirectorAgent:
     def render_compiled_video(
         self, episode_id: str, pipeline, renderer, *, hold: int = 4,
         _expected_render_contract: dict[str, Any] | None = None,
+        _ownership_assertion=None,
     ) -> dict[str, Any]:
         """Compose a subtitle-free local delivery master from the approved manifest only."""
         from src.hybrid.locks import file_lock
@@ -972,12 +994,18 @@ class DirectorAgent:
             return self._render_compiled_video_locked(
                 episode_id, pipeline, renderer, hold=hold,
                 expected_render_contract=_expected_render_contract,
+                ownership_assertion=_ownership_assertion,
             )
 
     def _render_compiled_video_locked(
         self, episode_id: str, pipeline, renderer, *, hold: int,
-        expected_render_contract: dict[str, Any] | None,
+        expected_render_contract: dict[str, Any] | None, ownership_assertion=None,
     ) -> dict[str, Any]:
+        def assert_owner() -> None:
+            if ownership_assertion is not None:
+                ownership_assertion()
+
+        assert_owner()
         fs = EpisodeFS(episode_id, self.config)
         render_contract = self._compiled_render_contract(episode_id, pipeline, renderer, hold)
         if expected_render_contract is not None and render_contract != expected_render_contract:
@@ -1011,10 +1039,12 @@ class DirectorAgent:
                 if persisted != director_receipt:
                     raise ValueError("compiled Director receipt does not bind renderer completion")
             else:
+                assert_owner()
                 self._write_exclusive_render_json(
                     receipt_path, director_receipt, "compiled Director receipt",
                     canonical_episode_root=Path(render_contract["canonical_episode_root"]),
                 )
+            assert_owner()
             self._advance_compiled_render_state(state)
             state.save(fs.paths.state_json)
             return director_receipt
@@ -1031,23 +1061,28 @@ class DirectorAgent:
             "render_contract": render_contract,
             "render_contract_sha256": contract_sha256,
         }
+        assert_owner()
         self._write_exclusive_render_json(
             intent_path, intent, "compiled render intent",
             canonical_episode_root=Path(render_contract["canonical_episode_root"]),
         )
         intent_sha256 = hashlib.sha256(self._canonical_render_json(intent)).hexdigest()
+        assert_owner()
         state.transition_to(
             EpisodeState.LOCAL_ANIMATION,
             agent="CompiledProduction",
             note="local render started",
         )
         state.save(fs.paths.state_json)
+        assert_owner()
         state.transition_to(
             EpisodeState.ASSEMBLING,
             agent="CompiledProduction",
             note="assembling compiled master",
         )
+        assert_owner()
         state.save(fs.paths.state_json)
+        assert_owner()
         receipt = renderer.render_compiled(
             pipeline,
             scenes,
@@ -1069,7 +1104,8 @@ class DirectorAgent:
         if receipt != renderer_receipt or receipt.get("subtitles_sha256") is not None:
             raise ValueError("compiled renderer return does not match durable completion")
         return self._render_compiled_video_locked(
-            episode_id, pipeline, renderer, hold=hold, expected_render_contract=render_contract
+            episode_id, pipeline, renderer, hold=hold, expected_render_contract=render_contract,
+            ownership_assertion=ownership_assertion,
         )
 
     def _compiled_render_state(
@@ -1088,7 +1124,8 @@ class DirectorAgent:
         return flights, semaphore
 
     async def _admit_compiled_render(
-        self, episode_id: str, pipeline, renderer, hold: int, render_contract: dict[str, Any]
+        self, episode_id: str, pipeline, renderer, hold: int, render_contract: dict[str, Any],
+        ownership_assertion=None,
     ) -> dict[str, Any]:
         """Run exactly one synchronous render while holding its full thread budget."""
         _flights, semaphore = self._compiled_render_state()
@@ -1104,13 +1141,14 @@ class DirectorAgent:
             return await asyncio.to_thread(
                 self.render_compiled_video, episode_id, pipeline, renderer, hold=hold,
                 _expected_render_contract=render_contract,
+                _ownership_assertion=ownership_assertion,
             )
         finally:
             if acquired:
                 semaphore.release()
 
     async def render_compiled_video_async(
-        self, episode_id: str, pipeline, renderer, *, hold: int = 4
+        self, episode_id: str, pipeline, renderer, *, hold: int = 4, ownership_assertion=None,
     ) -> dict[str, Any]:
         """Await a single-writer, cancellation-safe off-thread compiled render."""
         flights, _admission = self._compiled_render_state()
@@ -1119,7 +1157,9 @@ class DirectorAgent:
         existing = flights.get(episode_id)
         if existing is None:
             flight = asyncio.create_task(
-                self._admit_compiled_render(episode_id, pipeline, renderer, hold, render_contract),
+                self._admit_compiled_render(
+                    episode_id, pipeline, renderer, hold, render_contract, ownership_assertion,
+                ),
                 name=f"compiled-render:{episode_id}",
             )
             flights[episode_id] = (contract_sha256, flight)
