@@ -243,6 +243,11 @@ class AuthenticatedBudgetBridge:
         self.binding = (policy.request_id, policy.episode_id, policy.policy_sha256, policy.allowed_providers, policy.episode_cap_usd, policy.month_cap_usd, policy.experiment_cap_usd)
         self._ledger = StandingBudgetLedger.from_authorized_policy(service.root / "standing-budget.sqlite3", loader=service.policy_loader(), receipt_path=self.receipt_path, clock=service.clock)
 
+    def create_executor(self, database, config, **kwargs):
+        """Create a TEST executor pinned to this bridge's trusted receipt source."""
+        from src.hybrid.execution import Executor
+        return Executor._from_authenticated_budget_bridge(database, config, bridge=self, **kwargs)
+
     def reserve(self, *, operation_id=None, provider, quoted_cap_usd, experiment=False, episode_id=None):
         policy = self.service.policy_loader().load(self.receipt_path)
         current = (policy.request_id, policy.episode_id, policy.policy_sha256, policy.allowed_providers, policy.episode_cap_usd, policy.month_cap_usd, policy.experiment_cap_usd)
@@ -281,11 +286,12 @@ class AuthenticatedBudgetBridge:
         if (getattr(job, "mode", None) != "TEST" or getattr(job, "endpoint", None) not in policy.allowed_providers
                 or not isinstance(getattr(job, "request_id", None), str) or not job.request_id):
             raise BudgetAuthorizationError("executor job is outside authenticated TEST policy")
-        attach = getattr(executor, "_attach_standing_ledger", None)
+        matches_bridge = getattr(executor, "_matches_authenticated_budget_bridge", None)
         prepare = getattr(executor, "prepare_intent", None)
-        if not callable(attach) or not callable(prepare):
-            raise TypeError("durable Executor admission is required")
-        auth_scope = f"AUTHENTICATED_TEST_REQUEST:{policy.request_id}"
+        bind_admission = getattr(executor, "bind_prepared_standing_ledger_admission", None)
+        if (not callable(matches_bridge) or not matches_bridge(self) or not callable(prepare)
+                or not callable(bind_admission)):
+            raise BudgetAuthorizationError("configured authenticated budget bridge executor is required")
         try:
             existing_claim = self._ledger.claim(job.request_id)
         except BudgetDenied:
@@ -299,12 +305,14 @@ class AuthenticatedBudgetBridge:
                     or Decimal(existing_claim.get("reserved_usd")) != job.cost):
                 raise BudgetAuthorizationError("completed executor intent lacks canonical bridge claim")
             return existing_claim
-        attach(self._ledger)
-        prepared = prepare(job, auth_scope=auth_scope)
+        prepared = prepare(job)
+        admission_binding = prepared.get("authenticated_budget_admission") if isinstance(prepared, dict) else None
+        auth_scope = f"AUTHENTICATED_TEST_REQUEST:{policy.request_id}"
         binding = prepared.get("settlement_binding") if isinstance(prepared, dict) else None
         if (not isinstance(binding, dict) or binding.get("local_request_id") != job.request_id
                 or binding.get("endpoint_id") != job.endpoint or binding.get("auth_scope") != auth_scope
-                or binding.get("authority_mode") != job.mode or binding.get("provider_request_id") != "UNASSIGNED"):
+                or binding.get("authority_mode") != job.mode or binding.get("provider_request_id") != "UNASSIGNED"
+                or prepared.get("authenticated_budget_admission") != admission_binding):
             raise BudgetAuthorizationError("executor intent binding is not durable or exact")
         claim = self._ledger.reserve(job.request_id, policy.episode_id, job.endpoint, job.cost,
             settlement_mode="FAL_READBACK_V2", auth_scope=auth_scope,
@@ -313,6 +321,13 @@ class AuthenticatedBudgetBridge:
                 or Decimal(claim.get("reserved_usd")) != job.cost or claim.get("state") != "RESERVED"
                 or claim.get("auth_scope") != auth_scope or claim.get("authority_mode") != job.mode):
             raise BudgetAuthorizationError("bridge claim does not bind executor intent")
+        # This is an explicit cross-database saga, not a pretend atomic commit:
+        # PREPARED -> reserve -> admitted marker. If a process stops between
+        # reserve and marker, the idempotent reserve is re-read and the marker
+        # is completed on retry; Executor.run refuses that non-admitted state.
+        admitted = bind_admission(job)
+        if not isinstance(admitted, dict) or admitted.get("status") != "PREPARED":
+            raise BudgetAuthorizationError("executor admission marker was not persisted")
         return claim
 
 

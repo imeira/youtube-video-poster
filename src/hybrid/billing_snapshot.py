@@ -185,6 +185,9 @@ class BillingSnapshotCoordinator:
                 claim = self.ledger.reserve(job.request_id, episode_id, job.endpoint, job.cost, experiment=experiment,
                     settlement_mode="FAL_READBACK_V2", auth_scope=prepared["settlement_binding"]["auth_scope"],
                     provider_request_id="UNASSIGNED", authority_mode=job.mode, billing_snapshot_generation=generation)
+                # Generic coordinator-owned TEST admission remains legacy-local.
+                # Only an Executor intent internally bound to an authenticated
+                # budget receipt may persist the stronger bridge marker.
                 digest = self._current(job.request_id, generation)
                 return {"request_id": job.request_id, "generation": generation, "snapshot_sha256": digest, "claim": claim}
 

@@ -23,7 +23,21 @@ consumes, rather than replaces, the existing durable components:
    checkpoint. The adapter fixture reaches the actual Azure-adapter SDK-shaped
    boundary (`OfflineAzureSpeechFixture.synthesize`), not a preflight-only
    branch.
-5. A timeout or cancellation after the durable submit boundary marks the
+5. Authenticated-bridge admission is an explicit two-database saga, not an
+   atomicity claim: receipt-bound `PREPARED` executor intent → canonical ledger
+   `RESERVED` claim → executor `standing_ledger_admission` marker. The marker
+   binds request ID, endpoint, authorization scope, TEST mode, reserved amount,
+   and the immutable persisted authorization receipt/policy binding. `Executor.run`
+   reopens the configured ledger and revalidates that receipt via its configured
+   trust source immediately before `PREPARED → SUBMITTING`. Raw legacy TEST
+   intents remain explicitly `TEST_LOCAL_ONLY`; they cannot forge bridge scope,
+   write this marker, or promote to LIVE.
+   A stop before reserve leaves only `PREPARED`; a stop after reserve and
+   before marker leaves `PREPARED` plus the canonical `RESERVED` claim. Both
+   are fail-closed and reconcile idempotently by replaying the same reserve
+   then writing/verifying the marker. They are not cross-DB atomic and never
+   imply that the reservation was rolled back.
+6. A timeout or cancellation after the durable submit boundary marks the
    authenticated bridge claim `UNKNOWN` while retaining its reservation. A new
    process observes that state before fixture transport construction/submission
    and raises `SubmissionUnknown`; it never sends a second request.
@@ -48,6 +62,11 @@ used.
   than resubmitting;
 - two fresh spawned processes sharing a canonical request produce two COMPLETE
   readbacks but exactly one transport factory/submission.
+- fresh spawned fault cases for ledger reserve and the reserve→marker crash
+  window make zero factory/SDK calls, retain only their honest durable
+  intermediates, and restart through one idempotent claim and one submit;
+- a raw prepared intent cannot forge a bridge scope or marker; legacy TEST
+  admission remains executable only under its honest `TEST_LOCAL_ONLY` scope.
 
 ## LIVE status: blocked
 

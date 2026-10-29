@@ -23,11 +23,13 @@ from src.hybrid.budget_authorization import (
 )
 from src.hybrid.execution import Executor, Job
 from src.hybrid.planner import Config
+from src.hybrid.standing_budget import BudgetDenied
 from src.providers.tts.azure_speech_durable_executor import (
     AZURE_SPEECH_ENDPOINT,
     AzureSpeechDurableConsumer,
     AzureSpeechFixtureTransport,
     SubmissionUnknown,
+    _AzureSpeechExecutorProvider,
 )
 from src.providers.tts.azure_speech_stock_tts import VOICE, OfflineAzureSpeechFixture
 
@@ -97,6 +99,10 @@ def _consumer(root: Path, bridge, executor, factory):
         bridge=bridge, executor=executor, transport_factory=factory)
 
 
+def _configured_executor(root: Path, bridge):
+    return bridge.create_executor(root / "executor.sqlite3", Config(limit=Decimal(1)))
+
+
 @pytest.mark.asyncio
 async def test_constructor_requires_absolute_reparse_safe_output_root_before_intent_or_factory(tmp_path, monkeypatch):
     bridge = _authorized_bridge(tmp_path)
@@ -147,7 +153,7 @@ def test_constructor_rejects_native_junction_output_root_before_writes(tmp_path)
 @pytest.mark.asyncio
 async def test_authenticated_bridge_durable_intent_and_fixture_sdk_boundary_complete_one_tts(tmp_path):
     bridge = _authorized_bridge(tmp_path)
-    executor = Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal(1)))
+    executor = _configured_executor(tmp_path, bridge)
     transport = AzureSpeechFixtureTransport(_fixture(tmp_path))
     consumer = _consumer(tmp_path, bridge, executor, lambda: transport)
     job = _job(tmp_path)
@@ -167,7 +173,7 @@ async def test_authenticated_bridge_durable_intent_and_fixture_sdk_boundary_comp
 @pytest.mark.asyncio
 async def test_operation_scope_rejects_changed_voice_script_or_price_before_fixture_sdk_call(tmp_path):
     bridge = _authorized_bridge(tmp_path)
-    executor = Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal(1)))
+    executor = _configured_executor(tmp_path, bridge)
     transport = AzureSpeechFixtureTransport(_fixture(tmp_path))
     consumer = _consumer(tmp_path, bridge, executor, lambda: transport)
     original = _job(tmp_path)
@@ -188,7 +194,7 @@ async def test_cancellation_after_dispatch_marks_canonical_claim_unknown_and_fre
             raise asyncio.CancelledError()
 
     bridge = _authorized_bridge(tmp_path)
-    executor = Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal(1)))
+    executor = _configured_executor(tmp_path, bridge)
     cancelled = CancelAfterDispatch()
     job = _job(tmp_path)
     with pytest.raises(asyncio.CancelledError):
@@ -201,8 +207,9 @@ async def test_cancellation_after_dispatch_marks_canonical_claim_unknown_and_fre
         nonlocal factory_calls
         factory_calls += 1
         raise AssertionError("UNKNOWN claim must stop before factory construction")
+    fresh_bridge = _authorized_bridge(tmp_path)
     fresh = AzureSpeechDurableConsumer(root=tmp_path / "azure-state", output_root=tmp_path,
-        bridge=_authorized_bridge(tmp_path), executor=Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal(1))),
+        bridge=fresh_bridge, executor=_configured_executor(tmp_path, fresh_bridge),
         transport_factory=forbidden_factory)
     with pytest.raises(SubmissionUnknown):
         await fresh.synthesize(operation_id=job.request_id, job=job)
@@ -212,7 +219,7 @@ async def test_cancellation_after_dispatch_marks_canonical_claim_unknown_and_fre
 def _timeout_worker(root_text: str, queue) -> None:
     root = Path(root_text)
     bridge = _authorized_bridge(root)
-    executor = Executor(root / "executor.sqlite3", Config(limit=Decimal(1)))
+    executor = _configured_executor(root, bridge)
     transport = AzureSpeechFixtureTransport(_fixture(root), timeout=True)
     consumer = _consumer(root, bridge, executor, lambda: transport)
     job = _job(root)
@@ -227,7 +234,7 @@ def _timeout_worker(root_text: str, queue) -> None:
 def _replay_worker(root_text: str, queue) -> None:
     root = Path(root_text)
     bridge = _authorized_bridge(root)
-    executor = Executor(root / "executor.sqlite3", Config(limit=Decimal(1)))
+    executor = _configured_executor(root, bridge)
     transport = AzureSpeechFixtureTransport(_fixture(root))
     factory_calls = 0
     def factory():
@@ -260,7 +267,7 @@ def test_fresh_process_timeout_marks_unknown_and_never_resubmits(tmp_path):
 def _racing_worker(root_text: str, job: Job, queue) -> None:
     root = Path(root_text)
     bridge = _authorized_bridge(root)
-    executor = Executor(root / "executor.sqlite3", Config(limit=Decimal(1)))
+    executor = _configured_executor(root, bridge)
     def factory():
         queue.put({"factory": 1})
         return AzureSpeechFixtureTransport(_fixture(root))
@@ -281,3 +288,115 @@ def test_two_fresh_processes_share_one_canonical_admission_and_only_winner_const
     events = [queue.get(timeout=3) for _ in range(3)]
     assert events.count({"factory": 1}) == 1
     assert events.count({"result": "COMPLETE"}) == 2
+
+
+@pytest.mark.asyncio
+async def test_raw_prepared_executor_cannot_forge_bridge_scope_but_legacy_test_admission_runs(tmp_path):
+    """Only receipt-bound bridge intents require a bridge marker; raw TEST stays TEST."""
+    bridge = _authorized_bridge(tmp_path)
+    executor = Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal(1)))
+    job = _job(tmp_path)
+    executor._attach_standing_ledger(bridge._ledger)
+    scope = "AUTHENTICATED_TEST_REQUEST:azure-budget-001"
+    with pytest.raises(PermissionError, match="forge"):
+        executor.prepare_intent(job, auth_scope=scope)
+    prepared = executor.prepare_intent(job)
+    assert prepared["settlement_binding"]["auth_scope"] == "TEST_LOCAL_ONLY"
+    assert prepared["authenticated_budget_admission"] is None
+    bridge._ledger.reserve(job.request_id, "EP-AZURE-001", job.endpoint, job.cost,
+        settlement_mode="FAL_READBACK_V2", auth_scope="TEST_LOCAL_ONLY",
+        provider_request_id="UNASSIGNED", authority_mode="TEST")
+    transport = AzureSpeechFixtureTransport(_fixture(tmp_path))
+    with pytest.raises(PermissionError, match="bridge-bound"):
+        executor.bind_prepared_standing_ledger_admission(job)
+    receipt = await executor.run(job, _AzureSpeechExecutorProvider(transport), submit_prepared=True)
+    assert receipt["status"] == "COMPLETE"
+    assert transport.calls == 1
+
+
+def _admission_fault_worker(root_text: str, phase: str, queue) -> None:
+    root = Path(root_text)
+    bridge = _authorized_bridge(root)
+    executor = _configured_executor(root, bridge)
+    factory_calls = 0
+
+    def factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return AzureSpeechFixtureTransport(_fixture(root))
+
+    if phase == "reserve":
+        def fail_reserve(*_args, **_kwargs):
+            raise RuntimeError("injected ledger reserve failure")
+        bridge._ledger.reserve = fail_reserve
+    elif phase == "after-reserve":
+        def crash_before_marker(_job):
+            raise RuntimeError("injected crash after ledger reserve")
+        executor.bind_prepared_standing_ledger_admission = crash_before_marker
+    job = _job(root)
+    try:
+        result = asyncio.run(_consumer(root, bridge, executor, factory).synthesize(operation_id=job.request_id, job=job))
+    except RuntimeError as error:
+        row = executor.inspect(job.request_id)
+        try:
+            claim = bridge.claim(request_id=job.request_id)
+        except BudgetDenied:
+            claim = None
+        queue.put({"error": str(error), "factory_calls": factory_calls,
+                   "intent": row["status"] if row else None,
+                   "admitted": bool(row and row.get("standing_ledger_admission")),
+                   "claim": None if claim is None else claim["state"]})
+    else:
+        queue.put({"status": result["status"], "factory_calls": factory_calls,
+                   "claim": bridge.claim(request_id=job.request_id)["state"]})
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        ("reserve", {"error": "injected ledger reserve failure", "factory_calls": 0,
+                     "intent": "PREPARED", "admitted": False, "claim": None}),
+        ("after-reserve", {"error": "injected crash after ledger reserve", "factory_calls": 0,
+                            "intent": "PREPARED", "admitted": False, "claim": "RESERVED"}),
+    ],
+)
+def test_fresh_process_admission_faults_fail_closed_then_restart_completes_exactly_one_claim(tmp_path, phase, expected):
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    failed = context.Process(target=_admission_fault_worker, args=(str(tmp_path), phase, queue))
+    failed.start(); failed.join(25)
+    assert failed.exitcode == 0
+    assert queue.get(timeout=3) == expected
+
+    restarted = context.Process(target=_admission_fault_worker, args=(str(tmp_path), "none", queue))
+    restarted.start(); restarted.join(25)
+    assert restarted.exitcode == 0
+    assert queue.get(timeout=3) == {"status": "COMPLETE", "factory_calls": 1, "claim": "RESERVED"}
+
+
+@pytest.mark.asyncio
+async def test_competing_authenticated_bridge_cannot_swap_executor_trust_or_construct_factory(tmp_path):
+    configured = _authorized_bridge(tmp_path)
+    competing = _authorized_bridge(tmp_path / "competing")
+    executor = _configured_executor(tmp_path, configured)
+    factory_calls = 0
+
+    def forbidden_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("untrusted bridge must stop before fixture construction")
+
+    with pytest.raises(ValueError, match="configured authenticated budget bridge"):
+        await _consumer(tmp_path, competing, executor, forbidden_factory).synthesize(
+            operation_id=_job(tmp_path).request_id, job=_job(tmp_path)
+        )
+    assert factory_calls == 0
+    assert executor.inspect(_job(tmp_path).request_id) is None
+
+
+def test_restart_rejects_persisted_authenticated_trust_pin_mismatch(tmp_path):
+    configured = _authorized_bridge(tmp_path)
+    _configured_executor(tmp_path, configured)
+
+    with pytest.raises(ValueError, match="persisted budget settings mismatch"):
+        _configured_executor(tmp_path, _authorized_bridge(tmp_path / "competing"))

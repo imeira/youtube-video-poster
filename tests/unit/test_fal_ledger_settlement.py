@@ -80,6 +80,7 @@ async def _bound_receipt(tmp_path):
         provider_request_id="UNASSIGNED",
         authority_mode="TEST",
     )
+
     receipt = await executor.run(
         job,
         FixtureProvider(tmp_path),
