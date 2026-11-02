@@ -1,0 +1,8 @@
+# Non-secret, request-scoped Studio configuration for the disabled bridge.
+project:
+  name: "Jacó — Gênesis 28"
+  default_language: "pt-BR"
+approval_delivery:
+  chat_id: "141718934"
+  trusted_sender_ids:
+    - "141718934"
