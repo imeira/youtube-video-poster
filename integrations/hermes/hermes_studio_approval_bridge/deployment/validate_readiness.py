@@ -82,8 +82,8 @@ def _financial_gate(config: dict[str, Any]) -> dict[str, Any]:
 def _prepared_configuration(config: dict[str, Any]) -> dict[str, Any]:
     expected = {
         "enabled": False,
-        "studio_checkout_root": "C:/HermesStudio/runtime/1cbeff177ab5c53cff8990a8251df242bead944a",
-        "studio_checkout_commit": "1cbeff177ab5c53cff8990a8251df242bead944a",
+        "studio_checkout_root": "C:/HermesStudio/runtime/4cc03a48728e3b23d1626265c542b9a39ffa2c11",
+        "studio_checkout_commit": "4cc03a48728e3b23d1626265c542b9a39ffa2c11",
         "state_root": "C:/HermesStudio/state",
         "bridge_hmac_env": "STUDIO_BRIDGE_HMAC", "telegram_bot_token_env": "STUDIO_TELEGRAM_BOT_TOKEN", "telegram_webhook_secret_env": "STUDIO_TELEGRAM_WEBHOOK_SECRET"}
     valid = all(config.get(key) == value for key, value in expected.items())

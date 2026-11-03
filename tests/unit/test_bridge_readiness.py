@@ -103,3 +103,18 @@ def test_readiness_rejects_a_foreign_gate_artifact_even_when_it_is_approved(tmp_
 
     assert report["financial_gate"]["valid"] is False
     assert report["financial_gate"]["reason"] == "gate_request_id_mismatch"
+
+
+
+def test_disabled_deployment_plan_pins_the_ci_verified_studio_fix():
+    config_path = (
+        Path(__file__).parents[2]
+        / "integrations/hermes/hermes_studio_approval_bridge/deployment"
+        / "jaco-genesis28-bridge-config.json"
+    )
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    commit = "4cc03a48728e3b23d1626265c542b9a39ffa2c11"
+
+    assert config["enabled"] is False
+    assert config["studio_checkout_commit"] == commit
+    assert config["studio_checkout_root"] == f"C:/HermesStudio/runtime/{commit}"
