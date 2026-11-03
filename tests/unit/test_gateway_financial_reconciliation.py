@@ -8,6 +8,8 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from src.hybrid.gateway_financial_reconciliation import (
     GatewayFinancialApprovalReconciler,
     GatewayFinancialReconciliationSettings,
@@ -69,24 +71,26 @@ def _delivery_receipt(
     *,
     message_id: str = "5037",
     body: str | None = None,
+    gate_newline: bytes = b"\n",
     request_hash: str = HASH,
     revision: str = "818556d97edb648f",
     amount: str = "10.00",
     tamper_gate: bool = False,
 ) -> Path:
     gate = root / "financial-request.txt"
-    gate.write_text(
-        body
-        or "\n".join(
-            (
+    gate.write_bytes(
+        body.encode("utf-8")
+        if body is not None
+        else gate_newline.join(
+            line.encode("utf-8")
+            for line in (
                 "⚠️ CONFIRMAÇÃO FINANCEIRA NECESSÁRIA",
                 f"REQUEST_HASH: {request_hash}",
                 f"REVISION: {revision}",
                 f"AUTORIZAÇÃO PEDIDA: teto TOTAL de USD {amount} para este vídeo.",
                 f"Para confirmar exatamente estes termos, responda a ESTA mensagem: {COMMAND}",
             )
-        ),
-        encoding="utf-8",
+        )
     )
     preflight = root / "preflight.json"
     preflight.write_text(
@@ -242,8 +246,10 @@ def test_tampered_delivery_body_fails_closed_without_factory_record(tmp_path):
     assert not factory_root.exists()
 
 
-def test_reconciles_distinct_trusted_delivery_and_telegram_inbound_sessions_without_raw_api_payload(
-    tmp_path,
+@pytest.mark.parametrize("gate_newline", (b"\n", b"\r\n"))
+@pytest.mark.parametrize("tamper_tool_digest", (False, True))
+def test_verifies_distinct_trusted_delivery_and_telegram_inbound_sessions_without_raw_api_payload(
+    tmp_path, gate_newline, tamper_tool_digest,
 ):
     db = tmp_path / "state.db"
     connection = sqlite3.connect(db)
@@ -254,6 +260,15 @@ def test_reconciles_distinct_trusted_delivery_and_telegram_inbound_sessions_with
     """)
     source = "20261030_102536_354b60"
     inbound = "20260925_110450_e688f0"
+    receipt = _delivery_receipt(tmp_path, gate_newline=gate_newline)
+    gate_digest = hashlib.sha256(
+        (tmp_path / "financial-request.txt").read_bytes()
+    ).hexdigest()
+    logged_gate_digest = (
+        ("0" if gate_digest[0] != "0" else "1") + gate_digest[1:]
+        if tamper_tool_digest
+        else gate_digest
+    )
     connection.execute(
         "INSERT INTO sessions VALUES (?, 'subagent', NULL, NULL)", (source,)
     )
@@ -275,7 +290,7 @@ def test_reconciles_distinct_trusted_delivery_and_telegram_inbound_sessions_with
             source,
             json.dumps(
                 {
-                    "output": 'GATE_SHA256 bc17d91e6080b05e456e4200b59930d7519b0e4f9bdd8aa7aa55d28f7504deec\n{"success":true,"platform":"telegram","chat_id":"141718934","message_id":"5037"}',
+                    "output": f'GATE_SHA256 {logged_gate_digest}\n{{"success":true,"platform":"telegram","chat_id":"141718934","message_id":"5037"}}',
                     "exit_code": 0,
                 }
             ),
@@ -308,7 +323,6 @@ def test_reconciles_distinct_trusted_delivery_and_telegram_inbound_sessions_with
     )
     connection.commit()
     connection.close()
-    receipt = _delivery_receipt(tmp_path)
     settings = _settings(db, receipt=receipt, factory_root=tmp_path / "factory")
     object.__setattr__(settings, "session_id", inbound)
     object.__setattr__(settings, "delivery_source_session_id", source)
@@ -317,8 +331,14 @@ def test_reconciles_distinct_trusted_delivery_and_telegram_inbound_sessions_with
 
     result = GatewayFinancialApprovalReconciler(settings).readback()
 
-    assert result.status == "RECONCILED_FINANCIAL_ONLY"
+    expected_status = (
+        "DELIVERY_TOOL_PROVENANCE_UNVERIFIED"
+        if tamper_tool_digest
+        else "RECONCILED_FINANCIAL_ONLY"
+    )
+    assert result.status == expected_status
     assert result.command_platform_message_id == "5046"
+    assert (tmp_path / "factory").exists() is not tamper_tool_digest
 
 
 def test_rejects_tampered_canonical_delivery_call_id_before_unique_join(tmp_path):
