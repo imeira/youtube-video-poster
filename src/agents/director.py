@@ -747,6 +747,50 @@ class DirectorAgent:
             "state": state.current_state.value,
         }
 
+    async def dispatch_current_policy_baselines(
+        self, episode_id: str, pipeline, provider, *, historical_financial_record: Path,
+        license_status: str, price_resolver,
+    ) -> dict[str, Any]:
+        """Admit Jacó work through the permanent policy and the sole LIVE kernel.
+
+        A historical financial receipt fixes the cap only; it never converts its
+        authorizes_generation: false into provider authority or publication.
+        """
+        from src.hybrid.live_execution_policy import (
+            JacoExecutionPolicyResolver,
+            LiveAdmissionError,
+            trusted_provider_registry,
+        )
+
+        resolver = JacoExecutionPolicyResolver(historical_financial_record)
+        policy = resolver.resolve()
+        if episode_id != policy.episode_id:
+            raise LiveAdmissionError("current policy does not cover this episode")
+        if pipeline.episode.audio.mode != "LIVE":
+            raise LiveAdmissionError("current policy admits only LIVE compiled work")
+        if pipeline.run.executor.config.limit != policy.episode_cap_usd:
+            raise LiveAdmissionError("executor ceiling must equal current policy cap")
+        if Decimal(str(self.config.budget.hard_limit_usd)) != policy.episode_cap_usd:
+            raise LiveAdmissionError("canonical episode budget must equal current policy cap")
+        if not callable(price_resolver):
+            raise TypeError("configured price resolver is required")
+        registry = trusted_provider_registry(provider)
+        jobs = pipeline.baseline_jobs()
+        if not jobs:
+            raise LiveAdmissionError("current policy requires dispatchable compiled jobs")
+        admissions = [
+            resolver.admit(
+                provider=provider, license_status=license_status,
+                provider_registry=registry, price_quote=price_resolver(job), job=job,
+            )
+            for job in jobs
+        ]
+        return await self.dispatch_compiled_baselines(
+            episode_id, pipeline, provider,
+            authorizations={item.authorization.request_id: item.authorization for item in admissions},
+            prices={item.price.request_id: item.price for item in admissions},
+        )
+
     def record_compiled_visual_qa(
         self, episode_id: str, pipeline, decisions
     ) -> dict[str, Any]:
