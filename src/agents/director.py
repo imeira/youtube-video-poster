@@ -785,11 +785,19 @@ class DirectorAgent:
             )
             for job in jobs
         ]
-        return await self.dispatch_compiled_baselines(
+        result = await self.dispatch_compiled_baselines(
             episode_id, pipeline, provider,
             authorizations={item.authorization.request_id: item.authorization for item in admissions},
             prices={item.price.request_id: item.price for item in admissions},
         )
+        # The facade is the only Jacó status/metrics publisher.  It reopens the
+        # executor ledger instead of accepting a caller-made PASS or cost value.
+        from src.hybrid.jaco_production_facade import JacoProductionFacade
+
+        result["canonical_status"] = JacoProductionFacade(
+            self.config.episodes_dir.parent
+        ).publish_from_executor(pipeline)
+        return result
 
     def record_compiled_visual_qa(
         self, episode_id: str, pipeline, decisions
@@ -847,7 +855,16 @@ class DirectorAgent:
                 note="all compiled visual QA passed",
             )
             state.save(fs.paths.state_json)
-        return {"approved": approved, "state": state.current_state.value}
+        result = {"approved": approved, "state": state.current_state.value}
+        # Keep the sole status projection aligned with the exact write-once QA
+        # receipts.  Other episodes and TEST adapters retain their existing paths.
+        if episode_id == "JACO_GENESIS28" and pipeline.episode.audio.mode == "LIVE":
+            from src.hybrid.jaco_production_facade import JacoProductionFacade
+
+            result["canonical_status"] = JacoProductionFacade(
+                self.config.episodes_dir.parent
+            ).publish_from_executor(pipeline)
+        return result
 
     def _compiled_render_contract(self, episode_id: str, pipeline, renderer, hold: int) -> dict[str, Any]:
         """Close every mutable render input before ownership or recovery reuse."""

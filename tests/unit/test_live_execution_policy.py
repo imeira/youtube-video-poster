@@ -168,3 +168,60 @@ async def test_director_handoff_uses_current_policy_then_existing_live_kernel(tm
     assert result["state"] == "VISUAL_QA"
     assert provider.submits == 1
     assert executor.inspect(job.request_id)["status"] == "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_director_policy_resume_recovers_remote_id_without_second_post_before_qa(tmp_path, monkeypatch):
+    """A fresh process recovers a checkpointed LIVE ID through the same facade."""
+    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path / "episodes"))
+    historical = tmp_path / "financial.json"
+    historical.write_text('{"schema":"jaco-factory-financial-reconciliation/1","request_hash":"' + REQUEST + '","revision":"' + REVISION + '","currency":"USD","total_episode_cap":"10.00","status":"APPROVED_USD10","approval_scope":"FINANCIAL_ONLY","authorizes_generation":false}', encoding="utf-8")
+    config = replace(get_config(), budget=BudgetConfig(target_usd=5, warning_usd=8, hard_limit_usd=10, require_approval_above_limit=True))
+    fs = EpisodeFS("JACO_GENESIS28", config)
+    fs.create_dirs()
+    EpisodeStateStore(episode_id="JACO_GENESIS28", current_state=EpisodeState.GENERATING_IMAGES).save(fs.paths.state_json)
+    job = _job(tmp_path)
+
+    class InterruptedTransport(SealedTestTransport):
+        async def submit(self, submitted_job, request_id, checkpoint):
+            self.submits += 1
+            checkpoint(provider_id="sealed-live-remote-id")
+            Image.new("RGB", (32, 18), "orange").save(self.root / "candidate.png")
+            raise TimeoutError("interrupted after remote ID checkpoint")
+
+    class Pipeline:
+        episode = SimpleNamespace(audio=SimpleNamespace(mode="LIVE"))
+
+        def __init__(self, executor):
+            self.run = SimpleNamespace(executor=executor)
+
+        def baseline_jobs(self): return (job,)
+
+        async def dispatch_baselines(self, provider, *, authorizations, prices):
+            return {job.request_id: await self.run.executor.run(job, provider, authorization=authorizations[job.request_id], price=prices[job.request_id])}
+
+        def prepare_qa_packets(self):
+            receipt = self.run.executor.inspect(job.request_id)
+            return {job.request_id: {"result_sha256": receipt["result_sha256"]}}
+
+    database = tmp_path / "jobs.sqlite3"
+    first = InterruptedTransport(tmp_path)
+    with pytest.raises(TimeoutError, match="remote ID"):
+        await DirectorAgent(config=config).dispatch_current_policy_baselines(
+            "JACO_GENESIS28", Pipeline(Executor(database, Config(limit=Decimal("10.00"), concurrency=1))), first,
+            historical_financial_record=historical, license_status="VERIFIED",
+            price_resolver=lambda _: {"endpoint": job.endpoint, "amount": "0.04", "evidence": "sealed-test-quote"},
+        )
+    assert Executor(database, Config(limit=Decimal("10.00"), concurrency=1)).inspect(job.request_id)["provider_id"] == "sealed-live-remote-id"
+
+    fresh = SealedTestTransport(tmp_path)
+    result = await DirectorAgent(config=config).dispatch_current_policy_baselines(
+        "JACO_GENESIS28", Pipeline(Executor(database, Config(limit=Decimal("10.00"), concurrency=1))), fresh,
+        historical_financial_record=historical, license_status="VERIFIED",
+        price_resolver=lambda _: {"endpoint": job.endpoint, "amount": "0.04", "evidence": "sealed-test-quote"},
+    )
+
+    assert fresh.submits == 0
+    assert fresh.recovers == 1
+    assert result["state"] == "VISUAL_QA"
+    assert result["canonical_status"]["metrics"]["actual_cost_usd"] == "0.04"
