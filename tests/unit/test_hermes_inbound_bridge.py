@@ -525,6 +525,12 @@ def test_normal_registration_bootstraps_real_service_and_reaches_existing_video_
     }), encoding="utf-8")
     settings = {
         "enabled": True,
+        "studio_checkout_root": str(Path(__file__).parents[2]),
+        "studio_checkout_commit": subprocess.run(
+            ["git", "-C", str(Path(__file__).parents[2]), "rev-parse", "HEAD"],
+            text=True, capture_output=True, check=True,
+        ).stdout.strip(),
+        "state_root": str(tmp_path / "trusted"),
         "studio_config_path": str(config_path),
         "journal_path": str(tmp_path / "trusted" / "journal.sqlite3"),
         "registry_path": str(tmp_path / "trusted" / "registry.sqlite3"),
@@ -787,3 +793,67 @@ def test_identical_bridge_and_webhook_secret_fails_before_replay_or_journal_muta
     assert not (tmp_path / "external" / "hermes-bridge-replays.sqlite3").exists()
     with sqlite3.connect(journal) as connection:
         assert connection.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall() == before_journal
+
+
+def test_installed_plugin_bootstraps_from_an_explicit_immutable_studio_checkout_in_isolated_python(
+    tmp_path: Path,
+):
+    """The gateway runtime must not depend on its CWD or the plugin directory containing Studio."""
+    runtime = _require_installed_hermes_discovery_runtime()
+    repository = Path(__file__).parents[2]
+    plugin_source = repository / "integrations" / "hermes" / "hermes_studio_approval_bridge"
+    installed = tmp_path / "plugins" / "hermes-studio-approval-bridge"
+    import shutil
+
+    shutil.copytree(plugin_source, installed, ignore=shutil.ignore_patterns("__pycache__"))
+    config = tmp_path / "studio.yaml"
+    config.write_text("approval_delivery:\n  chat_id: '10001'\n  trusted_sender_ids: ['20002']\n", encoding="utf-8")
+    state_root = tmp_path / "canonical-state"
+    checkout_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True, capture_output=True, check=True
+    ).stdout.strip()
+    settings = {
+        "enabled": True,
+        "studio_checkout_root": str(repository),
+        "studio_checkout_commit": checkout_commit,
+                "state_root": str(state_root),
+                "studio_config_path": str(config),
+        "journal_path": str(state_root / "journal.sqlite3"),
+        "registry_path": str(state_root / "registry.sqlite3"),
+        "chat_id": CHAT_ID,
+        "trusted_sender_ids": [SENDER_ID],
+        "instance_id": INSTANCE_ID,
+        "bridge_hmac_env": "STUDIO_BRIDGE_HMAC",
+        "telegram_bot_token_env": "STUDIO_TELEGRAM_BOT_TOKEN",
+        "telegram_webhook_secret_env": "STUDIO_TELEGRAM_WEBHOOK_SECRET",
+    }
+    script = """
+import importlib.util, json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('installed_bridge_bootstrap', root / 'bootstrap.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+class Context:
+    def get_config(self, key, default=None):
+        return json.loads(sys.argv[2]) if key == 'approval_bridge' else default
+bridge = module.compose_from_context(Context())
+assert bridge is not None
+assert Path(json.loads(sys.argv[2])['journal_path']).is_file()
+assert Path(json.loads(sys.argv[2])['registry_path']).is_file()
+"""
+    environment = os.environ | {
+        "STUDIO_BRIDGE_HMAC": BRIDGE_SECRET,
+        "STUDIO_TELEGRAM_BOT_TOKEN": "test-token",
+        "STUDIO_TELEGRAM_WEBHOOK_SECRET": WEBHOOK_SECRET,
+    }
+    result = subprocess.run(
+        [str(runtime), "-I", "-c", script, str(installed), json.dumps(settings)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

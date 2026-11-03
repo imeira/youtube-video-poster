@@ -80,7 +80,12 @@ def _financial_gate(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prepared_configuration(config: dict[str, Any]) -> dict[str, Any]:
-    expected = {"enabled": False, "bridge_hmac_env": "STUDIO_BRIDGE_HMAC", "telegram_bot_token_env": "STUDIO_TELEGRAM_BOT_TOKEN", "telegram_webhook_secret_env": "STUDIO_TELEGRAM_WEBHOOK_SECRET"}
+    expected = {
+        "enabled": False,
+        "studio_checkout_root": "C:/HermesStudio/runtime/1cbeff177ab5c53cff8990a8251df242bead944a",
+        "studio_checkout_commit": "1cbeff177ab5c53cff8990a8251df242bead944a",
+        "state_root": "C:/HermesStudio/state",
+        "bridge_hmac_env": "STUDIO_BRIDGE_HMAC", "telegram_bot_token_env": "STUDIO_TELEGRAM_BOT_TOKEN", "telegram_webhook_secret_env": "STUDIO_TELEGRAM_WEBHOOK_SECRET"}
     valid = all(config.get(key) == value for key, value in expected.items())
     valid = valid and config.get("request_id") == REQUEST_ID and config.get("revision_id") == REVISION_ID
     valid = valid and isinstance(config.get("chat_id"), str) and config["chat_id"].isdecimal()

@@ -4,6 +4,12 @@
 
 This is an offline, disabled-by-default composition for the existing Hermes Telegram handler and Studio approval service. It starts no poller, webhook, listener, provider, installation, or deployment.
 
+## Bootstrap contract
+
+The installed plugin contains only bridge code. On explicit enable it first validates a configured **absolute, reparse-free Studio checkout root**, verifies that checkout's full immutable Git commit, and only then adds that exact root to `sys.path`. It never imports Studio from the gateway CWD or from the plugin directory. The checkout must contain the two approval composition modules.
+
+`state_root` is a separately configured canonical absolute root. The bootstrap validates all configuration and secret separation first, then creates only this root, verifies write access with a removed probe, and accepts journal/registry paths only as distinct direct children. A failed root/commit/path validation reads no secrets and creates no state.
+
 ## Deployment status
 
 **Pending host integration.** The artifact has not been installed, configured, registered by a live Hermes host, or used to deliver an approval. A host must explicitly create the existing configured service and bridge composition, then call the plugin registration path.
