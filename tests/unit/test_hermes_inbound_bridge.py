@@ -857,3 +857,93 @@ assert Path(json.loads(sys.argv[2])['registry_path']).is_file()
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_installed_plugin_package_loader_registers_enabled_bridge_from_relative_bootstrap(
+    tmp_path: Path,
+):
+    """A standalone installed package must compose without the repository namespace."""
+    runtime = _require_installed_hermes_discovery_runtime()
+    repository = Path(__file__).parents[2]
+    plugin_source = repository / "integrations" / "hermes" / "hermes_studio_approval_bridge"
+    installed_parent = tmp_path / "plugins"
+    installed = installed_parent / "hermes_studio_approval_bridge"
+    import shutil
+
+    shutil.copytree(plugin_source, installed, ignore=shutil.ignore_patterns("__pycache__"))
+    config = tmp_path / "studio.yaml"
+    config.write_text("approval_delivery:\n  chat_id: '10001'\n  trusted_sender_ids: ['20002']\n", encoding="utf-8")
+    state_root = tmp_path / "canonical-state"
+    checkout_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True, capture_output=True, check=True
+    ).stdout.strip()
+    settings = {
+        "enabled": True,
+        "studio_checkout_root": str(repository),
+        "studio_checkout_commit": checkout_commit,
+        "state_root": str(state_root),
+        "studio_config_path": str(config),
+        "journal_path": str(state_root / "journal.sqlite3"),
+        "registry_path": str(state_root / "registry.sqlite3"),
+        "chat_id": CHAT_ID,
+        "trusted_sender_ids": [SENDER_ID],
+        "instance_id": INSTANCE_ID,
+        "bridge_hmac_env": "STUDIO_BRIDGE_HMAC",
+        "telegram_bot_token_env": "STUDIO_TELEGRAM_BOT_TOKEN",
+        "telegram_webhook_secret_env": "STUDIO_TELEGRAM_WEBHOOK_SECRET",
+    }
+    script = """
+import json, os, sys
+from types import SimpleNamespace
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+class Filters:
+    REPLY = TEXT = COMMAND = 1
+    def __and__(self, other): return self
+    def __invert__(self): return self
+class MessageHandler:
+    def __init__(self, filter_, callback): self.callback = callback
+telegram = SimpleNamespace(ext=SimpleNamespace(
+    ApplicationHandlerStop=type('ApplicationHandlerStop', (Exception,), {}),
+    MessageHandler=MessageHandler,
+    filters=Filters(),
+))
+sys.modules['telegram'] = telegram
+sys.modules['telegram.ext'] = telegram.ext
+from hermes_studio_approval_bridge.plugin import register
+class Context:
+    factory = None
+    def get_config(self, key, default=None):
+        return json.loads(sys.argv[2]) if key == 'approval_bridge' else default
+    def register_platform_handler(self, platform, factory):
+        assert platform == 'telegram'
+        self.factory = factory
+ctx = Context()
+assert register(ctx) is True
+assert ctx.factory is not None
+class App:
+    def add_handler(self, handler, group=0):
+        assert group == -1
+        self.handler = handler
+app = App()
+ctx.factory(app, object())
+assert hasattr(app, 'handler')
+assert Path(json.loads(sys.argv[2])['journal_path']).is_file()
+assert Path(json.loads(sys.argv[2])['registry_path']).is_file()
+"""
+    environment = os.environ | {
+        "STUDIO_BRIDGE_HMAC": BRIDGE_SECRET,
+        "STUDIO_TELEGRAM_BOT_TOKEN": "test-token",
+        "STUDIO_TELEGRAM_WEBHOOK_SECRET": WEBHOOK_SECRET,
+    }
+    result = subprocess.run(
+        [str(runtime), "-I", "-c", script, str(installed_parent), json.dumps(settings)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
