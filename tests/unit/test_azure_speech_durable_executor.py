@@ -264,8 +264,9 @@ def test_fresh_process_timeout_marks_unknown_and_never_resubmits(tmp_path):
     assert queue.get(timeout=3) == {"calls": 0, "factory_calls": 0, "state": "UNKNOWN"}
 
 
-def _racing_worker(root_text: str, job: Job, queue) -> None:
+def _racing_worker(root_text: str, job: Job, bootstrap_barrier, queue) -> None:
     root = Path(root_text)
+    bootstrap_barrier.wait(timeout=10)
     bridge = _authorized_bridge(root)
     executor = _configured_executor(root, bridge)
     def factory():
@@ -277,17 +278,27 @@ def _racing_worker(root_text: str, job: Job, queue) -> None:
 
 def test_two_fresh_processes_share_one_canonical_admission_and_only_winner_constructs_factory(tmp_path):
     context = multiprocessing.get_context("spawn")
-    queue = context.Queue()
-    job = _job(tmp_path)
-    workers = [context.Process(target=_racing_worker, args=(str(tmp_path), job, queue)) for _ in range(2)]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join(30)
-        assert worker.exitcode == 0
-    events = [queue.get(timeout=3) for _ in range(3)]
-    assert events.count({"factory": 1}) == 1
-    assert events.count({"result": "COMPLETE"}) == 2
+    for run in range(10):
+        root = tmp_path / f"bootstrap-race-{run}"
+        root.mkdir()
+        queue = context.Queue()
+        bootstrap_barrier = context.Barrier(2, timeout=10)
+        job = _job(root)
+        workers = [
+            context.Process(
+                target=_racing_worker,
+                args=(str(root), job, bootstrap_barrier, queue),
+            )
+            for _ in range(2)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(30)
+            assert worker.exitcode == 0
+        events = [queue.get(timeout=3) for _ in range(3)]
+        assert events.count({"factory": 1}) == 1
+        assert events.count({"result": "COMPLETE"}) == 2
 
 
 @pytest.mark.asyncio

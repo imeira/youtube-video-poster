@@ -16,10 +16,16 @@ SENDER_ID = "20002"
 INSTANCE_ID = "approval-production-a"
 
 
-def _adapter(tmp_path: Path, *, secret: str | None = SECRET, instance: str = INSTANCE_ID):
+def _adapter(
+    tmp_path: Path,
+    *,
+    secret: str | None = SECRET,
+    instance: str = INSTANCE_ID,
+    chat_id: str = CHAT_ID,
+):
     return TelegramInboundAdapter(
         journal_path=tmp_path / "telegram-inbound.sqlite3",
-        expected_chat_id=CHAT_ID,
+        expected_chat_id=chat_id,
         trusted_sender_ids=frozenset({SENDER_ID}),
         webhook_secret=secret,
         instance_id=instance,
@@ -142,6 +148,23 @@ def test_authenticated_journal_survives_restart_and_cannot_be_rebound(tmp_path: 
 
     with pytest.raises(ValueError, match="binding"):
         _adapter(tmp_path, instance="another-trusted-instance")
+
+
+@pytest.mark.parametrize(
+    "secret, instance, chat_id",
+    [
+        (SECRET + "-different", INSTANCE_ID, CHAT_ID),
+        (SECRET, "another-trusted-instance", CHAT_ID),
+        (SECRET, INSTANCE_ID, "10002"),
+    ],
+)
+def test_journal_metadata_rejects_different_secret_or_trusted_scope(
+    tmp_path: Path, secret: str, instance: str, chat_id: str
+):
+    _adapter(tmp_path)
+
+    with pytest.raises(ValueError, match="binding"):
+        _adapter(tmp_path, secret=secret, instance=instance, chat_id=chat_id)
 
 
 def test_sqlite_row_adulteration_does_not_become_authenticated(tmp_path: Path):
