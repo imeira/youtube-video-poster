@@ -39,7 +39,7 @@ jobs:
       - name: Install CI tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install PyYAML pytest pytest-asyncio pytest-cov ruff
+          python -m pip install PyYAML pytest pytest-asyncio pytest-cov "ruff==0.17.3"
 
       - name: Detect project structure
         id: project
@@ -119,7 +119,6 @@ jobs:
 
       - name: Ruff changed Python files
         if: steps.project.outputs.python_project == 'true'
-        continue-on-error: true
         shell: bash
         run: |
           mapfile -t python_files < <(
@@ -176,5 +175,5 @@ jobs:
             echo "- Workflow YAML: validated"
             echo "- Python project detected: \`${{ steps.project.outputs.python_project }}\`"
             echo "- Unit tests detected: \`${{ steps.project.outputs.unit_tests }}\`"
-            echo "- Ruff is advisory until the historical baseline is clean."
+            echo "- Ruff changed-Python lint is required (ruff==0.17.3)."
           } >> "$GITHUB_STEP_SUMMARY"
