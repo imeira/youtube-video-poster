@@ -17,7 +17,15 @@ The facade accepts only a compiled pipeline whose baseline job IDs resolve to `C
 
 The resulting projection is always `LOCAL_STATUS_ONLY`. It is not provider billing readback, real-provider qualification, financial authorization, QA authority, human approval, or publication authority.
 
-`StatusMetricsLedger.record_executor_receipt()` is the only facade metric write. It derives an idempotent metric identity and actual cost from the receipt; unknown timing, tokens, and quota remain unmeasured. The rolling/cache benchmark remains explicitly TEST fake latency and makes no financial claim.
+The facade performs no metric write and creates no parallel ledger. The owning
+`AutonomousTwoGateRunner` projects receipt usage into its existing
+`OperationalMetricsLedger`, keyed idempotently by the durable provider operation
+or request ID. Local completion, QA, and executor `actual_cost` remain
+`UNKNOWN` billing; only a settled canonical standing-budget claim supplies USD.
+The projection preserves measured input/cached/output/reasoning tokens, quota,
+stage latency, queue wait, and pending reserved exposure independently. The
+rolling/cache benchmark remains explicitly TEST fake latency and makes no
+financial claim.
 
 ## Transitions and recovery
 
@@ -32,3 +40,15 @@ The resulting projection is always `LOCAL_STATUS_ONLY`. It is not provider billi
 - receipt-derived status cannot be made PASS by caller flags;
 - sealed TEST transport proves transaction mechanics only and does not qualify a provider or authorize real production;
 - local worker status reads JSON only and never open SQLite.
+
+## Status metrics acceptance (2026-11-03)
+
+- Durable receipt plus canonical claim scope is required; request/provider scope
+  mismatches fail before a metric write.
+- A `COMPLETE` receipt or `qa=true` cannot authenticate billing. Unsettled and
+  unknown claims retain pending exposure and report USD as unknown.
+- Replaying the same durable provider operation is idempotent; divergent payload
+  evidence remains an append-only conflict, not a second financial total.
+- This is TEST/local telemetry integration only. LIVE provider billing readback,
+  external price quotes, license evidence, production provider adapters, TTS,
+  GPU, and Telegram configuration remain external qualification work.

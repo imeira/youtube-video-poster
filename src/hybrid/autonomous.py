@@ -286,8 +286,19 @@ class OperationalMetricsLedger:
                   request_id TEXT PRIMARY KEY, event_id TEXT UNIQUE NOT NULL, episode_id TEXT NOT NULL,
                   observed_at_utc TEXT, month_utc TEXT, experiment INTEGER NOT NULL, worker TEXT NOT NULL, model TEXT,
                   tokens_input INTEGER, tokens_cached INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
-                  latency_s REAL, quota_units INTEGER, billing_status TEXT NOT NULL, money_usd TEXT,
+                  latency_s REAL, queue_wait_s REAL, pending_exposure_usd TEXT,
+                  quota_units INTEGER, billing_status TEXT NOT NULL, money_usd TEXT,
                   payload_sha256 TEXT NOT NULL)""")
+                # Existing TEST workspaces predate measured queue delay and
+                # pending exposure.  Add only nullable telemetry columns; this
+                # is not a second financial ledger.
+                columns = {row[1] for row in db.execute("PRAGMA table_info(observations)")}
+                for column, declaration in (
+                    ("queue_wait_s", "REAL"),
+                    ("pending_exposure_usd", "TEXT"),
+                ):
+                    if column not in columns:
+                        db.execute(f"ALTER TABLE observations ADD COLUMN {column} {declaration}")
                 db.execute("""CREATE TABLE IF NOT EXISTS observation_conflicts (
                   identity_kind TEXT NOT NULL, identity_value TEXT NOT NULL, payload_sha256 TEXT NOT NULL,
                   conflicting_payload_sha256 TEXT NOT NULL,
@@ -381,6 +392,9 @@ class OperationalMetricsLedger:
             "tokens",
             "quota_units",
             "latency_s",
+            "stage_latency_s",
+            "queue_wait_s",
+            "pending_exposure_usd",
             "unknown_timestamp_requests",
             "conflicts",
             "models",
@@ -411,12 +425,15 @@ class OperationalMetricsLedger:
             report["money_usd"]
         ):
             return False
-        latency = report["latency_s"]
-        if latency is not None and (
+        for metric in ("latency_s", "stage_latency_s", "queue_wait_s"):
+            latency = report[metric]
+            if latency is not None and (
             type(latency) not in {int, float}
             or not math.isfinite(latency)
             or latency < 0
-        ):
+            ):
+                return False
+        if report["pending_exposure_usd"] is not None and not cls._valid_money(report["pending_exposure_usd"]):
             return False
         tokens = report["tokens"]
         if not isinstance(tokens, dict) or set(tokens) != {
@@ -544,6 +561,14 @@ class OperationalMetricsLedger:
             or latency < 0
         ):
             raise ValueError("latency_s must be nonnegative")
+        queue_wait = observation.get("queue_wait_s")
+        if queue_wait is not None and (
+            type(queue_wait) not in {int, float} or not math.isfinite(queue_wait) or queue_wait < 0
+        ):
+            raise ValueError("queue_wait_s must be nonnegative")
+        exposure = observation.get("pending_exposure_usd")
+        if exposure is not None:
+            exposure = str(_decimal(exposure, "pending_exposure_usd"))
         money = observation.get("money_usd")
         if billing != "AUTHENTICATED" and money is not None:
             raise ValueError("unauthenticated or unknown billing cannot be real money")
@@ -572,6 +597,8 @@ class OperationalMetricsLedger:
             "tokens_output": counts[2],
             "tokens_reasoning": counts[3],
             "latency_s": None if latency is None else float(latency),
+            "queue_wait_s": None if queue_wait is None else float(queue_wait),
+            "pending_exposure_usd": exposure,
             "quota_units": counts[4],
             "billing_status": billing,
             "money_usd": amount,
@@ -590,6 +617,8 @@ class OperationalMetricsLedger:
             model,
             *counts[:4],
             None if latency is None else float(latency),
+            None if queue_wait is None else float(queue_wait),
+            exposure,
             counts[4],
             billing,
             amount,
@@ -641,7 +670,11 @@ class OperationalMetricsLedger:
                         "metrics identity collision has divergent canonical payload"
                     )
                 db.execute(
-                    "INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    """INSERT INTO observations(
+                        request_id,event_id,episode_id,observed_at_utc,month_utc,experiment,worker,model,
+                        tokens_input,tokens_cached,tokens_output,tokens_reasoning,latency_s,queue_wait_s,
+                        pending_exposure_usd,quota_units,billing_status,money_usd,payload_sha256
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     row,
                 )
                 db.commit()
@@ -675,15 +708,72 @@ class OperationalMetricsLedger:
             observation["observed_at"] = receipt["observed_at"]
         return self.reconcile(observation)
 
+    def reconcile_durable_receipt(self, receipt, *, claim, worker="runner"):
+        """Adapt durable executor/ledger evidence without making a second ledger.
+
+        Receipt `actual_cost`, `qa`, and completion are local facts, not billing
+        readback.  USD becomes actual only from a settled canonical claim.
+        """
+        if not isinstance(receipt, dict) or not isinstance(claim, dict):
+            raise TypeError("durable receipt and canonical claim are required")
+        request_id = self._text(receipt.get("request_id"), "request_id")
+        if claim.get("request_id") != request_id:
+            raise ValueError("receipt and claim request scope mismatch")
+        episode_id = self._text(claim.get("episode_id"), "episode_id")
+        endpoint = receipt.get("endpoint")
+        if endpoint != claim.get("provider"):
+            raise ValueError("receipt and claim provider scope mismatch")
+        operation_id = receipt.get("provider_id")
+        if operation_id is not None:
+            operation_id = self._text(operation_id, "provider operation id")
+        usage = receipt.get("usage", {})
+        if not isinstance(usage, dict):
+            raise TypeError("receipt usage must be an object")
+        aliases = {
+            "tokens_input": "input_tokens", "tokens_cached": "cached_tokens",
+            "tokens_output": "output_tokens", "tokens_reasoning": "reasoning_tokens",
+        }
+        counts = {target: usage.get(source) for target, source in aliases.items()}
+        quota = receipt.get("quota_units")
+        stage_latency = receipt.get("stage_latency_s", receipt.get("latency_s"))
+        queue_wait = receipt.get("queue_wait_s")
+        state, actual = claim.get("state"), claim.get("actual_usd")
+        authenticated = state == "SETTLED" and actual is not None
+        if authenticated:
+            billing_status, money = "AUTHENTICATED", actual
+            exposure = None
+        else:
+            billing_status, money = "UNKNOWN", None
+            exposure = claim.get("reserved_usd")
+        event_identity = operation_id or request_id
+        observation = {
+            "event_id": f"durable:{event_identity}", "request_id": request_id,
+            "episode_id": episode_id, "worker": worker, "experiment": bool(claim.get("experiment", False)),
+            "billing_status": billing_status, "money_usd": money,
+            "pending_exposure_usd": exposure, "latency_s": stage_latency,
+            "queue_wait_s": queue_wait, "quota_units": quota,
+            **counts,
+        }
+        if isinstance(receipt.get("observed_at"), datetime):
+            observation["observed_at"] = receipt["observed_at"]
+        observation["missing_metrics"] = all(
+            observation.get(key) is None for key in (*counts, "quota_units", "latency_s", "queue_wait_s")
+        )
+        return self.reconcile(observation)
+
     def _report_from_rows(self, rows, conflicts):
         tokens = {"input": 0, "cached": 0, "output": 0, "reasoning": 0}
         buckets = {
             name: {}
             for name in ("by_episode", "by_month_utc", "by_experiment", "by_worker")
         }
-        money, latency, money_seen, latency_seen, models = (
+        money, latency, queue_wait, exposure, money_seen, latency_seen, queue_seen, exposure_seen, models = (
             Decimal(0),
             0.0,
+            0.0,
+            Decimal(0),
+            False,
+            False,
             False,
             False,
             set(),
@@ -726,6 +816,10 @@ class OperationalMetricsLedger:
                 pass
             if row["latency_s"] is not None:
                 latency, latency_seen = latency + row["latency_s"], True
+            if row["queue_wait_s"] is not None:
+                queue_wait, queue_seen = queue_wait + row["queue_wait_s"], True
+            if row["pending_exposure_usd"] is not None:
+                exposure, exposure_seen = exposure + Decimal(row["pending_exposure_usd"]), True
             if row["money_usd"] is not None:
                 money, money_seen = money + Decimal(row["money_usd"]), True
             if row["model"]:
@@ -743,6 +837,9 @@ class OperationalMetricsLedger:
             "tokens": tokens,
             "quota_units": sum(row["quota_units"] or 0 for row in rows),
             "latency_s": latency if latency_seen else None,
+            "stage_latency_s": latency if latency_seen else None,
+            "queue_wait_s": queue_wait if queue_seen else None,
+            "pending_exposure_usd": str(exposure) if exposure_seen else None,
             "unknown_timestamp_requests": sum(
                 row["observed_at_utc"] is None for row in rows
             ),
@@ -879,6 +976,15 @@ class AutonomousTwoGateRunner:
         # Runtime wiring may assert an active queue lease. It is deliberately
         # not policy or LIVE authority; this runner remains TEST-only.
         self._ownership_assertion = ownership_assertion
+
+    def _record_receipt_metrics(self, receipt: dict) -> None:
+        """Project the canonical claim when present; retain legacy TEST telemetry."""
+        try:
+            claim = self.ledger.claim(receipt["request_id"])
+        except (BudgetDenied, KeyError, TypeError):
+            self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
+            return
+        self.metrics.reconcile_durable_receipt(receipt, claim=claim)
 
     def _assert_ownership(self, ownership: RunnerOwnership | None) -> None:
         if ownership is None:
@@ -1327,7 +1433,7 @@ class AutonomousTwoGateRunner:
                 self.ledger.mark_unknown(request_id)
                 raise ValueError("completed receipt output hash mismatch")
             self.ledger.mark_unknown(request_id)
-            self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
+            self._record_receipt_metrics(receipt)
             if request_id in document["qa"]:
                 return request_id, receipt, None
             async with cpu_slots:
@@ -1580,9 +1686,7 @@ class AutonomousTwoGateRunner:
             if receipt.get("status") != "COMPLETE":
                 if self.ledger is not None:
                     self.ledger.mark_unknown(request_id)
-                self.metrics.reconcile_executor_receipt(
-                    receipt, episode_id=self.episode_id
-                )
+                self._record_receipt_metrics(receipt)
                 raise RuntimeError(
                     "incomplete job requires resume_with_jobs; no ambiguous resubmit"
                 )
@@ -1597,7 +1701,7 @@ class AutonomousTwoGateRunner:
                 # A local executor receipt is not authenticated provider billing.
                 # Preserve the reservation until explicit FAL billing reconciliation.
                 self.ledger.mark_unknown(request_id)
-            self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
+            self._record_receipt_metrics(receipt)
             if request_id not in document["qa"]:
                 verdict = independent_qa(receipt)
                 if asyncio.iscoroutine(verdict):

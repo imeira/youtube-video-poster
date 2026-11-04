@@ -393,6 +393,33 @@ def test_operational_metrics_reconciles_once_by_request_or_event_and_keeps_unkno
     assert report["models"] == []
 
 
+def test_operational_metrics_adapts_durable_receipt_usage_without_turning_local_cost_into_billing(tmp_path):
+    """A completion/QA flag is not provider billing, while real usage remains measurable."""
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    ledger = OperationalMetricsLedger(tmp_path / "operational-metrics.sqlite3")
+    receipt = {
+        "request_id": "receipt-request", "status": "COMPLETE", "endpoint": "fal-ai/test",
+        "provider_id": "provider-operation", "actual_cost": "0.04", "qa": True,
+        "usage": {"input_tokens": 12, "cached_tokens": 4, "output_tokens": 5, "reasoning_tokens": 3},
+        "stage_latency_s": 2.5, "queue_wait_s": 1.0,
+    }
+    claim = {
+        "request_id": "receipt-request", "episode_id": "TEST-EP", "reserved_usd": "0.05",
+        "actual_usd": None, "state": "UNKNOWN", "provider": "fal-ai/test",
+    }
+
+    assert ledger.reconcile_durable_receipt(receipt, claim=claim, worker="executor") is True
+    assert ledger.reconcile_durable_receipt(receipt, claim=claim, worker="other-worker") is False
+    report = ledger.report()
+    assert report["money_usd"] is None
+    assert report["unknown_billing_requests"] == 1
+    assert report["pending_exposure_usd"] == "0.05"
+    assert report["tokens"] == {"input": 12, "cached": 4, "output": 5, "reasoning": 3}
+    assert report["stage_latency_s"] == 2.5
+    assert report["queue_wait_s"] == 1.0
+
+
 def test_operational_metrics_rejects_missing_measurements_and_unauthenticated_money(tmp_path):
     from src.hybrid.autonomous import OperationalMetricsLedger
 

@@ -177,8 +177,7 @@ def test_production_facade_projects_test_receipts_with_unknown_cost_without_fake
     snapshot = json.loads(Path(published["status"]["path"]).read_text(encoding="utf-8"))
     assert snapshot["canonical_status"] == "BLOCKED"  # QA is not fabricated.
     assert snapshot["sources"]["ledger"]["schema"] == "ledger/v1"
-    assert published["metrics"]["actual_cost_usd"] is None
-    assert published["metrics"]["pending_requests"] == 0
+    assert published["metrics"] == {"status": "UNAVAILABLE", "reason": "RUNNER_METRICS_NOT_EXPOSED"}
 
 
 def test_production_facade_rejects_non_test_executor_receipt(tmp_path: Path):

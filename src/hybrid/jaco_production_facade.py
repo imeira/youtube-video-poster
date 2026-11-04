@@ -15,7 +15,6 @@ from typing import Any
 
 from src.hybrid.canonical_status import CanonicalStatusProducer
 from src.hybrid.jaco_asset_integration import EPISODE, REQUEST_ID, REVISION
-from src.hybrid.status_metrics import StatusMetricsLedger
 
 
 class JacoProductionFacade:
@@ -27,7 +26,7 @@ class JacoProductionFacade:
         self.factory_root = Path(factory_root)
         self._root = self.factory_root / "requests" / REQUEST_ID / "jaco-asset-integration"
         self._source_root = self._root / "canonical-status-sources"
-        self._metrics = StatusMetricsLedger(self._root / "status-metrics.sqlite3")
+
 
     @staticmethod
     def _canonical(value: object) -> bytes:
@@ -145,7 +144,7 @@ class JacoProductionFacade:
                 "policy_admission_receipt_hashes": [self._hash(admission) if isinstance(admission, dict) else None for admission in admissions],
             }),
         }
-        for receipt in receipts:
-            self._metrics.record_executor_receipt(receipt)
         status = CanonicalStatusProducer(self.factory_root).publish(sources)
-        return {"status": status, "metrics": self._metrics.report()}
+        # Metrics belong to the owning runner's OperationalMetricsLedger.  This
+        # status-only facade never creates a parallel database from receipts.
+        return {"status": status, "metrics": {"status": "UNAVAILABLE", "reason": "RUNNER_METRICS_NOT_EXPOSED"}}
