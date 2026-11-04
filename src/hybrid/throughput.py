@@ -65,8 +65,12 @@ class DurableQueue:
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            db.execute("INSERT OR IGNORE INTO queue_settings VALUES (1, ?)", (settings,))
-            current = db.execute("SELECT data FROM queue_settings WHERE id=1").fetchone()[0]
+            db.execute(
+                "INSERT OR IGNORE INTO queue_settings VALUES (1, ?)", (settings,)
+            )
+            current = db.execute(
+                "SELECT data FROM queue_settings WHERE id=1"
+            ).fetchone()[0]
             if current != settings:
                 raise ValueError("persisted queue settings mismatch")
 
@@ -92,7 +96,9 @@ class DurableQueue:
 
     def inspect(self, item_id: str) -> dict | None:
         with self._db() as db:
-            row = db.execute("SELECT * FROM queue_items WHERE id=?", (item_id,)).fetchone()
+            row = db.execute(
+                "SELECT * FROM queue_items WHERE id=?", (item_id,)
+            ).fetchone()
         return self._decode(row)
 
     def _emit(self, row: dict) -> None:
@@ -121,11 +127,17 @@ class DurableQueue:
 
     def enqueue(self, item_id: str, payload: dict, *, priority: int = 0) -> dict:
         if not item_id or type(priority) is not int or not isinstance(payload, dict):
-            raise ValueError("queue item requires id, integer priority, and object payload")
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            raise ValueError(
+                "queue item requires id, integer priority, and object payload"
+            )
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            existing = db.execute("SELECT * FROM queue_items WHERE id=?", (item_id,)).fetchone()
+            existing = db.execute(
+                "SELECT * FROM queue_items WHERE id=?", (item_id,)
+            ).fetchone()
             if existing is not None:
                 return self._decode(existing)
             materialized = db.execute(
@@ -141,7 +153,9 @@ class DurableQueue:
                 """,
                 (item_id, priority, encoded, time.time()),
             )
-            row = db.execute("SELECT * FROM queue_items WHERE id=?", (item_id,)).fetchone()
+            row = db.execute(
+                "SELECT * FROM queue_items WHERE id=?", (item_id,)
+            ).fetchone()
         decoded = self._decode(row)
         self._emit(decoded)
         return decoded
@@ -186,7 +200,9 @@ class DurableQueue:
             raise ValueError("terminal queue status required")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM queue_items WHERE id=?", (item_id,)).fetchone()
+            row = db.execute(
+                "SELECT * FROM queue_items WHERE id=?", (item_id,)
+            ).fetchone()
             if row is None or row["status"] != "RUNNING":
                 raise ValueError("only a RUNNING queue item can finish")
             db.execute(
@@ -197,13 +213,17 @@ class DurableQueue:
                 """,
                 (
                     status,
-                    json.dumps(result, sort_keys=True, allow_nan=False) if result is not None else None,
+                    json.dumps(result, sort_keys=True, allow_nan=False)
+                    if result is not None
+                    else None,
                     error,
                     time.time(),
                     item_id,
                 ),
             )
-            finished = db.execute("SELECT * FROM queue_items WHERE id=?", (item_id,)).fetchone()
+            finished = db.execute(
+                "SELECT * FROM queue_items WHERE id=?", (item_id,)
+            ).fetchone()
         decoded = self._decode(finished)
         self._emit(decoded)
         return decoded
@@ -230,7 +250,9 @@ class DurableQueue:
         """Explicitly retry through an idempotent/recover-only handler."""
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM queue_items WHERE id=?", (item_id,)).fetchone()
+            row = db.execute(
+                "SELECT * FROM queue_items WHERE id=?", (item_id,)
+            ).fetchone()
             if row is None or row["status"] != "FAILED":
                 raise ValueError("only a FAILED queue item can be requeued")
             materialized = db.execute(
@@ -246,7 +268,9 @@ class DurableQueue:
                 """,
                 (item_id,),
             )
-            queued = db.execute("SELECT * FROM queue_items WHERE id=?", (item_id,)).fetchone()
+            queued = db.execute(
+                "SELECT * FROM queue_items WHERE id=?", (item_id,)
+            ).fetchone()
         decoded = self._decode(queued)
         self._emit(decoded)
         return decoded
@@ -258,9 +282,11 @@ async def run_bounded_wave(
     handler,
     *,
     recover_failed: bool = False,
+    on_completed=None,
 ) -> dict:
     """Serialize queue recovery while jobs within one wave run concurrently."""
     active: dict[asyncio.Task, str] = {}
+    notifications: set[asyncio.Task] = set()
     wave_lock = queue.database.with_name(f"{queue.database.name}.wave.lock")
     async with file_slot([wave_lock]):
         try:
@@ -269,12 +295,14 @@ async def run_bounded_wave(
                 items,
                 handler,
                 recover_failed=recover_failed,
+                on_completed=on_completed,
                 active=active,
+                notifications=notifications,
             )
         finally:
-            for pending in active:
+            for pending in (*active, *notifications):
                 pending.cancel()
-            await asyncio.gather(*active, return_exceptions=True)
+            await asyncio.gather(*active, *notifications, return_exceptions=True)
             queue.requeue_running()
 
 
@@ -284,7 +312,9 @@ async def _run_bounded_wave(
     handler,
     *,
     recover_failed: bool,
+    on_completed,
     active: dict[asyncio.Task, str],
+    notifications: set[asyncio.Task],
 ) -> dict:
     """Run a finite wave while the durable queue enforces workers + prefetch."""
     ordered = tuple(items)
@@ -294,8 +324,29 @@ async def _run_bounded_wave(
     queue.requeue_running()
     next_index = 0
     results = {}
+    scheduled_notifications = set()
+    pending_notifications = []
 
-    while len(results) < len(ordered):
+    async def notify(item_id, result):
+        if on_completed is None or item_id in scheduled_notifications:
+            return
+        pending_notifications.append((item_id, result))
+        scheduled_notifications.add(item_id)
+
+    def admit_notifications():
+        while (
+            pending_notifications and len(active) + len(notifications) < queue.workers
+        ):
+            item_id, result = pending_notifications.pop(0)
+
+            async def invoke(item_id=item_id, result=result):
+                callback_result = on_completed(item_id, result)
+                if asyncio.iscoroutine(callback_result):
+                    await callback_result
+
+            notifications.add(asyncio.create_task(invoke()))
+
+    while len(results) < len(ordered) or pending_notifications or notifications:
         while next_index < len(ordered):
             item_id, item = ordered[next_index]
             existing = queue.inspect(item_id)
@@ -308,12 +359,19 @@ async def _run_bounded_wave(
                 if existing["status"] == "COMPLETE":
                     persisted = existing.get("result") or {}
                     if "handler_result" not in persisted:
-                        raise RuntimeError(f"completed queue item is missing durable result: {item_id}")
+                        raise RuntimeError(
+                            f"completed queue item is missing durable result: {item_id}"
+                        )
                     results[item_id] = persisted["handler_result"]
+                    await notify(item_id, persisted["handler_result"])
                 continue
             job_payload = getattr(item, "payload", {})
-            prompt = job_payload.get("prompt", "") if isinstance(job_payload, dict) else ""
-            image_size = job_payload.get("image_size") if isinstance(job_payload, dict) else None
+            prompt = (
+                job_payload.get("prompt", "") if isinstance(job_payload, dict) else ""
+            )
+            image_size = (
+                job_payload.get("image_size") if isinstance(job_payload, dict) else None
+            )
             try:
                 queue.enqueue(
                     item_id,
@@ -322,7 +380,9 @@ async def _run_bounded_wave(
                         "category": getattr(item, "category", None),
                         "provider": getattr(item, "endpoint", None),
                         "prompt_hash": digest(prompt) if prompt else None,
-                        "seed": job_payload.get("seed") if isinstance(job_payload, dict) else None,
+                        "seed": job_payload.get("seed")
+                        if isinstance(job_payload, dict)
+                        else None,
                         "resolution": image_size,
                         "cost": (
                             str(item.cost)
@@ -335,7 +395,8 @@ async def _run_bounded_wave(
                 break
             next_index += 1
 
-        while len(active) < queue.workers:
+        admit_notifications()
+        while len(active) + len(notifications) < queue.workers:
             claimed = queue.claim(f"worker-{len(active) + 1}")
             if claimed is None:
                 break
@@ -345,13 +406,15 @@ async def _run_bounded_wave(
                 raise RuntimeError("durable queue contains an unavailable wave item")
             active[asyncio.create_task(handler(by_id[item_id]))] = item_id
 
-        if not active:
-            if len(results) == len(ordered):
+        if not active and not notifications:
+            if len(results) == len(ordered) and not pending_notifications:
                 break
             raise RuntimeError("bounded wave made no progress")
 
         try:
-            done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                {*active, *notifications}, return_when=asyncio.FIRST_COMPLETED
+            )
         except BaseException:
             for pending in active:
                 pending.cancel()
@@ -359,6 +422,10 @@ async def _run_bounded_wave(
             queue.requeue_running()
             raise
         for task in done:
+            if task in notifications:
+                notifications.remove(task)
+                task.result()
+                continue
             item_id = active.pop(task)
             try:
                 result = task.result()
@@ -381,4 +448,5 @@ async def _run_bounded_wave(
                     summary["bytes"] = Path(result_path).stat().st_size
             queue.complete(item_id, summary)
             results[item_id] = result
+            await notify(item_id, result)
     return results

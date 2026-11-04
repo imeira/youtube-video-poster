@@ -39,7 +39,9 @@ def test_technical_image_qa_fails_closed_unless_png_rgb_1280x720(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_semantic_reviewer_is_blocked_until_exact_technical_contract_passes(tmp_path):
+async def test_semantic_reviewer_is_blocked_until_exact_technical_contract_passes(
+    tmp_path,
+):
     from src.hybrid.compiled import OperationalPipeline, compile_storyboard
 
     source = tmp_path / "source.png"
@@ -55,7 +57,15 @@ async def test_semantic_reviewer_is_blocked_until_exact_technical_contract_passe
     episode = compile_storyboard(
         "EP8",
         FrozenAsset.approve(audio, "audio-qa", "TEST"),
-        [{"scene_id": "S1", "start": 0, "end": 1, "image_prompt": "sky", "action": "look"}],
+        [
+            {
+                "scene_id": "S1",
+                "start": 0,
+                "end": 1,
+                "image_prompt": "sky",
+                "action": "look",
+            }
+        ],
     )
 
     class InvalidProvider:
@@ -95,13 +105,17 @@ async def test_semantic_reviewer_is_blocked_until_exact_technical_contract_passe
     packet = pipeline.prepare_qa_packets()["S1"]
     assert packet["technical_pass"] is False
     with pytest.raises(ValueError, match="technical QA"):
-        pipeline.record_visual_qa("S1", receipt["result_sha256"], True, "semantic-reviewer")
+        pipeline.record_visual_qa(
+            "S1", receipt["result_sha256"], True, "semantic-reviewer"
+        )
     assert pipeline.run.executor.inspect(receipt["request_id"])["qa"] is False
     correction = pipeline.run.remediation_job("S1", "repair technical contract")
     assert correction.predecessor == receipt["request_id"]
 
 
-def test_cas_key_is_path_independent_and_reuses_exact_bytes_and_normalized_parameters(tmp_path):
+def test_cas_key_is_path_independent_and_reuses_exact_bytes_and_normalized_parameters(
+    tmp_path,
+):
     from src.hybrid.cas import ContentAddressedStore, content_key
 
     first_workspace = tmp_path / "one"
@@ -150,7 +164,9 @@ def test_cas_never_overwrites_partially_published_immutable_object(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_executor_reuses_cas_across_workspace_paths_without_provider_call(tmp_path):
+async def test_executor_reuses_cas_across_workspace_paths_without_provider_call(
+    tmp_path,
+):
     from src.hybrid.cas import ContentAddressedStore, job_content_key
 
     def workspace_job(root: Path, reviewer: str) -> Job:
@@ -199,9 +215,9 @@ async def test_executor_reuses_cas_across_workspace_paths_without_provider_call(
     second = workspace_job(tmp_path / "workspace-b", "reviewer-b")
 
     cold = await Executor(tmp_path / "a.db", Config(), cas=store).run(first, provider)
-    warm = await Executor(
-        tmp_path / "b.db", Config(limit=Decimal(0)), cas=store
-    ).run(second, provider)
+    warm = await Executor(tmp_path / "b.db", Config(limit=Decimal(0)), cas=store).run(
+        second, provider
+    )
 
     assert first.request_id != second.request_id
     assert provider.calls == 1
@@ -213,7 +229,9 @@ async def test_executor_reuses_cas_across_workspace_paths_without_provider_call(
 
 
 @pytest.mark.asyncio
-async def test_executor_persists_cas_key_before_recovering_ambiguous_submission(tmp_path):
+async def test_executor_persists_cas_key_before_recovering_ambiguous_submission(
+    tmp_path,
+):
     from src.hybrid.cas import ContentAddressedStore, job_content_key
 
     reference = tmp_path / "reference.png"
@@ -297,7 +315,9 @@ def test_durable_queue_is_bounded_fifo_with_prefetch_and_closed_states(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_bounded_wave_returns_persisted_complete_result_without_rerunning_handler(tmp_path):
+async def test_bounded_wave_returns_persisted_complete_result_without_rerunning_handler(
+    tmp_path,
+):
     from src.hybrid.throughput import DurableQueue, run_bounded_wave
 
     database = tmp_path / "completed.db"
@@ -310,7 +330,9 @@ async def test_bounded_wave_returns_persisted_complete_result_without_rerunning_
         return {"result_sha256": "a" * 64, "actual_cost": "0.12", "payload": item}
 
     expected = {"result_sha256": "a" * 64, "actual_cost": "0.12", "payload": "work"}
-    assert await run_bounded_wave(first_queue, (("request-1", "work"),), first_handler) == {"request-1": expected}
+    assert await run_bounded_wave(
+        first_queue, (("request-1", "work"),), first_handler
+    ) == {"request-1": expected}
     assert first_calls == 1
 
     second_queue = DurableQueue(database, workers=1)
@@ -318,8 +340,168 @@ async def test_bounded_wave_returns_persisted_complete_result_without_rerunning_
     async def should_not_run(_item):
         raise AssertionError("COMPLETE queue item must return its durable result")
 
-    assert await run_bounded_wave(second_queue, (("request-1", "work"),), should_not_run) == {"request-1": expected}
+    assert await run_bounded_wave(
+        second_queue, (("request-1", "work"),), should_not_run
+    ) == {"request-1": expected}
     assert second_queue.inspect("request-1")["result"]["handler_result"] == expected
+
+
+@pytest.mark.asyncio
+async def test_bounded_wave_notifies_each_durable_completion_before_slowest_job_finishes(
+    tmp_path,
+):
+    """Rolling QA can start from a COMPLETE receipt without a batch barrier."""
+    from src.hybrid.throughput import DurableQueue, run_bounded_wave
+
+    queue = DurableQueue(tmp_path / "rolling-callback.db", workers=2)
+    slow_started = asyncio.Event()
+    release_slow = asyncio.Event()
+    fast_notified = asyncio.Event()
+    callback_states = []
+
+    async def handler(item):
+        if item == "slow":
+            slow_started.set()
+            await release_slow.wait()
+        else:
+            await slow_started.wait()
+        return {"value": item}
+
+    async def completed(item_id, result):
+        callback_states.append((item_id, queue.inspect(item_id)["status"], result))
+        if item_id == "fast":
+            fast_notified.set()
+
+    wave = asyncio.create_task(
+        run_bounded_wave(
+            queue,
+            (("slow", "slow"), ("fast", "fast")),
+            handler,
+            on_completed=completed,
+        )
+    )
+    await asyncio.wait_for(fast_notified.wait(), timeout=1)
+    assert wave.done() is False
+    assert callback_states == [("fast", "COMPLETE", {"value": "fast"})]
+
+    release_slow.set()
+    assert await wave == {
+        "fast": {"value": "fast"},
+        "slow": {"value": "slow"},
+    }
+    assert callback_states[-1] == ("slow", "COMPLETE", {"value": "slow"})
+
+
+@pytest.mark.asyncio
+async def test_bounded_wave_shares_worker_budget_between_provider_and_completion_qa(
+    tmp_path,
+):
+    from src.hybrid.throughput import DurableQueue, run_bounded_wave
+
+    queue = DurableQueue(tmp_path / "queue.db", workers=2, prefetch=1)
+    callback_started = asyncio.Event()
+    release_callbacks = asyncio.Event()
+    third_started = asyncio.Event()
+
+    async def handler(item):
+        if item == "third":
+            third_started.set()
+        await asyncio.sleep(0)
+        return {"value": item}
+
+    async def slow_callback(_item_id, _result):
+        callback_started.set()
+        await release_callbacks.wait()
+
+    wave = asyncio.create_task(
+        run_bounded_wave(
+            queue,
+            ((name, name) for name in ("first", "second", "third")),
+            handler,
+            on_completed=slow_callback,
+        )
+    )
+    try:
+        await asyncio.wait_for(callback_started.wait(), timeout=1)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(third_started.wait(), timeout=0.1)
+        assert wave.done() is False
+    finally:
+        release_callbacks.set()
+        await asyncio.wait_for(third_started.wait(), timeout=1)
+        await wave
+
+
+@pytest.mark.asyncio
+async def test_compiled_dispatch_releases_technical_qa_per_scene_without_batch_barrier(
+    tmp_path,
+):
+    from src.hybrid.compiled import CompiledEpisode, FrameSpec, OperationalPipeline
+
+    source = tmp_path / "source.png"
+    Image.new("RGB", (64, 64), "green").save(source)
+    asset = FrozenAsset.approve(source, "source-qa", "TEST")
+    sheet = tmp_path / "sheet.png"
+    contact_sheet((asset,), sheet)
+    manifest = Manifest.freeze(
+        (asset,), FrozenAsset.approve(sheet, "source-qa", "TEST"), "source-qa", "TEST"
+    )
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+    episode = CompiledEpisode.compile(
+        "TEST-ASYNC",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        (
+            FrameSpec("slow", 0, 1, "slow prompt", "slow action"),
+            FrameSpec("fast", 1, 2, "fast prompt", "fast action"),
+        ),
+    )
+    slow_started = asyncio.Event()
+    release_slow = asyncio.Event()
+    fast_qa_started = asyncio.Event()
+
+    class Provider:
+        mode = "TEST"
+
+        async def submit(self, job, request_id, checkpoint):
+            checkpoint(provider_id=f"provider-{request_id}")
+            if job.scene == "slow":
+                slow_started.set()
+                await release_slow.wait()
+            else:
+                await slow_started.wait()
+            output = tmp_path / f"{job.scene}.png"
+            Image.new("RGB", (1280, 720), "blue").save(output)
+            return ProviderResult(output, job.cost)
+
+        async def recover(self, *args):
+            raise AssertionError("unexpected recovery")
+
+    pipeline = OperationalPipeline(
+        episode,
+        Executor(tmp_path / "jobs.db", Config(concurrency=2)),
+        manifest,
+        workspace=tmp_path / "workspace",
+        endpoint="test-image",
+        image_cost=Decimal(".02"),
+    )
+
+    async def semantic_qa(receipt):
+        assert (
+            pipeline.run.executor.inspect(receipt["request_id"])["status"] == "COMPLETE"
+        )
+        if receipt["request"]["scene"] == "fast":
+            fast_qa_started.set()
+
+    dispatch = asyncio.create_task(
+        pipeline.dispatch_baselines(Provider(), on_completed=semantic_qa)
+    )
+    try:
+        await asyncio.wait_for(fast_qa_started.wait(), timeout=1)
+        assert dispatch.done() is False
+    finally:
+        release_slow.set()
+        await dispatch
 
 
 def test_failed_queue_item_cannot_requeue_beyond_materialized_limit(tmp_path):
@@ -452,7 +634,9 @@ async def test_six_corrections_run_as_one_concurrent_wave_under_worker_budget(tm
         "EP8",
         FrozenAsset.approve(audio, "audio-qa", "TEST"),
         tuple(
-            FrameSpec(f"S{index}", index, index + 1, f"prompt {index}", f"action {index}")
+            FrameSpec(
+                f"S{index}", index, index + 1, f"prompt {index}", f"action {index}"
+            )
             for index in range(6)
         ),
     )
@@ -493,7 +677,13 @@ async def test_six_corrections_run_as_one_concurrent_wave_under_worker_budget(tm
     baseline_queue = DurableQueue(run.baseline_queue_path, workers=2, prefetch=1)
     assert [row["status"] for row in baseline_queue.items()] == ["COMPLETE"] * 6
     for scene, receipt in baselines.items():
-        run.record_visual_qa(scene, receipt["result_sha256"], False, "reviewer")
+        run.record_visual_qa(
+            scene,
+            receipt["result_sha256"],
+            False,
+            "reviewer",
+            reviewer_identity={"subject": "reviewer", "issuer": "TEST"},
+        )
     provider.maximum = 0
 
     corrections = await run.dispatch_remediation_wave(
@@ -506,7 +696,10 @@ async def test_six_corrections_run_as_one_concurrent_wave_under_worker_budget(tm
     assert provider.maximum == 2
     queue = DurableQueue(run.correction_queue_path, workers=2, prefetch=1)
     assert [row["status"] for row in queue.items()] == ["COMPLETE"] * 6
-    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
     assert sum(event["status"] == "COMPLETE" for event in events) == 12
     assert all(event["episode"] == "EP8" for event in events)
     assert all("prompt" not in event for event in events)
@@ -560,7 +753,9 @@ def test_structured_events_are_allowlisted_and_redact_secrets_and_signed_urls(tm
 
 
 @pytest.mark.asyncio
-async def test_revision_stage_failure_never_persists_cookie_session_bearer_or_signed_url(tmp_path):
+async def test_revision_stage_failure_never_persists_cookie_session_bearer_or_signed_url(
+    tmp_path,
+):
     from src.hybrid.revision import RevisionHarness
 
     with RevisionHarness(tmp_path / "revision") as harness:
@@ -589,30 +784,39 @@ async def test_revision_stage_success_sanitizes_result_before_persisting(tmp_pat
         harness.create_plan(mode="TEST", request="test")
 
         async def successful_stage():
-            return ({
-                "provider_token": "STAGE_RESULT_SECRET",
-                "nested": {
-                    "cookie": "sessionid=COOKIE_SECRET",
-                    "accessToken": "ACCESS_SECRET",
-                    "oauthToken": "OAUTH_SECRET",
-                    "sessionData": "SESSION_SECRET",
-                    "result_url": "https://provider.invalid/result?X-Amz-Signature=SIGNED_SECRET",
+            return (
+                {
+                    "provider_token": "STAGE_RESULT_SECRET",
+                    "nested": {
+                        "cookie": "sessionid=COOKIE_SECRET",
+                        "accessToken": "ACCESS_SECRET",
+                        "oauthToken": "OAUTH_SECRET",
+                        "sessionData": "SESSION_SECRET",
+                        "result_url": "https://provider.invalid/result?X-Amz-Signature=SIGNED_SECRET",
+                    },
                 },
-            }, [])
+                [],
+            )
 
         result = await harness.stage("leaking-success", successful_stage)
 
     assert result["provider_token"] == "[REDACTED_CREDENTIAL]"
     raw = (tmp_path / "revision" / "revision.json").read_text(encoding="utf-8")
-    for secret in ("STAGE_RESULT_SECRET", "COOKIE_SECRET", "ACCESS_SECRET", "OAUTH_SECRET",
-                   "SESSION_SECRET", "SIGNED_SECRET"):
+    for secret in (
+        "STAGE_RESULT_SECRET",
+        "COOKIE_SECRET",
+        "ACCESS_SECRET",
+        "OAUTH_SECRET",
+        "SESSION_SECRET",
+        "SIGNED_SECRET",
+    ):
         assert secret not in raw
     assert "[REDACTED_CREDENTIAL]" in raw
     assert "[REDACTED_URL]" in raw
 
 
 def test_structured_events_retry_short_os_writes_until_complete(tmp_path, monkeypatch):
-    import src.hybrid.observability as observability
+    from src.hybrid import observability
 
     path = tmp_path / "events.jsonl"
     real_write = observability.os.write
@@ -623,10 +827,16 @@ def test_structured_events_retry_short_os_writes_until_complete(tmp_path, monkey
         return real_write(descriptor, payload[:3])
 
     monkeypatch.setattr(observability.os, "write", short_write)
-    observability.StructuredEventLog(path, clock=lambda: 1).emit(status="COMPLETE", episode="EP8")
+    observability.StructuredEventLog(path, clock=lambda: 1).emit(
+        status="COMPLETE", episode="EP8"
+    )
 
     assert len(calls) > 1
-    assert json.loads(path.read_text(encoding="utf-8")) == {"episode": "EP8", "status": "COMPLETE", "timestamp": 1}
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "episode": "EP8",
+        "status": "COMPLETE",
+        "timestamp": 1,
+    }
 
 
 def test_durable_queue_emits_structured_lifecycle_events(tmp_path):
@@ -654,14 +864,19 @@ def test_durable_queue_emits_structured_lifecycle_events(tmp_path):
     queue.claim("worker-1")
     queue.complete("request-1", {"result_sha256": "c" * 64, "bytes": 123})
 
-    records = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    records = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
     assert [record["status"] for record in records] == ["QUEUED", "RUNNING", "COMPLETE"]
     assert all(record["episode"] == "EP8" for record in records)
     assert records[-1]["result_sha256"] == "c" * 64
     assert "must not be logged" not in events_path.read_text(encoding="utf-8")
 
 
-def test_throughput_benchmark_writes_deterministic_cold_warm_and_correction_json(tmp_path):
+def test_throughput_benchmark_writes_deterministic_cold_warm_and_correction_json(
+    tmp_path,
+):
     from src.hybrid.benchmark import run_benchmark
 
     output = tmp_path / "benchmark.json"
@@ -685,6 +900,13 @@ def test_throughput_benchmark_writes_deterministic_cold_warm_and_correction_json
         "provider_submissions": 0,
         "queue_complete": 6,
     }
+    assert first["restart"] == {
+        "cache_hits": 0,
+        "jobs": 6,
+        "max_active_workers": 0,
+        "provider_submissions": 0,
+        "queue_complete": 6,
+    }
     assert first["corrections"] == {
         "cache_hits": 0,
         "jobs": 6,
@@ -692,4 +914,8 @@ def test_throughput_benchmark_writes_deterministic_cold_warm_and_correction_json
         "provider_submissions": 6,
         "queue_complete": 6,
     }
-    assert first["worker_budget"] == {"image_workers": 2, "materialized_limit": 3, "prefetch": 1}
+    assert first["worker_budget"] == {
+        "image_workers": 2,
+        "materialized_limit": 3,
+        "prefetch": 1,
+    }
