@@ -9,6 +9,8 @@ from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
 from src.hybrid.execution import Authorization, Executor, Job, Price, ProviderResult
 from src.hybrid.planner import Config
 
+QA_IDENTITY = {"subject": "reviewer", "issuer": "TEST"}
+
 
 def manifest(tmp_path, mode="TEST"):
     from PIL import Image
@@ -69,6 +71,20 @@ def job(tmp_path, **changes):
     return replace(base, **changes)
 
 
+@pytest.mark.asyncio
+async def test_qa_rejects_generator_claiming_an_arbitrary_external_subject(tmp_path):
+    executor = Executor(tmp_path / "jobs.db", Config())
+    request = job(tmp_path)
+    receipt = await executor.run(request, Provider(tmp_path))
+
+    with pytest.raises(ValueError, match="independent"):
+        executor.qa(
+            request.request_id,
+            receipt["result_sha256"],
+            True,
+            "generator",
+            reviewer_identity={"subject": "qa-externo", "issuer": "TEST"},
+        )
 
 
 @pytest.mark.asyncio
@@ -82,7 +98,9 @@ async def test_executor_projects_completed_actual_cost_to_canonical_ledger(tmp_p
     await executor.run(request, provider)
 
     ledger_path = tmp_path / "costs.json"
-    executor.sync_cost_ledger(ledger_path, episode_id="EP8", budget=BudgetConfig(hard_limit_usd=6))
+    executor.sync_cost_ledger(
+        ledger_path, episode_id="EP8", budget=BudgetConfig(hard_limit_usd=6)
+    )
 
     ledger = CostLedger.load(ledger_path, "EP8", BudgetConfig(hard_limit_usd=6))
     assert ledger.spent == float(request.cost)
@@ -147,7 +165,9 @@ async def test_intent_exists_before_submit_and_unknown_intent_blocks(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_prepared_intent_never_posts_without_explicit_admission_transition(tmp_path):
+async def test_prepared_intent_never_posts_without_explicit_admission_transition(
+    tmp_path,
+):
     request = job(tmp_path)
     executor = Executor(tmp_path / "jobs.db", Config())
     provider = Provider(tmp_path)
@@ -162,7 +182,9 @@ async def test_prepared_intent_never_posts_without_explicit_admission_transition
 
 
 @pytest.mark.asyncio
-async def test_prepared_fal_intent_with_submit_flag_never_posts_without_durable_ledger_admission(tmp_path):
+async def test_prepared_fal_intent_with_submit_flag_never_posts_without_durable_ledger_admission(
+    tmp_path,
+):
     request = job(tmp_path)
     executor = Executor(tmp_path / "jobs.db", Config())
     provider = Provider(tmp_path)
@@ -190,8 +212,12 @@ async def test_fresh_fal_entry_cannot_bypass_prepared_ledger_admission(tmp_path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["wrong-request", "invalid-reservation", "scope-mismatch"])
-async def test_prepared_fal_submit_rechecks_exact_durable_ledger_binding(tmp_path, case):
+@pytest.mark.parametrize(
+    "case", ["wrong-request", "invalid-reservation", "scope-mismatch"]
+)
+async def test_prepared_fal_submit_rechecks_exact_durable_ledger_binding(
+    tmp_path, case
+):
     from src.hybrid.standing_budget import StandingBudgetLedger
 
     request = job(tmp_path)
@@ -206,8 +232,14 @@ async def test_prepared_fal_submit_rechecks_exact_durable_ledger_binding(tmp_pat
     executor = Executor(tmp_path / "jobs.db", Config(), standing_ledger=ledger)
     provider = Provider(tmp_path)
     prepared = executor.prepare_intent(request)
-    reservation_id = "different-request" if case == "wrong-request" else request.request_id
-    scope = "wrong-scope" if case == "scope-mismatch" else prepared["settlement_binding"]["auth_scope"]
+    reservation_id = (
+        "different-request" if case == "wrong-request" else request.request_id
+    )
+    scope = (
+        "wrong-scope"
+        if case == "scope-mismatch"
+        else prepared["settlement_binding"]["auth_scope"]
+    )
     ledger.reserve(
         reservation_id,
         "TEST-EP",
@@ -221,7 +253,9 @@ async def test_prepared_fal_submit_rechecks_exact_durable_ledger_binding(tmp_pat
     if case == "invalid-reservation":
         ledger.mark_unknown(request.request_id)
 
-    with pytest.raises(PermissionError, match="ledger reservation|standing-ledger admission"):
+    with pytest.raises(
+        PermissionError, match="ledger reservation|standing-ledger admission"
+    ):
         await executor.run(request, provider, submit_prepared=True)
 
     assert provider.calls == 0
@@ -355,12 +389,30 @@ async def test_retries_require_exact_failed_qa_and_shared_reserve(tmp_path):
     with pytest.raises(ValueError, match="QA"):
         await executor.run(retry, provider)
     baseline_receipt = await executor.run(baseline, provider)
-    executor.qa(baseline.request_id, baseline_receipt["result_sha256"], True, "reviewer")
+    executor.qa(
+        baseline.request_id,
+        baseline_receipt["result_sha256"],
+        True,
+        "reviewer",
+        reviewer_identity=QA_IDENTITY,
+    )
     receipt = await executor.run(request, provider)
-    executor.qa(request.request_id, receipt["result_sha256"], False, "reviewer")
+    executor.qa(
+        request.request_id,
+        receipt["result_sha256"],
+        False,
+        "reviewer",
+        reviewer_identity=QA_IDENTITY,
+    )
     for _ in range(3):
         receipt = await executor.run(retry, provider)
-        executor.qa(retry.request_id, receipt["result_sha256"], False, "reviewer")
+        executor.qa(
+            retry.request_id,
+            receipt["result_sha256"],
+            False,
+            "reviewer",
+            reviewer_identity=QA_IDENTITY,
+        )
         retry = replace(retry, predecessor=retry.request_id)
     with pytest.raises(RuntimeError, match="capacity"):
         await executor.run(retry, provider)
@@ -384,7 +436,13 @@ async def test_hero_requires_its_approved_baseline_receipt(tmp_path):
         await executor.run(hero, provider)
 
     receipt = await executor.run(baseline, provider)
-    executor.qa(baseline.request_id, receipt["result_sha256"], True, "reviewer")
+    executor.qa(
+        baseline.request_id,
+        receipt["result_sha256"],
+        True,
+        "reviewer",
+        reviewer_identity=QA_IDENTITY,
+    )
     assert (await executor.run(hero, provider))["status"] == "COMPLETE"
 
 
@@ -395,10 +453,18 @@ async def test_alternative_requires_exact_rejected_qa_predecessor(tmp_path):
     first = job(tmp_path)
     receipt = await executor.run(first, provider)
 
-    with pytest.raises(ValueError, match="retry requires exact rejected QA predecessor"):
+    with pytest.raises(
+        ValueError, match="retry requires exact rejected QA predecessor"
+    ):
         await executor.run(replace(first, category="alternative"), provider)
 
-    executor.qa(first.request_id, receipt["result_sha256"], False, "reviewer")
+    executor.qa(
+        first.request_id,
+        receipt["result_sha256"],
+        False,
+        "reviewer",
+        reviewer_identity=QA_IDENTITY,
+    )
     alternative = replace(
         first,
         category="alternative",
@@ -418,7 +484,13 @@ async def test_receipt_tampering_and_actual_cost_overrun_block(tmp_path):
     with pytest.raises(ValueError, match="hash"):
         await executor.run(request, provider)
     with pytest.raises(ValueError):
-        executor.qa(request.request_id, receipt["result_sha256"], False, "reviewer")
+        executor.qa(
+            request.request_id,
+            receipt["result_sha256"],
+            False,
+            "reviewer",
+            reviewer_identity=QA_IDENTITY,
+        )
 
 
 @pytest.mark.asyncio

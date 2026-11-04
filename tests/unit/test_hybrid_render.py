@@ -11,7 +11,13 @@ from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet, sha256
 from src.hybrid.compiled import CompiledEpisode, FrameSpec, OperationalPipeline
 from src.hybrid.execution import Executor
 from src.hybrid.planner import Config
-from src.hybrid.render import LocalRenderer, Scene, _publish_new, probe
+from src.hybrid.render import (
+    LocalRenderer,
+    Scene,
+    _publish_new,
+    measure_loudness,
+    probe,
+)
 
 pytestmark = pytest.mark.skipif(
     not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
@@ -197,7 +203,10 @@ def test_renderer_renders_a_manifest_from_the_operational_compiled_pipeline(tmp_
         workspace=tmp_path / "compiled",
         endpoint="local-test",
         image_cost=Decimal(".01"),
-        imported_assets={"R001": source_manifest.assets[0], "R002": source_manifest.assets[1]},
+        imported_assets={
+            "R001": source_manifest.assets[0],
+            "R002": source_manifest.assets[1],
+        },
         blocked_scenes={"R001", "R002"},
     )
     approved = pipeline.approved_manifest()
@@ -223,11 +232,21 @@ def test_mp4_delivery_derives_aac_master_without_burning_subtitles(tmp_path):
     output = tmp_path / "delivery.mp4"
 
     receipt = LocalRenderer(width=320, height=180).render(
-        [Scene(asset, 1.0) for asset in manifest.assets], manifest, audio, None, output, hold=3
+        [Scene(asset, 1.0) for asset in manifest.assets],
+        manifest,
+        audio,
+        None,
+        output,
+        hold=3,
     )
 
     streams = probe(output)["streams"]
-    assert next(stream for stream in streams if stream["codec_type"] == "audio")["codec_name"] == "aac"
+    assert (
+        next(stream for stream in streams if stream["codec_type"] == "audio")[
+            "codec_name"
+        ]
+        == "aac"
+    )
     assert receipt["audio_operation"] == "derived_master"
     assert receipt["subtitles_sha256"] is None
 
@@ -250,6 +269,8 @@ def test_renderer_accepts_a_bounded_ffmpeg_thread_budget():
     assert renderer.filter_complex_threads == 2
     with pytest.raises(ValueError, match="thread"):
         LocalRenderer(width=320, height=180, filter_complex_threads=0)
+    with pytest.raises(ValueError, match="thread"):
+        LocalRenderer(width=320, height=180, filter_complex_threads=None)
 
 
 def test_renderer_accepts_bounded_parallel_scene_workers_and_encoder_threads():
@@ -262,7 +283,118 @@ def test_renderer_accepts_bounded_parallel_scene_workers_and_encoder_threads():
         LocalRenderer(encoder_threads=0)
 
 
+def test_renderer_applies_declared_thread_budget_to_every_ffmpeg_encode(
+    tmp_path, monkeypatch
+):
+    import src.hybrid.render as render_module
+
+    manifest, audio, _srt = fixtures(tmp_path)
+    commands = []
+    original = render_module.command
+
+    def tracked(args, **kwargs):
+        commands.append(tuple(args))
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(render_module, "command", tracked)
+    receipt = LocalRenderer(
+        width=320,
+        height=180,
+        scene_workers=2,
+        encoder_threads=1,
+        filter_complex_threads=1,
+    ).render(
+        [Scene(asset, 1.0) for asset in manifest.assets],
+        manifest,
+        audio,
+        None,
+        tmp_path / "bounded.mp4",
+        hold=3,
+    )
+
+    ffmpeg_commands = [args for args in commands if args[0] == "ffmpeg"]
+    assert ffmpeg_commands
+    scene_commands = [args for args in ffmpeg_commands if "-vf" in args]
+    assert scene_commands
+    for args in scene_commands:
+        thread_positions = [i for i, value in enumerate(args) if value == "-threads:v"]
+        assert len(thread_positions) == 2
+        assert thread_positions[0] < args.index("-i")
+        assert thread_positions[1] > args.index("-c:v")
+        assert args[args.index("-filter_threads") + 1] == "1"
+        assert args.index("-filter_threads") < args.index("-vf")
+
+    graph = next(args for args in ffmpeg_commands if "-filter_complex" in args)
+    graph_inputs = [i for i, value in enumerate(graph) if value == "-i"]
+    graph_decoder_threads = [
+        i for i, value in enumerate(graph) if value == "-threads:v"
+    ][:-1]
+    assert len(graph_decoder_threads) == len(graph_inputs)
+    assert all(
+        thread < source for thread, source in zip(graph_decoder_threads, graph_inputs)
+    )
+    assert graph[graph.index("-filter_complex_threads") + 1] == "1"
+
+    master = next(
+        args
+        for args in ffmpeg_commands
+        if "-c:v" in args and args[args.index("-c:v") + 1] == "copy"
+    )
+    assert master.index("-threads:v") < master.index("-i")
+    audio_input = [i for i, value in enumerate(master) if value == "-i"][1]
+    audio_threads = [i for i, value in enumerate(master) if value == "-threads:a"]
+    assert len(audio_threads) == 2
+    assert audio_threads[0] < audio_input < audio_threads[1]
+    assert master[master.index("-filter_threads") + 1] == "1"
+    assert receipt["scene_workers"] == 2
+    assert receipt["encoder_threads"] == 1
+    assert receipt["filter_complex_threads"] == 1
+
+
+def test_loudness_analysis_applies_decoder_and_filter_thread_budgets(monkeypatch):
+    captured = []
+
+    class Result:
+        returncode = 0
+        stderr = '{"input_i":"-16.0","input_tp":"-1.5"}'
+
+    def fake_run(args, **kwargs):
+        captured.append(tuple(args))
+        return Result()
+
+    monkeypatch.setattr("src.hybrid.render.subprocess.run", fake_run)
+
+    measured = measure_loudness("delivery.mp4", threads=2, filter_threads=1)
+
+    assert measured == {"integrated_lufs": -16.0, "true_peak_dbtp": -1.5}
+    assert captured == [
+        (
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-v",
+            "info",
+            "-threads",
+            "2",
+            "-i",
+            "delivery.mp4",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-filter_threads",
+            "1",
+            "-af",
+            "loudnorm=I=-16:TP=-1:print_format=json",
+            "-f",
+            "null",
+            "-",
+        )
+    ]
+
+
 def test_renderer_defaults_to_delivery_geometry_and_fps():
     renderer = LocalRenderer()
 
     assert (renderer.width, renderer.height, renderer.fps) == (1920, 1080, 30)
+    assert renderer.filter_complex_threads == 1

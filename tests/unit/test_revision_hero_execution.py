@@ -162,7 +162,7 @@ async def test_live_hero_requires_exact_authorization_and_reserves_once_before_p
     live_manifest = Manifest.freeze([live_still], FrozenAsset.approve(sheet, "human", "LIVE"), "human", "LIVE")
     provider = FakeHeroProvider(tmp_path / "provider")
     provider.mode = "LIVE"
-    executor = Executor(tmp_path / "heroes.db", Config(limit=Decimal("1")))
+    executor = Executor(tmp_path / "heroes.db", Config(limit=Decimal(1)))
     calls = []
 
     def authorize(jobs, plan):
@@ -175,7 +175,13 @@ async def test_live_hero_requires_exact_authorization_and_reserves_once_before_p
     baseline_auth = Authorization(baseline.request_id, "human", 4_000_000_000, Decimal("0.25"))
     baseline_price = Price(baseline.endpoint, baseline.request_id, Decimal("0.25"), 4_000_000_000, "current-price")
     baseline_receipt = await executor.run(baseline, provider, baseline_auth, baseline_price)
-    executor.qa(baseline.request_id, baseline_receipt["result_sha256"], True, "independent-qa")
+    executor.qa(
+        baseline.request_id,
+        baseline_receipt["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+    )
 
     h = RevisionHarness(tmp_path / "revision")
     target = tmp_path / "hero-manifest.json"

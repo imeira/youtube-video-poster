@@ -346,6 +346,288 @@ async def test_bounded_wave_returns_persisted_complete_result_without_rerunning_
     assert second_queue.inspect("request-1")["result"]["handler_result"] == expected
 
 
+@pytest.mark.asyncio
+async def test_bounded_wave_notifies_each_durable_completion_before_slowest_job_finishes(
+    tmp_path,
+):
+    """Rolling QA can start from a COMPLETE receipt without a batch barrier."""
+    from src.hybrid.throughput import DurableQueue, run_bounded_wave
+
+    queue = DurableQueue(tmp_path / "rolling-callback.db", workers=2)
+    slow_started = asyncio.Event()
+    release_slow = asyncio.Event()
+    fast_notified = asyncio.Event()
+    callback_states = []
+
+    async def handler(item):
+        if item == "slow":
+            slow_started.set()
+            await release_slow.wait()
+        else:
+            await slow_started.wait()
+        return {"value": item}
+
+    async def completed(item_id, result):
+        callback_states.append((item_id, queue.inspect(item_id)["status"], result))
+        if item_id == "fast":
+            fast_notified.set()
+
+    wave = asyncio.create_task(
+        run_bounded_wave(
+            queue,
+            (("slow", "slow"), ("fast", "fast")),
+            handler,
+            on_completed=completed,
+        )
+    )
+    await asyncio.wait_for(fast_notified.wait(), timeout=1)
+    assert wave.done() is False
+    assert callback_states == [("fast", "COMPLETE", {"value": "fast"})]
+
+    release_slow.set()
+    assert await wave == {
+        "fast": {"value": "fast"},
+        "slow": {"value": "slow"},
+    }
+    assert callback_states[-1] == ("slow", "COMPLETE", {"value": "slow"})
+
+
+@pytest.mark.asyncio
+async def test_bounded_wave_shares_worker_budget_between_provider_and_completion_qa(
+    tmp_path,
+):
+    from src.hybrid.throughput import DurableQueue, run_bounded_wave
+
+    queue = DurableQueue(tmp_path / "queue.db", workers=2, prefetch=1)
+    callback_started = asyncio.Event()
+    release_callbacks = asyncio.Event()
+    third_started = asyncio.Event()
+
+    async def handler(item):
+        if item == "third":
+            third_started.set()
+        await asyncio.sleep(0)
+        return {"value": item}
+
+    async def slow_callback(_item_id, _result):
+        callback_started.set()
+        await release_callbacks.wait()
+
+    wave = asyncio.create_task(
+        run_bounded_wave(
+            queue,
+            ((name, name) for name in ("first", "second", "third")),
+            handler,
+            on_completed=slow_callback,
+        )
+    )
+    try:
+        await asyncio.wait_for(callback_started.wait(), timeout=1)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(third_started.wait(), timeout=0.1)
+        assert wave.done() is False
+    finally:
+        release_callbacks.set()
+        await asyncio.wait_for(third_started.wait(), timeout=1)
+        await wave
+
+
+@pytest.mark.asyncio
+async def test_compiled_dispatch_releases_technical_qa_per_scene_without_batch_barrier(
+    tmp_path,
+):
+    from src.hybrid.compiled import CompiledEpisode, FrameSpec, OperationalPipeline
+
+    source = tmp_path / "source.png"
+    Image.new("RGB", (64, 64), "green").save(source)
+    asset = FrozenAsset.approve(source, "source-qa", "TEST")
+    sheet = tmp_path / "sheet.png"
+    contact_sheet((asset,), sheet)
+    manifest = Manifest.freeze(
+        (asset,), FrozenAsset.approve(sheet, "source-qa", "TEST"), "source-qa", "TEST"
+    )
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+    episode = CompiledEpisode.compile(
+        "TEST-ASYNC",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        (
+            FrameSpec("slow", 0, 1, "slow prompt", "slow action"),
+            FrameSpec("fast", 1, 2, "fast prompt", "fast action"),
+        ),
+    )
+    slow_started = asyncio.Event()
+    release_slow = asyncio.Event()
+    fast_qa_started = asyncio.Event()
+
+    class Provider:
+        mode = "TEST"
+
+        async def submit(self, job, request_id, checkpoint):
+            checkpoint(provider_id=f"provider-{request_id}")
+            if job.scene == "slow":
+                slow_started.set()
+                await release_slow.wait()
+            else:
+                await slow_started.wait()
+            output = tmp_path / f"{job.scene}.png"
+            Image.new("RGB", (1280, 720), "blue").save(output)
+            return ProviderResult(output, job.cost)
+
+        async def recover(self, *args):
+            raise AssertionError("unexpected recovery")
+
+    pipeline = OperationalPipeline(
+        episode,
+        Executor(tmp_path / "jobs.db", Config(concurrency=2)),
+        manifest,
+        workspace=tmp_path / "workspace",
+        endpoint="test-image",
+        image_cost=Decimal(".02"),
+    )
+
+    async def semantic_qa(receipt):
+        assert (
+            pipeline.run.executor.inspect(receipt["request_id"])["status"] == "COMPLETE"
+        )
+        if receipt["request"]["scene"] == "fast":
+            fast_qa_started.set()
+
+    dispatch = asyncio.create_task(
+        pipeline.dispatch_baselines(Provider(), on_completed=semantic_qa)
+    )
+    try:
+        await asyncio.wait_for(fast_qa_started.wait(), timeout=1)
+        assert dispatch.done() is False
+    finally:
+        release_slow.set()
+        await dispatch
+
+
+@pytest.mark.asyncio
+async def test_compiled_remediation_callback_is_per_completion_and_reopens_durable_receipt(
+    tmp_path,
+):
+    from src.hybrid.compiled import CompiledEpisode, FrameSpec, OperationalPipeline
+
+    source = tmp_path / "source.png"
+    Image.new("RGB", (64, 64), "green").save(source)
+    asset = FrozenAsset.approve(source, "source-qa", "TEST")
+    sheet = tmp_path / "sheet.png"
+    contact_sheet((asset,), sheet)
+    manifest = Manifest.freeze(
+        (asset,), FrozenAsset.approve(sheet, "source-qa", "TEST"), "source-qa", "TEST"
+    )
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+    episode = CompiledEpisode.compile(
+        "TEST-REMEDIATION-ASYNC",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        (
+            FrameSpec("slow", 0, 1, "slow prompt", "slow action"),
+            FrameSpec("fast", 1, 2, "fast prompt", "fast action"),
+        ),
+    )
+    pipeline = OperationalPipeline(
+        episode,
+        Executor(tmp_path / "jobs.db", Config(concurrency=2)),
+        manifest,
+        workspace=tmp_path / "workspace",
+        endpoint="test-image",
+        image_cost=Decimal(".02"),
+    )
+
+    class BaselineProvider:
+        mode = "TEST"
+
+        async def submit(self, job, request_id, checkpoint):
+            checkpoint(provider_id=f"baseline-{request_id}")
+            output = tmp_path / f"baseline-{job.scene}.png"
+            Image.new("RGB", (1280, 720), "blue").save(output)
+            return ProviderResult(output, job.cost)
+
+        async def recover(self, *args):
+            raise AssertionError("unexpected recovery")
+
+    baselines = await pipeline.dispatch_baselines(BaselineProvider())
+    for scene, receipt in baselines.items():
+        pipeline.record_visual_qa(
+            scene,
+            receipt["result_sha256"],
+            False,
+            "independent-qa",
+            failure_code="IDENTITY",
+            reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+        )
+
+    slow_started = asyncio.Event()
+    release_slow = asyncio.Event()
+    fast_qa_started = asyncio.Event()
+    submissions = 0
+
+    class CorrectionProvider:
+        mode = "TEST"
+
+        async def submit(self, job, request_id, checkpoint):
+            nonlocal submissions
+            submissions += 1
+            checkpoint(provider_id=f"correction-{request_id}")
+            if job.scene == "slow":
+                slow_started.set()
+                await release_slow.wait()
+            else:
+                await slow_started.wait()
+            output = tmp_path / f"correction-{job.scene}.png"
+            Image.new("RGB", (1280, 720), "orange").save(output)
+            return ProviderResult(output, job.cost)
+
+        async def recover(self, *args):
+            raise AssertionError("unexpected recovery")
+
+    async def reject(receipt):
+        assert receipt["status"] == "COMPLETE"
+        pipeline.record_visual_qa(
+            receipt["request"]["scene"],
+            receipt["result_sha256"],
+            False,
+            "independent-qa",
+            failure_code="IDENTITY",
+            reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+        )
+        if receipt["request"]["scene"] == "fast":
+            fast_qa_started.set()
+
+    corrections = {"slow": {"code": "IDENTITY"}, "fast": {"code": "IDENTITY"}}
+    provider = CorrectionProvider()
+    dispatch = asyncio.create_task(
+        pipeline.dispatch_remediation_wave(corrections, provider, on_completed=reject)
+    )
+    try:
+        await asyncio.wait_for(fast_qa_started.wait(), timeout=1)
+        assert dispatch.done() is False
+    finally:
+        release_slow.set()
+        await dispatch
+
+    replayed = []
+
+    async def inspect_replayed(receipt):
+        replayed.append(receipt)
+        assert receipt["qa"] is False
+        assert receipt["qa_reviewer_identity"] == {
+            "subject": "independent-qa",
+            "issuer": "TEST",
+        }
+
+    before_replay = submissions
+    await pipeline.dispatch_remediation_wave(
+        corrections, provider, on_completed=inspect_replayed
+    )
+
+    assert submissions == before_replay
+    assert len(replayed) == 2
+
+
 def test_failed_queue_item_cannot_requeue_beyond_materialized_limit(tmp_path):
     from src.hybrid.throughput import DurableQueue
 
@@ -519,7 +801,13 @@ async def test_six_corrections_run_as_one_concurrent_wave_under_worker_budget(tm
     baseline_queue = DurableQueue(run.baseline_queue_path, workers=2, prefetch=1)
     assert [row["status"] for row in baseline_queue.items()] == ["COMPLETE"] * 6
     for scene, receipt in baselines.items():
-        run.record_visual_qa(scene, receipt["result_sha256"], False, "reviewer")
+        run.record_visual_qa(
+            scene,
+            receipt["result_sha256"],
+            False,
+            "reviewer",
+            reviewer_identity={"subject": "reviewer", "issuer": "TEST"},
+        )
     provider.maximum = 0
 
     corrections = await run.dispatch_remediation_wave(
@@ -731,6 +1019,13 @@ def test_throughput_benchmark_writes_deterministic_cold_warm_and_correction_json
     }
     assert first["warm"] == {
         "cache_hits": 6,
+        "jobs": 6,
+        "max_active_workers": 0,
+        "provider_submissions": 0,
+        "queue_complete": 6,
+    }
+    assert first["restart"] == {
+        "cache_hits": 0,
         "jobs": 6,
         "max_active_workers": 0,
         "provider_submissions": 0,

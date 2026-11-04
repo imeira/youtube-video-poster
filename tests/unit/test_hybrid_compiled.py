@@ -21,6 +21,22 @@ def source_manifest(tmp_path):
     )
 
 
+def live_source_manifest(tmp_path):
+    from PIL import Image
+
+    source = tmp_path / "live-source.png"
+    Image.new("RGB", (64, 64), "green").save(source)
+    frozen = FrozenAsset.approve(source, "visual-qa", "LIVE")
+    sheet = tmp_path / "live-sheet.png"
+    contact_sheet((frozen,), sheet)
+    return Manifest.freeze(
+        (frozen,),
+        FrozenAsset.approve(sheet, "visual-qa", "LIVE"),
+        "visual-qa",
+        "LIVE",
+    )
+
+
 class Provider:
     mode = "TEST"
 
@@ -67,6 +83,60 @@ def test_compile_rejects_nonsemantic_or_overlapping_timestamps(tmp_path):
         )
 
 
+def test_live_visual_qa_rejects_self_asserted_identity_before_executor(
+    tmp_path, monkeypatch
+):
+    from src.hybrid.compiled import CompiledEpisode, FrameSpec, ProductionRun
+
+    audio = tmp_path / "live-narration.wav"
+    audio.write_bytes(b"approved narration")
+    episode = CompiledEpisode.compile(
+        "LIVE-EP",
+        FrozenAsset.approve(audio, "audio-qa", "LIVE"),
+        (FrameSpec("R001", 0.0, 2.0, "prompt", "action"),),
+    )
+    executor = Executor(tmp_path / "live-control.db", Config())
+    run = ProductionRun(
+        episode,
+        executor,
+        live_source_manifest(tmp_path),
+        endpoint="flux",
+        image_cost=Decimal(".02"),
+    )
+    job = run.baseline_jobs()[0]
+    called = False
+
+    def inspect(request_id):
+        assert request_id == job.request_id
+        return {
+            "result_sha256": "a" * 64,
+            "qa": True,
+            "qa_reviewer_identity": {
+                "subject": "claimed-reviewer",
+                "issuer": "OPENROUTER",
+            },
+        }
+
+    def qa(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(executor, "inspect", inspect)
+    monkeypatch.setattr(executor, "qa", qa)
+
+    with pytest.raises(ValueError, match="trusted reviewer evidence"):
+        run.record_visual_qa(
+            "R001",
+            "a" * 64,
+            True,
+            "OpenRouter:untrusted-model:self-asserted-authority",
+            reviewer_identity={"subject": "claimed-reviewer", "issuer": "OPENROUTER"},
+        )
+
+    assert called is False
+    assert run.render_ready() is False
+
+
 @pytest.mark.asyncio
 async def test_compiled_episode_batches_baselines_and_releases_only_approved_heroes(
     tmp_path,
@@ -98,14 +168,26 @@ async def test_compiled_episode_batches_baselines_and_releases_only_approved_her
     assert run.eligible_hero_jobs(Decimal(".26"), "seedance") == ()
 
     run.record_visual_qa(
-        "R001", receipts["R001"]["result_sha256"], True, "independent-qa"
+        "R001",
+        receipts["R001"]["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
     )
     run.record_visual_qa(
-        "R002", receipts["R002"]["result_sha256"], True, "independent-qa"
+        "R002",
+        receipts["R002"]["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
     )
     with pytest.raises(ValueError, match="immutable"):
         run.record_visual_qa(
-            "R001", receipts["R001"]["result_sha256"], False, "other-qa"
+            "R001",
+            receipts["R001"]["result_sha256"],
+            False,
+            "other-qa",
+            reviewer_identity={"subject": "other-qa", "issuer": "TEST"},
         )
     heroes = run.eligible_hero_jobs(Decimal(".26"), "seedance")
 
@@ -118,7 +200,13 @@ async def test_compiled_episode_batches_baselines_and_releases_only_approved_her
         episode, executor, manifest, endpoint="flux", image_cost=Decimal(".02")
     )
     assert resumed.eligible_hero_jobs(Decimal(".26"), "seedance") == ()
-    run.record_visual_qa("R001", hero_receipt["result_sha256"], True, "independent-qa")
+    run.record_visual_qa(
+        "R001",
+        hero_receipt["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+    )
     assert run.render_ready() is True
 
 

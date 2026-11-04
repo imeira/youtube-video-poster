@@ -6,6 +6,7 @@ import socket
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 _socketpair_active = False
 _socketpair = socket.socketpair
@@ -30,10 +31,21 @@ def is_protected_path(value):
     return candidate == PROTECTED_EPISODES or PROTECTED_EPISODES in candidate.parents
 
 
+def is_loopback_socket_event(event, args):
+    """Permit local test transports without allowing external network access."""
+    if event == "socket.getaddrinfo":
+        host = args[0] if args else None
+    else:
+        address = args[1] if len(args) > 1 else None
+        host = address[0] if isinstance(address, tuple) and address else None
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
 def audit(event, args):
     if (
         event in {"socket.connect", "socket.getaddrinfo", "socket.bind"}
         and not _socketpair_active
+        and not is_loopback_socket_event(event, args)
     ):
         raise RuntimeError("Network disabled for offline validation")
     if event in {"open", "os.listdir", "os.scandir"} and args:
@@ -56,7 +68,12 @@ class OfflinePolicy:
         # aiohttp may use c-ares DNS, which bypasses Python socket audit hooks.
         import aiohttp
 
+        request = aiohttp.ClientSession._request
+
         async def denied(*args, **kwargs):
+            url = args[2] if len(args) > 2 else kwargs.get("url")
+            if urlsplit(str(url)).hostname in {"127.0.0.1", "::1", "localhost"}:
+                return await request(*args, **kwargs)
             raise RuntimeError("External HTTP disabled for offline validation")
 
         aiohttp.ClientSession._request = denied

@@ -344,7 +344,12 @@ class DirectorAgent:
         )
 
     def create_autonomous_compiled_test_adapter(
-        self, pipeline, workspace: Path, policy_document: dict, *, ownership_assertion=None
+        self,
+        pipeline,
+        workspace: Path,
+        policy_document: dict,
+        *,
+        ownership_assertion=None,
     ):
         """Attach an existing TEST compiled pipeline to the durable runner.
 
@@ -390,11 +395,14 @@ class DirectorAgent:
             pipeline,
             canonical_episode_root=(
                 EpisodeFS(pipeline.episode.episode_id, config).paths.root.absolute()
-                if config is not None else None
+                if config is not None
+                else None
             ),
         )
 
-    def import_preproduction_handoff(self, workspace: Path, request_id: str, manifest_path: Path):
+    def import_preproduction_handoff(
+        self, workspace: Path, request_id: str, manifest_path: Path
+    ):
         """Verify one local PREPRODUCTION import without activating production.
 
         The importer deliberately stops before state transition, pipeline,
@@ -405,16 +413,29 @@ class DirectorAgent:
         return import_real_preproduction_handoff(workspace, request_id, manifest_path)
 
     def import_preproduction_audio_candidate(
-        self, workspace: Path, request_id: str, audio_path: Path, timing_path: Path,
-        license_path: Path, *, alignment_attestation_path: Path | None = None, app_config: object, clock,
+        self,
+        workspace: Path,
+        request_id: str,
+        audio_path: Path,
+        timing_path: Path,
+        license_path: Path,
+        *,
+        alignment_attestation_path: Path | None = None,
+        app_config: object,
+        clock,
     ):
         """Materialize a verified local candidate while retaining blocked TTS state."""
         from src.hybrid.audio_preproduction import import_real_audio_candidate
 
         return import_real_audio_candidate(
-            workspace, request_id, audio_path, timing_path, license_path,
+            workspace,
+            request_id,
+            audio_path,
+            timing_path,
+            license_path,
             alignment_attestation_path=alignment_attestation_path,
-            app_config=app_config, clock=clock,
+            app_config=app_config,
+            clock=clock,
         )
 
     def import_audio_qualification_evidence(
@@ -467,63 +488,121 @@ class DirectorAgent:
 
         raw = getattr(app_config, "raw", None)
         configured = raw.get("external_trust_root") if isinstance(raw, dict) else None
-        evidence_root = configured.get("evidence_root") if isinstance(configured, dict) else None
+        evidence_root = (
+            configured.get("evidence_root") if isinstance(configured, dict) else None
+        )
         if not isinstance(evidence_root, str) or not evidence_root:
-            raise ValueError("configured evidence root is required before readback service")
+            raise ValueError(
+                "configured evidence root is required before readback service"
+            )
         root = Path(evidence_root)
         if not root.is_absolute():
-            raise ValueError("configured evidence root is invalid before readback service")
+            raise ValueError(
+                "configured evidence root is invalid before readback service"
+            )
         try:
             candidate, _candidate_file_sha, _ = load_strict_json_snapshot(
-                candidate_receipt_path, "immutable audio candidate receipt", contained_by=root, include_bytes=True,
+                candidate_receipt_path,
+                "immutable audio candidate receipt",
+                contained_by=root,
+                include_bytes=True,
             )
             submission, _submission_file_sha, _ = load_strict_json_snapshot(
-                submission_receipt_path, "durable submission receipt", contained_by=root, include_bytes=True,
+                submission_receipt_path,
+                "durable submission receipt",
+                contained_by=root,
+                include_bytes=True,
             )
         except TrustRootVerificationError as error:
             raise ValueError("missing or invalid durable submission receipt") from error
 
         candidate_fields = {
-            "schema", "mode", "candidate_class", "request_id", "source_sha256",
-            "script_sha256", "audio_sha256", "provider_id", "voice_id", "receipt_sha256",
+            "schema",
+            "mode",
+            "candidate_class",
+            "request_id",
+            "source_sha256",
+            "script_sha256",
+            "audio_sha256",
+            "provider_id",
+            "voice_id",
+            "receipt_sha256",
         }
         submission_fields = {
-            "schema", "mode", "request_id", "provider", "history_item_id",
-            "source_sha256", "script_sha256", "audio_sha256", "voice_id",
-            "candidate_receipt_sha256", "receipt_sha256",
+            "schema",
+            "mode",
+            "request_id",
+            "provider",
+            "history_item_id",
+            "source_sha256",
+            "script_sha256",
+            "audio_sha256",
+            "voice_id",
+            "candidate_receipt_sha256",
+            "receipt_sha256",
         }
 
         def receipt_digest(receipt: dict[str, object]) -> str:
-            projection = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+            projection = {
+                key: value for key, value in receipt.items() if key != "receipt_sha256"
+            }
             return hashlib.sha256(
-                json.dumps(projection, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                json.dumps(projection, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
             ).hexdigest()
 
-        if set(candidate) != candidate_fields or candidate.get("schema") != "elevenlabs-origin-readback-candidate-fixture-v1":
+        if (
+            set(candidate) != candidate_fields
+            or candidate.get("schema")
+            != "elevenlabs-origin-readback-candidate-fixture-v1"
+        ):
             raise ValueError("immutable candidate receipt contract is unavailable")
         if candidate.get("receipt_sha256") != receipt_digest(candidate):
             raise ValueError("immutable candidate receipt_sha256 is invalid")
         if "history_item_id" not in submission:
-            raise ValueError("history_item_id is required in durable submission receipt")
+            raise ValueError(
+                "history_item_id is required in durable submission receipt"
+            )
         if set(submission) != submission_fields:
             raise ValueError("durable submission receipt contract is invalid")
         if submission.get("receipt_sha256") != receipt_digest(submission):
             raise ValueError("durable submission receipt_sha256 is invalid")
-        if candidate.get("mode") != "TEST" or candidate.get("candidate_class") != "TEST":
-            raise ValueError("real immutable ElevenLabs candidate producer is unavailable")
+        if (
+            candidate.get("mode") != "TEST"
+            or candidate.get("candidate_class") != "TEST"
+        ):
+            raise ValueError(
+                "real immutable ElevenLabs candidate producer is unavailable"
+            )
         if submission.get("mode") != "TEST":
             raise ValueError("real submission receipt producer is unavailable")
-        if submission.get("schema") != "elevenlabs-history-submission-receipt-fixture-v1":
+        if (
+            submission.get("schema")
+            != "elevenlabs-history-submission-receipt-fixture-v1"
+        ):
             raise ValueError("durable submission receipt contract is invalid")
-        bindings = {"request_id", "source_sha256", "script_sha256", "audio_sha256", "voice_id"}
-        if any(submission.get(key) != candidate.get(key) for key in bindings) or submission.get(
-            "candidate_receipt_sha256"
-        ) != candidate.get("receipt_sha256"):
+        bindings = {
+            "request_id",
+            "source_sha256",
+            "script_sha256",
+            "audio_sha256",
+            "voice_id",
+        }
+        if any(
+            submission.get(key) != candidate.get(key) for key in bindings
+        ) or submission.get("candidate_receipt_sha256") != candidate.get(
+            "receipt_sha256"
+        ):
             raise ValueError("submission receipt does not bind immutable candidate")
-        if submission.get("provider") != "elevenlabs" or candidate.get("provider_id") != "elevenlabs":
+        if (
+            submission.get("provider") != "elevenlabs"
+            or candidate.get("provider_id") != "elevenlabs"
+        ):
             raise ValueError("submission receipt provider binding is invalid")
         if not all(
-            isinstance(candidate.get(key), str) and len(candidate[key]) == 64
+            isinstance(candidate.get(key), str)
+            and len(candidate[key]) == 64
             and all(char in "0123456789abcdef" for char in candidate[key])
             for key in ("source_sha256", "script_sha256", "audio_sha256")
         ):
@@ -542,12 +621,16 @@ class DirectorAgent:
         origin = await readback_service(binding, root / "elevenlabs-origin-readback")
         quarantine = root / "elevenlabs-origin-readback"
         expected_audio_path = quarantine / f"{submission['history_item_id']}.audio"
-        expected_receipt_path = quarantine / f"{submission['history_item_id']}.receipt.json"
+        expected_receipt_path = (
+            quarantine / f"{submission['history_item_id']}.receipt.json"
+        )
         if (
             Path(getattr(origin, "audio_path", "")) != expected_audio_path
             or Path(getattr(origin, "receipt_path", "")) != expected_receipt_path
         ):
-            raise ValueError("readback service returned paths outside the configured quarantine")
+            raise ValueError(
+                "readback service returned paths outside the configured quarantine"
+            )
         try:
             receipt, _receipt_file_sha, receipt_bytes = load_strict_json_snapshot(
                 expected_receipt_path,
@@ -563,8 +646,12 @@ class DirectorAgent:
             )
             try:
                 opened = os.fstat(descriptor)
-                if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
-                    raise ValueError("materialized origin audio is missing or not a regular file")
+                if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(
+                    before, opened
+                ):
+                    raise ValueError(
+                        "materialized origin audio is missing or not a regular file"
+                    )
                 with os.fdopen(descriptor, "rb") as stream:
                     descriptor = None
                     audio = stream.read()
@@ -576,25 +663,52 @@ class DirectorAgent:
                     os.close(descriptor)
         except (TrustRootVerificationError, ValueError, OSError) as error:
             raise ValueError("materialized origin readback is unavailable") from error
-        if receipt_bytes != json.dumps(
-            receipt, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8") or getattr(origin, "receipt", None) != receipt:
+        if (
+            receipt_bytes
+            != json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+            or getattr(origin, "receipt", None) != receipt
+        ):
             raise ValueError("materialized origin receipt differs from callback result")
         receipt_fields = {
-            "schema", "request_id", "provider", "history_item_id", "provider_request_id", "source",
-            "voice_id", "model_id", "date_unix", "output_format", "returned_text_sha256",
-            "history_metadata_sha256", "voice_metadata_sha256", "audio_sha256", "audio_bytes",
-            "provider_output_hash", "authenticated_readback", "origin_provenance",
-            "voice_access_observation", "commercial_license", "acoustic_alignment",
-            "qualification_status", "status", "operations", "receipt_sha256",
+            "schema",
+            "request_id",
+            "provider",
+            "history_item_id",
+            "provider_request_id",
+            "source",
+            "voice_id",
+            "model_id",
+            "date_unix",
+            "output_format",
+            "returned_text_sha256",
+            "history_metadata_sha256",
+            "voice_metadata_sha256",
+            "audio_sha256",
+            "audio_bytes",
+            "provider_output_hash",
+            "authenticated_readback",
+            "origin_provenance",
+            "voice_access_observation",
+            "commercial_license",
+            "acoustic_alignment",
+            "qualification_status",
+            "status",
+            "operations",
+            "receipt_sha256",
         }
         if (
             set(receipt) != receipt_fields
             or receipt.get("schema") != "elevenlabs-history-origin-readback-v1"
             or receipt.get("receipt_sha256") != receipt_digest(receipt)
         ):
-            raise ValueError("materialized origin receipt schema or canonical hash is invalid")
-        if hashlib.sha256(audio).hexdigest() != receipt.get("audio_sha256") or len(audio) != receipt.get("audio_bytes"):
+            raise ValueError(
+                "materialized origin receipt schema or canonical hash is invalid"
+            )
+        if hashlib.sha256(audio).hexdigest() != receipt.get("audio_sha256") or len(
+            audio
+        ) != receipt.get("audio_bytes"):
             raise ValueError("materialized origin audio does not match its receipt")
         origin_bindings = {
             "request_id": candidate["request_id"],
@@ -606,17 +720,24 @@ class DirectorAgent:
             "audio_sha256": candidate["audio_sha256"],
         }
         if any(receipt.get(key) != value for key, value in origin_bindings.items()):
-            raise ValueError("materialized origin receipt does not close candidate and submission bindings")
+            raise ValueError(
+                "materialized origin receipt does not close candidate and submission bindings"
+            )
         if (
             receipt.get("authenticated_readback") != "TEST_NOT_AUTHORITY"
             or receipt.get("qualification_status") != "NOT_QUALIFIED"
             or receipt.get("status") != "TTS_REQUIRED"
-            or receipt.get("operations") != {
-                "provider_dispatch": "BLOCKED", "render": "BLOCKED",
-                "telegram": "BLOCKED", "publication": "BLOCKED",
+            or receipt.get("operations")
+            != {
+                "provider_dispatch": "BLOCKED",
+                "render": "BLOCKED",
+                "telegram": "BLOCKED",
+                "publication": "BLOCKED",
             }
         ):
-            raise ValueError("injected readback service returned an unsafe authority claim")
+            raise ValueError(
+                "injected readback service returned an unsafe authority claim"
+            )
         return {
             "candidate_receipt_sha256": candidate["receipt_sha256"],
             "submission_receipt_sha256": submission["receipt_sha256"],
@@ -748,8 +869,14 @@ class DirectorAgent:
         }
 
     async def dispatch_current_policy_baselines(
-        self, episode_id: str, pipeline, provider, *, historical_financial_record: Path,
-        license_status: str, price_resolver,
+        self,
+        episode_id: str,
+        pipeline,
+        provider,
+        *,
+        historical_financial_record: Path,
+        license_status: str,
+        price_resolver,
     ) -> dict[str, Any]:
         """Admit Jacó work through the permanent policy and the sole LIVE kernel.
 
@@ -771,23 +898,34 @@ class DirectorAgent:
         if pipeline.run.executor.config.limit != policy.episode_cap_usd:
             raise LiveAdmissionError("executor ceiling must equal current policy cap")
         if Decimal(str(self.config.budget.hard_limit_usd)) != policy.episode_cap_usd:
-            raise LiveAdmissionError("canonical episode budget must equal current policy cap")
+            raise LiveAdmissionError(
+                "canonical episode budget must equal current policy cap"
+            )
         if not callable(price_resolver):
             raise TypeError("configured price resolver is required")
         registry = trusted_provider_registry(provider)
         jobs = pipeline.baseline_jobs()
         if not jobs:
-            raise LiveAdmissionError("current policy requires dispatchable compiled jobs")
+            raise LiveAdmissionError(
+                "current policy requires dispatchable compiled jobs"
+            )
         admissions = [
             resolver.admit(
-                provider=provider, license_status=license_status,
-                provider_registry=registry, price_quote=price_resolver(job), job=job,
+                provider=provider,
+                license_status=license_status,
+                provider_registry=registry,
+                price_quote=price_resolver(job),
+                job=job,
             )
             for job in jobs
         ]
         result = await self.dispatch_compiled_baselines(
-            episode_id, pipeline, provider,
-            authorizations={item.authorization.request_id: item.authorization for item in admissions},
+            episode_id,
+            pipeline,
+            provider,
+            authorizations={
+                item.authorization.request_id: item.authorization for item in admissions
+            },
             prices={item.price.request_id: item.price for item in admissions},
         )
         # The facade is the only Jacó status/metrics publisher.  It reopens the
@@ -815,6 +953,7 @@ class DirectorAgent:
                 "result_sha256",
                 "approved",
                 "reviewer",
+                "reviewer_identity",
             }:
                 raise ValueError("visual QA decision schema is invalid")
             scene_id = decision["scene_id"]
@@ -843,6 +982,7 @@ class DirectorAgent:
                 decision["result_sha256"],
                 decision["approved"],
                 decision["reviewer"],
+                reviewer_identity=decision["reviewer_identity"],
             )
             approved[scene_id] = str(asset.path) if asset else ""
         if (
@@ -866,7 +1006,9 @@ class DirectorAgent:
             ).publish_from_executor(pipeline)
         return result
 
-    def _compiled_render_contract(self, episode_id: str, pipeline, renderer, hold: int) -> dict[str, Any]:
+    def _compiled_render_contract(
+        self, episode_id: str, pipeline, renderer, hold: int
+    ) -> dict[str, Any]:
         """Close every mutable render input before ownership or recovery reuse."""
         if hold not in (3, 4, 5):
             raise ValueError("compiled render closing hold must be 3 to 5 seconds")
@@ -878,9 +1020,13 @@ class DirectorAgent:
             image_sha256 = getattr(getattr(scene, "image", None), "sha256", None)
             clip = getattr(scene, "clip", None)
             clip_sha256 = getattr(clip, "sha256", None)
-            if not isinstance(image_sha256, str) or (clip is not None and not isinstance(clip_sha256, str)):
+            if not isinstance(image_sha256, str) or (
+                clip is not None and not isinstance(clip_sha256, str)
+            ):
                 raise TypeError("compiled render scene hash is unavailable")
-            scene_hashes.append({"image_sha256": image_sha256, "clip_sha256": clip_sha256})
+            scene_hashes.append(
+                {"image_sha256": image_sha256, "clip_sha256": clip_sha256}
+            )
         config = self.__dict__.get("config")
         canonical_root = None
         if config is not None:
@@ -889,8 +1035,12 @@ class DirectorAgent:
         renderer_config = {
             name: getattr(renderer, name, None)
             for name in (
-                "width", "height", "fps", "filter_complex_threads",
-                "scene_workers", "encoder_threads",
+                "width",
+                "height",
+                "fps",
+                "filter_complex_threads",
+                "scene_workers",
+                "encoder_threads",
             )
         }
         if not isinstance(getattr(manifest, "checksum", None), str) or not isinstance(
@@ -923,12 +1073,21 @@ class DirectorAgent:
             raise TypeError(f"render evidence cannot encode {type(item).__name__}")
 
         return json.dumps(
-            value, sort_keys=True, separators=(",", ":"), allow_nan=False, default=json_value,
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+            default=json_value,
         ).encode("utf-8")
 
     @classmethod
     def _read_canonical_render_json(
-        cls, path: Path, required_keys: set[str], label: str, *, canonical_episode_root: Path,
+        cls,
+        path: Path,
+        required_keys: set[str],
+        label: str,
+        *,
+        canonical_episode_root: Path,
     ) -> tuple[dict[str, Any], str]:
         """Read canonical evidence from one reparse-safe immutable byte snapshot."""
         from src.hybrid.external_trust_root import (
@@ -938,17 +1097,29 @@ class DirectorAgent:
 
         try:
             value, file_sha256, raw = load_strict_json_snapshot(
-                path, label, contained_by=canonical_episode_root, include_bytes=True,
+                path,
+                label,
+                contained_by=canonical_episode_root,
+                include_bytes=True,
             )
         except TrustRootVerificationError as error:
             raise ValueError(f"{label} is unavailable") from error
-        if not isinstance(value, dict) or set(value) != required_keys or raw != cls._canonical_render_json(value):
+        if (
+            not isinstance(value, dict)
+            or set(value) != required_keys
+            or raw != cls._canonical_render_json(value)
+        ):
             raise ValueError(f"{label} is not strict canonical evidence")
         return value, file_sha256
 
     @classmethod
     def _write_exclusive_render_json(
-        cls, path: Path, value: dict[str, Any], label: str, *, canonical_episode_root: Path,
+        cls,
+        path: Path,
+        value: dict[str, Any],
+        label: str,
+        *,
+        canonical_episode_root: Path,
     ) -> None:
         """Write only below the guarded lexical episode root."""
         from src.hybrid.external_trust_root import (
@@ -963,17 +1134,26 @@ class DirectorAgent:
             candidate = reject_reparse_path(Path(path))
             candidate.relative_to(root)
         except ValueError as error:
-            raise ValueError(f"{label} rejects symlink or path outside canonical episode") from error
+            raise ValueError(
+                f"{label} rejects symlink or path outside canonical episode"
+            ) from error
         try:
             descriptor = os.open(
                 candidate,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
             )
         except FileExistsError as error:
             try:
                 _existing, _existing_sha256, raw = load_strict_json_snapshot(
-                    candidate, label, contained_by=root, include_bytes=True,
+                    candidate,
+                    label,
+                    contained_by=root,
+                    include_bytes=True,
                 )
             except TrustRootVerificationError as snapshot_error:
                 raise ValueError(f"{label} is unavailable") from snapshot_error
@@ -986,7 +1166,12 @@ class DirectorAgent:
             os.fsync(stream.fileno())
 
     def _compiled_render_recovery_evidence(
-        self, fs, render_contract, contract_sha256, intent_path, completion_path,
+        self,
+        fs,
+        render_contract,
+        contract_sha256,
+        intent_path,
+        completion_path,
     ) -> tuple[dict[str, Any], str, dict[str, Any], str]:
         """Authenticate the prepared intent, renderer completion and final bytes."""
         from src.hybrid.artifacts import sha256
@@ -994,7 +1179,9 @@ class DirectorAgent:
         canonical_episode_root = Path(render_contract["canonical_episode_root"])
         intent_keys = {"schema", "render_contract", "render_contract_sha256"}
         intent, intent_sha256 = self._read_canonical_render_json(
-            intent_path, intent_keys, "compiled render intent",
+            intent_path,
+            intent_keys,
+            "compiled render intent",
             canonical_episode_root=canonical_episode_root,
         )
         if (
@@ -1002,13 +1189,21 @@ class DirectorAgent:
             or intent["render_contract"] != render_contract
             or intent["render_contract_sha256"] != contract_sha256
         ):
-            raise ValueError("compiled render intent does not bind current inputs; successor required")
+            raise ValueError(
+                "compiled render intent does not bind current inputs; successor required"
+            )
         completion_keys = {
-            "schema", "intent_sha256", "render_contract_sha256", "output_sha256",
-            "renderer_receipt", "renderer_receipt_sha256",
+            "schema",
+            "intent_sha256",
+            "render_contract_sha256",
+            "output_sha256",
+            "renderer_receipt",
+            "renderer_receipt_sha256",
         }
         completion, completion_sha256 = self._read_canonical_render_json(
-            completion_path, completion_keys, "renderer completion receipt",
+            completion_path,
+            completion_keys,
+            "renderer completion receipt",
             canonical_episode_root=canonical_episode_root,
         )
         renderer_receipt = completion["renderer_receipt"]
@@ -1025,9 +1220,10 @@ class DirectorAgent:
             or not fs.paths.final_video.is_file()
             or sha256(fs.paths.final_video) != completion["output_sha256"]
         ):
-            raise ValueError("renderer completion receipt is not bound to current final bytes")
+            raise ValueError(
+                "renderer completion receipt is not bound to current final bytes"
+            )
         return intent, intent_sha256, renderer_receipt, completion_sha256
-
 
     @staticmethod
     def _advance_compiled_render_state(state: EpisodeStateStore) -> None:
@@ -1041,7 +1237,12 @@ class DirectorAgent:
             raise ValueError("compiled rendering requires PLANNING_ANIMATION state")
 
     def render_compiled_video(
-        self, episode_id: str, pipeline, renderer, *, hold: int = 4,
+        self,
+        episode_id: str,
+        pipeline,
+        renderer,
+        *,
+        hold: int = 4,
         _expected_render_contract: dict[str, Any] | None = None,
         _ownership_assertion=None,
     ) -> dict[str, Any]:
@@ -1053,14 +1254,23 @@ class DirectorAgent:
         # receipt publication and state persistence, across processes.
         with file_lock(fs.paths.qa_dir / ".compiled-render.lock"):
             return self._render_compiled_video_locked(
-                episode_id, pipeline, renderer, hold=hold,
+                episode_id,
+                pipeline,
+                renderer,
+                hold=hold,
                 expected_render_contract=_expected_render_contract,
                 ownership_assertion=_ownership_assertion,
             )
 
     def _render_compiled_video_locked(
-        self, episode_id: str, pipeline, renderer, *, hold: int,
-        expected_render_contract: dict[str, Any] | None, ownership_assertion=None,
+        self,
+        episode_id: str,
+        pipeline,
+        renderer,
+        *,
+        hold: int,
+        expected_render_contract: dict[str, Any] | None,
+        ownership_assertion=None,
     ) -> dict[str, Any]:
         def assert_owner() -> None:
             if ownership_assertion is not None:
@@ -1068,21 +1278,34 @@ class DirectorAgent:
 
         assert_owner()
         fs = EpisodeFS(episode_id, self.config)
-        render_contract = self._compiled_render_contract(episode_id, pipeline, renderer, hold)
-        if expected_render_contract is not None and render_contract != expected_render_contract:
-            raise ValueError("compiled render contract changed while waiting for admission")
+        render_contract = self._compiled_render_contract(
+            episode_id, pipeline, renderer, hold
+        )
+        if (
+            expected_render_contract is not None
+            and render_contract != expected_render_contract
+        ):
+            raise ValueError(
+                "compiled render contract changed while waiting for admission"
+            )
         contract_sha256 = self._compiled_render_contract_sha256(render_contract)
         state = EpisodeStateStore.load(fs.paths.state_json)
         receipt_path = fs.paths.qa_dir / "compiled_render_receipt.json"
         intent_path = fs.paths.qa_dir / "compiled_render_intent.json"
         completion_path = fs.paths.qa_dir / "renderer_completion_receipt.json"
         director_receipt_keys = {
-            "schema", "intent_sha256", "completion_sha256", "render_contract",
-            "render_contract_sha256", "renderer_receipt",
+            "schema",
+            "intent_sha256",
+            "completion_sha256",
+            "render_contract",
+            "render_contract_sha256",
+            "renderer_receipt",
         }
         if intent_path.is_file() and completion_path.is_file():
-            intent, intent_sha256, renderer_receipt, completion_sha256 = self._compiled_render_recovery_evidence(
-                fs, render_contract, contract_sha256, intent_path, completion_path
+            intent, intent_sha256, renderer_receipt, completion_sha256 = (
+                self._compiled_render_recovery_evidence(
+                    fs, render_contract, contract_sha256, intent_path, completion_path
+                )
             )
             director_receipt = {
                 "schema": "compiled-director-render-receipt-v1",
@@ -1094,23 +1317,39 @@ class DirectorAgent:
             }
             if receipt_path.is_file():
                 persisted, _persisted_sha256 = self._read_canonical_render_json(
-                    receipt_path, director_receipt_keys, "compiled Director receipt",
-                    canonical_episode_root=Path(render_contract["canonical_episode_root"]),
+                    receipt_path,
+                    director_receipt_keys,
+                    "compiled Director receipt",
+                    canonical_episode_root=Path(
+                        render_contract["canonical_episode_root"]
+                    ),
                 )
                 if persisted != director_receipt:
-                    raise ValueError("compiled Director receipt does not bind renderer completion")
+                    raise ValueError(
+                        "compiled Director receipt does not bind renderer completion"
+                    )
             else:
                 assert_owner()
                 self._write_exclusive_render_json(
-                    receipt_path, director_receipt, "compiled Director receipt",
-                    canonical_episode_root=Path(render_contract["canonical_episode_root"]),
+                    receipt_path,
+                    director_receipt,
+                    "compiled Director receipt",
+                    canonical_episode_root=Path(
+                        render_contract["canonical_episode_root"]
+                    ),
                 )
             assert_owner()
             self._advance_compiled_render_state(state)
             state.save(fs.paths.state_json)
             return director_receipt
-        if intent_path.exists() or completion_path.exists() or fs.paths.final_video.exists():
-            raise ValueError("unbound render artifacts are quarantined; successor required")
+        if (
+            intent_path.exists()
+            or completion_path.exists()
+            or fs.paths.final_video.exists()
+        ):
+            raise ValueError(
+                "unbound render artifacts are quarantined; successor required"
+            )
         if state.current_state is not EpisodeState.PLANNING_ANIMATION:
             raise ValueError("compiled rendering requires PLANNING_ANIMATION state")
         if hold not in (3, 4, 5):
@@ -1124,7 +1363,9 @@ class DirectorAgent:
         }
         assert_owner()
         self._write_exclusive_render_json(
-            intent_path, intent, "compiled render intent",
+            intent_path,
+            intent,
+            "compiled render intent",
             canonical_episode_root=Path(render_contract["canonical_episode_root"]),
         )
         intent_sha256 = hashlib.sha256(self._canonical_render_json(intent)).hexdigest()
@@ -1159,13 +1400,21 @@ class DirectorAgent:
         )
         # The renderer must have committed the completion before returning;
         # return values and present media alone are intentionally unauthenticated.
-        _intent, _intent_sha256, renderer_receipt, _completion_sha256 = self._compiled_render_recovery_evidence(
-            fs, render_contract, contract_sha256, intent_path, completion_path
+        _intent, _intent_sha256, renderer_receipt, _completion_sha256 = (
+            self._compiled_render_recovery_evidence(
+                fs, render_contract, contract_sha256, intent_path, completion_path
+            )
         )
         if receipt != renderer_receipt or receipt.get("subtitles_sha256") is not None:
-            raise ValueError("compiled renderer return does not match durable completion")
+            raise ValueError(
+                "compiled renderer return does not match durable completion"
+            )
         return self._render_compiled_video_locked(
-            episode_id, pipeline, renderer, hold=hold, expected_render_contract=render_contract,
+            episode_id,
+            pipeline,
+            renderer,
+            hold=hold,
+            expected_render_contract=render_contract,
             ownership_assertion=ownership_assertion,
         )
 
@@ -1181,11 +1430,18 @@ class DirectorAgent:
             capacity = self.__dict__.get("_compiled_render_pool_size", 1)
             if type(capacity) is not int or capacity < 1:
                 raise ValueError("compiled render pool size must be a positive integer")
-            semaphore = self.__dict__["_compiled_render_admission"] = asyncio.Semaphore(capacity)
+            semaphore = self.__dict__["_compiled_render_admission"] = asyncio.Semaphore(
+                capacity
+            )
         return flights, semaphore
 
     async def _admit_compiled_render(
-        self, episode_id: str, pipeline, renderer, hold: int, render_contract: dict[str, Any],
+        self,
+        episode_id: str,
+        pipeline,
+        renderer,
+        hold: int,
+        render_contract: dict[str, Any],
         ownership_assertion=None,
     ) -> dict[str, Any]:
         """Run exactly one synchronous render while holding its full thread budget."""
@@ -1200,7 +1456,11 @@ class DirectorAgent:
             # the caller boundary so cancellation never frees episode ownership
             # while this worker thread still runs.
             return await asyncio.to_thread(
-                self.render_compiled_video, episode_id, pipeline, renderer, hold=hold,
+                self.render_compiled_video,
+                episode_id,
+                pipeline,
+                renderer,
+                hold=hold,
                 _expected_render_contract=render_contract,
                 _ownership_assertion=ownership_assertion,
             )
@@ -1209,17 +1469,30 @@ class DirectorAgent:
                 semaphore.release()
 
     async def render_compiled_video_async(
-        self, episode_id: str, pipeline, renderer, *, hold: int = 4, ownership_assertion=None,
+        self,
+        episode_id: str,
+        pipeline,
+        renderer,
+        *,
+        hold: int = 4,
+        ownership_assertion=None,
     ) -> dict[str, Any]:
         """Await a single-writer, cancellation-safe off-thread compiled render."""
         flights, _admission = self._compiled_render_state()
-        render_contract = self._compiled_render_contract(episode_id, pipeline, renderer, hold)
+        render_contract = self._compiled_render_contract(
+            episode_id, pipeline, renderer, hold
+        )
         contract_sha256 = self._compiled_render_contract_sha256(render_contract)
         existing = flights.get(episode_id)
         if existing is None:
             flight = asyncio.create_task(
                 self._admit_compiled_render(
-                    episode_id, pipeline, renderer, hold, render_contract, ownership_assertion,
+                    episode_id,
+                    pipeline,
+                    renderer,
+                    hold,
+                    render_contract,
+                    ownership_assertion,
                 ),
                 name=f"compiled-render:{episode_id}",
             )
@@ -1233,7 +1506,9 @@ class DirectorAgent:
         else:
             active_contract_sha256, flight = existing
             if active_contract_sha256 != contract_sha256:
-                raise ValueError("compiled render contract conflict for in-flight episode")
+                raise ValueError(
+                    "compiled render contract conflict for in-flight episode"
+                )
         # A cancelled caller must not cancel the owned encode. The retained
         # flight remains the retry target until its thread has fully unwound.
         return await asyncio.shield(flight)
@@ -1750,16 +2025,22 @@ class DirectorAgent:
             EpisodeState.WAITING_THUMBNAIL_APPROVAL,
             EpisodeState.WAITING_VIDEO_APPROVAL,
         }:
-            raise ValueError("approval delivery requires an active thumbnail or video gate")
+            raise ValueError(
+                "approval delivery requires an active thumbnail or video gate"
+            )
 
         def delivery_identity(kind, path):
             receipt_path = fs.paths.qa_dir / "delivery" / f"{kind}.json"
             if receipt_path.is_file():
                 try:
-                    receipt = ApprovalReceipt(**_read_json_file(receipt_path)["approval"])
+                    receipt = ApprovalReceipt(
+                        **_read_json_file(receipt_path)["approval"]
+                    )
                     receipt.verify()
                 except (KeyError, TypeError, ValueError) as error:
-                    raise ValueError("delivery receipt no longer binds current media") from error
+                    raise ValueError(
+                        "delivery receipt no longer binds current media"
+                    ) from error
                 if Path(receipt.artifact_path).resolve() != Path(path).resolve():
                     raise ValueError("delivery path changed")
                 return receipt
@@ -1775,14 +2056,18 @@ class DirectorAgent:
                 receipt_dir=fs.paths.qa_dir / "delivery",
                 after_persist=after_persist,
             )
-        thumbnail_approval = load_approval_receipt(fs.paths.qa_dir / "approval-thumbnail.json")
+        thumbnail_approval = load_approval_receipt(
+            fs.paths.qa_dir / "approval-thumbnail.json"
+        )
         thumbnail_approval.verify()
         if (
             thumbnail_approval.artifact_kind != "thumbnail"
             or thumbnail_approval.artifact_path != thumbnail.artifact_path
             or thumbnail_approval.artifact_sha256 != thumbnail.artifact_sha256
         ):
-            raise ValueError("persisted thumbnail approval does not bind delivered thumbnail")
+            raise ValueError(
+                "persisted thumbnail approval does not bind delivered thumbnail"
+            )
         video = delivery_identity("video", fs.paths.final_video)
         return await controller.deliver_for_approval(
             chat_id=chat_id,

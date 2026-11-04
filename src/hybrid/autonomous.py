@@ -1154,8 +1154,9 @@ class AutonomousTwoGateRunner:
                 raise PolicyError(
                     "published or ambiguous delivery cannot accept successors"
                 )
-            known = {item["request_id"]: item for item in document["jobs"]}
-            total = sum(Decimal(spec["cost"]) for spec in document["job_specs"])
+            candidate = json.loads(json.dumps(document))
+            known = {item["request_id"]: item for item in candidate["jobs"]}
+            total = sum(Decimal(spec["cost"]) for spec in candidate["job_specs"])
             added = False
             for job in jobs:
                 binding = self._job_binding(job)
@@ -1174,6 +1175,22 @@ class AutonomousTwoGateRunner:
                     raise ValueError(
                         "successor predecessor is not bound to this runner"
                     )
+                predecessor_spec = next(
+                    spec for spec in candidate["job_specs"]
+                    if self._job_from_spec(spec).request_id == job.predecessor
+                )
+                predecessor = self._job_from_spec(predecessor_spec)
+                predecessor_qa = candidate["qa"].get(job.predecessor)
+                if job.scene != predecessor.scene:
+                    raise ValueError("successor must bind the predecessor scene")
+                if job.category == "hero":
+                    if not predecessor_qa or predecessor_qa.get("approved") is not True or predecessor.category != "first":
+                        raise ValueError("hero requires an exact approved predecessor")
+                elif job.category in {"alternative", "correction", "hero_retry"}:
+                    if not predecessor_qa or predecessor_qa.get("approved") is not False:
+                        raise ValueError("remediation requires an exact rejected predecessor")
+                else:
+                    raise ValueError("unsupported successor category")
                 self.policy.authorize_paid(
                     job.endpoint,
                     job.cost,
@@ -1183,22 +1200,22 @@ class AutonomousTwoGateRunner:
                 total += job.cost
                 if total > self.policy.episode_cap_usd:
                     raise PolicyError("successor jobs exceed permanent budget ceiling")
-                document["jobs"].append(binding)
-                document["job_specs"].append(self._job_spec(job))
+                candidate["jobs"].append(binding)
+                candidate["job_specs"].append(self._job_spec(job))
                 known[job.request_id] = binding
-                for predecessor in document["jobs"]:
+                for predecessor in candidate["jobs"]:
                     if predecessor["request_id"] == job.predecessor:
                         predecessor["superseded_by"] = job.request_id
                         break
                 added = True
             if not added:
                 return document
-            document["media"] = {}
-            document["delivery"] = {}
-            document.pop("technical_qa", None)
-            document["gates"] = {}
-            document["state"] = "RUNNING"
-            return self._save(document)
+            candidate["media"] = {}
+            candidate["delivery"] = {}
+            candidate.pop("technical_qa", None)
+            candidate["gates"] = {}
+            candidate["state"] = "RUNNING"
+            return self._save(candidate)
 
     async def resume(
         self,
@@ -1559,6 +1576,7 @@ class AutonomousTwoGateRunner:
                             receipt["result_sha256"],
                             True,
                             verdict["reviewer"],
+                            reviewer_identity=identity,
                         )
                         document["qa"][request_id] = {
                             "approved": True,
@@ -1748,6 +1766,7 @@ class AutonomousTwoGateRunner:
                     return self._save(document)
                 self.executor.qa(
                     request_id, receipt["result_sha256"], True, verdict["reviewer"]
+                    , reviewer_identity=identity
                 )
                 document["qa"][request_id] = {
                     "approved": True,
@@ -1789,6 +1808,7 @@ class AutonomousTwoGateRunner:
             raise ValueError("QA receipt hash mismatch")
         self.executor.qa(
             request_id, receipt["result_sha256"], True, verdict["reviewer"]
+            , reviewer_identity=identity
         )
 
     def stage_delivery(
@@ -2214,14 +2234,20 @@ class AutonomousCompiledTestAdapter:
             if job.request_id != request_id:
                 raise ValueError("runner QA receipt is not the active compiled lineage")
             reviewer = verdict.get("reviewer")
-            if not isinstance(reviewer, str) or not reviewer.strip():
-                raise ValueError("runner QA reviewer is missing")
+            reviewer_identity = verdict.get("reviewer_identity")
+            if (
+                not isinstance(reviewer, str)
+                or not reviewer.strip()
+                or not isinstance(reviewer_identity, dict)
+            ):
+                raise ValueError("runner QA reviewer identity is missing")
             self._fenced_mutation(ownership)
             self.pipeline.record_visual_qa(
                 job.scene,
                 receipt["result_sha256"],
                 verdict.get("approved") is True,
                 reviewer,
+                reviewer_identity=reviewer_identity,
             )
 
     async def remediate(
@@ -2266,6 +2292,7 @@ class AutonomousCompiledTestAdapter:
                 or verdict.get("result_sha256") != receipt.get("result_sha256")
                 or not isinstance(verdict.get("reviewer"), str)
                 or not verdict["reviewer"].strip()
+                or not isinstance(verdict.get("reviewer_identity"), dict)
             ):
                 raise ValueError(
                     "runner PASS is incomplete or does not bind compiled receipt"
@@ -2281,6 +2308,7 @@ class AutonomousCompiledTestAdapter:
                 receipt["result_sha256"],
                 True,
                 verdict["reviewer"],
+                reviewer_identity=verdict["reviewer_identity"],
             )
 
     @staticmethod

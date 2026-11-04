@@ -332,20 +332,34 @@ class ProductionRun:
                 price=prices.get(job.request_id),
             )
 
+        async def notify_completed(request_id, receipt):
+            if on_completed is None:
+                return
+            job = next(
+                candidate
+                for candidate in self._baselines.values()
+                if candidate.request_id == request_id
+            )
+            durable = self.executor.inspect(request_id)
+            if (
+                not isinstance(durable, dict)
+                or durable.get("status") != "COMPLETE"
+                or durable.get("result_sha256") != receipt.get("result_sha256")
+            ):
+                raise ValueError(
+                    "completion callback requires current durable executor receipt"
+                )
+            if self._active_images.get(job.scene) == job:
+                await on_completed(durable)
+
         jobs = tuple(self._baselines.values())
         by_request = await run_bounded_wave(
             queue,
             ((job.request_id, job) for job in jobs),
             execute,
             recover_failed=True,
+            on_completed=notify_completed,
         )
-        if on_completed is not None:
-            for job in jobs:
-                if self._active_images.get(job.scene) == job:
-                    await on_completed(
-                        self.executor.inspect(job.request_id)
-                        or by_request[job.request_id]
-                    )
         return {job.scene: by_request[job.request_id] for job in jobs}
 
     def _completed_job_for_result(self, scene_id: str, result_sha256: str):
@@ -365,10 +379,30 @@ class ProductionRun:
         approved: bool,
         reviewer: str,
         failure_code: str | None = None,
+        *,
+        reviewer_identity: dict | None = None,
     ):
+        if self.episode.audio.mode == "LIVE":
+            raise ValueError(
+                "LIVE visual QA requires trusted reviewer evidence; self-asserted identity is non-promotable"
+            )
+        if (
+            reviewer_identity is None
+            and self.episode.audio.mode == "TEST"
+            and (
+                reviewer == "TEST independent visual fixture"
+                or (reviewer == "mock rejection" and approved is False)
+            )
+        ):
+            reviewer_identity = {"subject": reviewer, "issuer": "TEST"}
         job = self._completed_job_for_result(scene_id, result_sha256)
         self.executor.qa(
-            job.request_id, result_sha256, approved, reviewer, failure_code=failure_code
+            job.request_id,
+            result_sha256,
+            approved,
+            reviewer,
+            failure_code=failure_code,
+            reviewer_identity=reviewer_identity,
         )
 
     def eligible_hero_jobs(self, cost: Decimal, endpoint: str):
@@ -514,22 +548,36 @@ class ProductionRun:
                 price=prices.get(job.request_id),
             )
 
+        async def notify_completed(request_id, receipt):
+            if on_completed is None:
+                return
+            job = next(
+                candidate for candidate in jobs if candidate.request_id == request_id
+            )
+            durable = self.executor.inspect(request_id)
+            if (
+                not isinstance(durable, dict)
+                or durable.get("status") != "COMPLETE"
+                or durable.get("result_sha256") != receipt.get("result_sha256")
+            ):
+                raise ValueError(
+                    "completion callback requires current durable executor receipt"
+                )
+            if self._active_images.get(job.scene) == job:
+                await on_completed(durable)
+
         by_request = await run_bounded_wave(
             queue,
             ((job.request_id, job) for job in jobs),
             execute,
             recover_failed=True,
+            on_completed=notify_completed,
         )
-        if on_completed is not None:
-            for job in jobs:
-                if self._active_images.get(job.scene) == job:
-                    await on_completed(
-                        self.executor.inspect(job.request_id)
-                        or by_request[job.request_id]
-                    )
         return {job.scene: by_request[job.request_id] for job in jobs}
 
     def render_ready(self):
+        if self.episode.audio.mode == "LIVE":
+            return False
         if (
             self.motion_inventory is not None
             and self.motion_inventory["status"] != "PASS"
@@ -539,7 +587,13 @@ class ProductionRun:
             self.executor.inspect(job.request_id)
             for job in self._active_images.values()
         ]
-        if not all(row and row.get("qa") is True for row in baselines):
+        if not all(
+            row
+            and row.get("qa") is True
+            and isinstance(row.get("qa_reviewer_identity"), dict)
+            and row["qa_reviewer_identity"].get("subject") != "generator"
+            for row in baselines
+        ):
             return False
         articulated = {
             item["scene_id"]
@@ -555,7 +609,13 @@ class ProductionRun:
         heroes = [
             self.executor.inspect(job.request_id) for job in self._heroes.values()
         ]
-        return all(row and row.get("qa") is True for row in heroes)
+        return all(
+            row
+            and row.get("qa") is True
+            and isinstance(row.get("qa_reviewer_identity"), dict)
+            and row["qa_reviewer_identity"].get("subject") != "generator"
+            for row in heroes
+        )
 
 
 class OperationalPipeline:
@@ -619,7 +679,13 @@ class OperationalPipeline:
         result_sha256 = receipt["result_sha256"]
         job = self.run._completed_job_for_result(scene_id, result_sha256)
         reviewer = "technical-qa"
-        self.run.record_visual_qa(scene_id, result_sha256, False, reviewer)
+        self.run.record_visual_qa(
+            scene_id,
+            result_sha256,
+            False,
+            reviewer,
+            reviewer_identity={"subject": reviewer, "issuer": "TECHNICAL_QA"},
+        )
         atomic_json(
             self.workspace / "qa" / f"{job.request_id}.json",
             {
@@ -772,6 +838,8 @@ class OperationalPipeline:
         approved: bool,
         reviewer: str,
         failure_code: str | None = None,
+        *,
+        reviewer_identity: dict | None = None,
     ):
         if approved and failure_code is not None:
             raise ValueError("approved visual QA cannot carry a failure code")
@@ -818,13 +886,19 @@ class OperationalPipeline:
             ):
                 raise ValueError("technical QA must pass before semantic reviewer")
         self.run.record_visual_qa(
-            scene_id, result_sha256, approved, reviewer, failure_code=failure_code
+            scene_id,
+            result_sha256,
+            approved,
+            reviewer,
+            failure_code=failure_code,
+            reviewer_identity=reviewer_identity,
         )
         qa = {
             "scene_id": scene_id,
             "result_sha256": result_sha256,
             "approved": approved,
             "reviewer": reviewer,
+            "reviewer_identity": reviewer_identity,
             "compilation": self.episode.checksum,
         }
         qa.update(

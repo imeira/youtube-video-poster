@@ -118,9 +118,32 @@ async def _run(root: Path, *, workers: int, prefetch: int, image_count: int) -> 
         queue=cold_queue,
     )
 
+    # Reconstruct the control plane over the same queue and executor database.
+    # Durable completion must survive restart without a second provider submit.
+    restarted_run = _production(
+        root / "cold", workers=workers, image_count=image_count, cas=store
+    )
+    before_restart = provider.submissions
+    provider.maximum = 0
+    restarted_receipts = await restarted_run.dispatch_baselines(
+        provider, prefetch=prefetch
+    )
+    restart = _metrics(
+        restarted_receipts,
+        provider_submissions=provider.submissions - before_restart,
+        maximum=provider.maximum,
+        queue=DurableQueue(
+            restarted_run.baseline_queue_path, workers=workers, prefetch=prefetch
+        ),
+    )
+
     for scene, receipt in cold_receipts.items():
         cold_run.record_visual_qa(
-            scene, receipt["result_sha256"], False, "benchmark-qa"
+            scene,
+            receipt["result_sha256"],
+            False,
+            "benchmark-qa",
+            reviewer_identity={"subject": "benchmark-qa", "issuer": "TEST"},
         )
     before_corrections = provider.submissions
     provider.maximum = 0
@@ -158,6 +181,7 @@ async def _run(root: Path, *, workers: int, prefetch: int, image_count: int) -> 
     return {
         "schema": 1,
         "cold": cold,
+        "restart": restart,
         "warm": warm,
         "corrections": corrections,
         "worker_budget": {

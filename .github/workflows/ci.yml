@@ -149,7 +149,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p reports
-          python -m pytest tests/unit/ -m "not slow" --tb=short -q \
+          python scripts/run_offline_tests.py tests/unit/ -m "not slow" --tb=short -q \
             --junitxml=reports/pytest.xml
 
       - name: Note absent Python tests

@@ -641,17 +641,19 @@ def test_fal_exact_wire_submit_recovery_qa_and_independent_delivery(
             deps.contract["reviewer"],
             Decimal("0.02"),
         )
-        run.record_visual_qa(
-            job.scene,
-            receipt["result_sha256"],
-            rejection["approved"],
-            rejection["reviewer"],
-            failure_code=rejection["failure_code"],
-        )
-        assert run.executor.inspect(job.request_id)["failure_code"] == "ACTION"
-        correction = run.remediation_job(job.scene, {"code": rejection["failure_code"]})
-        assert correction.predecessor == job.request_id
-        assert correction.payload["semantic_remediation"]["code"] == "ACTION"
+        with pytest.raises(ValueError, match="trusted reviewer evidence"):
+            run.record_visual_qa(
+                job.scene,
+                receipt["result_sha256"],
+                rejection["approved"],
+                rejection["reviewer"],
+                failure_code=rejection["failure_code"],
+            )
+        persisted = run.executor.inspect(job.request_id)
+        assert persisted.get("qa") is None
+        assert persisted.get("failure_code") is None
+        with pytest.raises(ValueError, match="rejected hash-bound baseline QA"):
+            run.remediation_job(job.scene, {"code": rejection["failure_code"]})
 
     asyncio.run(exercise())
     sends = []

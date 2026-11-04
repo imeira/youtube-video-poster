@@ -258,7 +258,11 @@ async def test_operational_pipeline_promotes_only_hash_bound_approved_candidates
     with pytest.raises(ValueError, match="eligible compiled receipt"):
         pipeline.record_visual_qa("R001", "wrong", True, "independent-qa")
     pipeline.record_visual_qa(
-        "R001", receipts["R001"]["result_sha256"], True, "independent-qa"
+        "R001",
+        receipts["R001"]["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
     )
     manifest = pipeline.approved_manifest()
 
@@ -365,7 +369,13 @@ async def test_remediation_becomes_the_only_active_promotable_image(tmp_path):
     )
     provider = ImageProvider(tmp_path)
     initial = (await pipeline.dispatch_baselines(provider))["R001"]
-    pipeline.record_visual_qa("R001", initial["result_sha256"], False, "independent-qa")
+    pipeline.record_visual_qa(
+        "R001",
+        initial["result_sha256"],
+        False,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+    )
 
     corrected = (
         await pipeline.dispatch_remediation_wave(
@@ -373,7 +383,11 @@ async def test_remediation_becomes_the_only_active_promotable_image(tmp_path):
         )
     )["R001"]
     pipeline.record_visual_qa(
-        "R001", corrected["result_sha256"], True, "independent-qa"
+        "R001",
+        corrected["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
     )
     manifest = pipeline.approved_manifest()
 
@@ -413,7 +427,13 @@ async def test_remediation_requires_closed_semantic_finding_and_binds_it_to_succ
     )
     baseline = pipeline.run.baseline_jobs()[0]
     result = (await pipeline.dispatch_baselines(ImageProvider(tmp_path)))["R001"]
-    pipeline.record_visual_qa("R001", result["result_sha256"], False, "independent-qa")
+    pipeline.record_visual_qa(
+        "R001",
+        result["result_sha256"],
+        False,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+    )
 
     with pytest.raises(ValueError, match="closed semantic finding"):
         pipeline.run.remediation_job("R001", "fix it")
@@ -463,11 +483,21 @@ async def test_operational_pipeline_promotes_approved_hero_into_render_scene(tmp
     )
     provider = ImageProvider(tmp_path)
     baseline = (await pipeline.dispatch_baselines(provider))["R001"]
-    pipeline.record_visual_qa("R001", baseline["result_sha256"], True, "independent-qa")
+    pipeline.record_visual_qa(
+        "R001",
+        baseline["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+    )
     hero = pipeline.run.eligible_hero_jobs(Decimal(".26"), "seedance")[0]
     hero_receipt = await pipeline.run.executor.run(hero, provider)
     pipeline.record_visual_qa(
-        "R001", hero_receipt["result_sha256"], True, "independent-qa"
+        "R001",
+        hero_receipt["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
     )
     manifest = pipeline.approved_manifest()
 
@@ -660,6 +690,10 @@ async def test_director_dispatches_compiled_baselines_to_independent_visual_qa(
                 "result_sha256": result["qa_packets"]["R001"]["result_sha256"],
                 "approved": True,
                 "reviewer": "independent-qa",
+                "reviewer_identity": {
+                    "subject": "independent-qa",
+                    "issuer": "TEST",
+                },
             }
         ],
     )

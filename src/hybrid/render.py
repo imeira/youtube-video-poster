@@ -45,19 +45,48 @@ def probe(path):
     )
 
 
-def measure_loudness(path):
+def measure_loudness(path, *, threads=1, filter_threads=1):
     """Analyze decoded final audio; loudnorm input values are measurements, not targets."""
-    result = subprocess.run(["ffmpeg", "-hide_banner", "-nostdin", "-v", "info",
-        "-i", str(path), "-map", "0:a:0", "-vn", "-sn", "-af",
-        "loudnorm=I=-16:TP=-1:print_format=json", "-f", "null", "-"],
-        capture_output=True, text=True, timeout=1800, check=False)
+    if any(type(value) is not int or value < 1 for value in (threads, filter_threads)):
+        raise ValueError("positive loudness analysis thread budgets required")
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-v",
+            "info",
+            "-threads",
+            str(threads),
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-filter_threads",
+            str(filter_threads),
+            "-af",
+            "loudnorm=I=-16:TP=-1:print_format=json",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+    )
     if result.returncode:
         raise ValueError("final audio analysis failed")
     matches = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', result.stderr)
     if len(matches) != 1:
         raise ValueError("final audio measurements missing")
     values = json.loads(matches[0])
-    measured = {"integrated_lufs": float(values["input_i"]), "true_peak_dbtp": float(values["input_tp"])}
+    measured = {
+        "integrated_lufs": float(values["input_i"]),
+        "true_peak_dbtp": float(values["input_tp"]),
+    }
     if not all(math.isfinite(v) for v in measured.values()):
         raise ValueError("non-finite final audio measurements")
     return measured
@@ -71,22 +100,31 @@ def _publish_new(source, output):
 
 
 def _canonical_json(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
 
 
 def commit_renderer_completion(
-    path, *, intent_sha256, render_contract_sha256, receipt, canonical_episode_root=None,
+    path,
+    *,
+    intent_sha256,
+    render_contract_sha256,
+    receipt,
+    canonical_episode_root=None,
 ):
     """Durably bind a newly published master to one prepared render intent.
 
     This is deliberately renderer-owned and exclusive: Director recovery must
     never infer completion from an MP4, ffprobe, or a renderer return value.
     """
-    if (
-        not isinstance(receipt, dict)
-        or not all(isinstance(value, str) and len(value) == 64 for value in (
-            intent_sha256, render_contract_sha256, receipt.get("output_sha256")
-        ))
+    if not isinstance(receipt, dict) or not all(
+        isinstance(value, str) and len(value) == 64
+        for value in (
+            intent_sha256,
+            render_contract_sha256,
+            receipt.get("output_sha256"),
+        )
     ):
         raise ValueError("renderer completion requires bound SHA-256 values")
     completion = {
@@ -105,25 +143,36 @@ def commit_renderer_completion(
 
     try:
         root = reject_reparse_path(
-            Path(canonical_episode_root) if canonical_episode_root is not None else Path(path).parent.parent
+            Path(canonical_episode_root)
+            if canonical_episode_root is not None
+            else Path(path).parent.parent
         )
         path = reject_reparse_path(Path(path))
         path.relative_to(root)
     except ValueError as error:
-        raise ValueError("renderer completion rejects symlink or path outside canonical episode") from error
+        raise ValueError(
+            "renderer completion rejects symlink or path outside canonical episode"
+        ) from error
     if not path.parent.is_dir():
         raise ValueError("renderer completion directory is unavailable")
     encoded = _canonical_json(completion)
     try:
         descriptor = os.open(
             path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
     except FileExistsError:
         try:
             _existing, _existing_sha256, raw = load_strict_json_snapshot(
-                path, "renderer completion receipt", contained_by=root, include_bytes=True,
+                path,
+                "renderer completion receipt",
+                contained_by=root,
+                include_bytes=True,
             )
         except TrustRootVerificationError as error:
             raise ValueError("renderer completion receipt is unavailable") from error
@@ -207,16 +256,23 @@ def validate_srt(path, duration):
 
 
 class LocalRenderer:
-    def __init__(self, width=1920, height=1080, fps=30, *, filter_complex_threads=None, scene_workers=1, encoder_threads=1):
+    def __init__(
+        self,
+        width=1920,
+        height=1080,
+        fps=30,
+        *,
+        filter_complex_threads=1,
+        scene_workers=1,
+        encoder_threads=1,
+    ):
         if (
             any(type(n) is not int or n <= 0 for n in (width, height, fps))
             or width % 2
             or height % 2
         ):
             raise ValueError("positive fps and even geometry required")
-        if filter_complex_threads is not None and (
-            type(filter_complex_threads) is not int or filter_complex_threads < 1
-        ):
+        if type(filter_complex_threads) is not int or filter_complex_threads < 1:
             raise ValueError("positive filter-complex thread budget required")
         if type(scene_workers) is not int or scene_workers < 1:
             raise ValueError("positive scene worker budget required")
@@ -227,9 +283,19 @@ class LocalRenderer:
         self.scene_workers, self.encoder_threads = scene_workers, encoder_threads
 
     def render_compiled(
-        self, production, scenes, manifest, audio, srt, output, *, hold=4,
-        completion_receipt_path=None, render_intent_sha256=None,
-        render_contract_sha256=None, canonical_episode_root=None,
+        self,
+        production,
+        scenes,
+        manifest,
+        audio,
+        srt,
+        output,
+        *,
+        hold=4,
+        completion_receipt_path=None,
+        render_intent_sha256=None,
+        render_contract_sha256=None,
+        canonical_episode_root=None,
     ):
         """Render only after the compiled control plane has immutable QA receipts."""
         if not production.render_ready():
@@ -238,7 +304,12 @@ class LocalRenderer:
         if manifest.checksum != approved.checksum:
             raise ValueError("render manifest is not the compiled approved manifest")
         return self.render(
-            scenes, manifest, audio, srt, output, hold=hold,
+            scenes,
+            manifest,
+            audio,
+            srt,
+            output,
+            hold=hold,
             completion_receipt_path=completion_receipt_path,
             render_intent_sha256=render_intent_sha256,
             render_contract_sha256=render_contract_sha256,
@@ -246,9 +317,18 @@ class LocalRenderer:
         )
 
     def render(
-        self, scenes, manifest, audio, srt, output, *, hold=4,
-        completion_receipt_path=None, render_intent_sha256=None,
-        render_contract_sha256=None, canonical_episode_root=None,
+        self,
+        scenes,
+        manifest,
+        audio,
+        srt,
+        output,
+        *,
+        hold=4,
+        completion_receipt_path=None,
+        render_intent_sha256=None,
+        render_contract_sha256=None,
+        canonical_episode_root=None,
     ):
         timeline = timing(scenes, hold=hold, fps=self.fps)
         mode = manifest.mode
@@ -319,10 +399,12 @@ class LocalRenderer:
                             "ffmpeg",
                             "-v",
                             "error",
-                            "-threads",
+                            "-threads:v",
                             str(self.encoder_threads),
                             "-i",
                             str(source),
+                            "-filter_threads",
+                            str(self.filter_complex_threads),
                             "-vf",
                             filters,
                             "-t",
@@ -332,6 +414,8 @@ class LocalRenderer:
                             "libx264",
                             "-preset",
                             "veryfast",
+                            "-threads:v",
+                            str(self.encoder_threads),
                             str(root / f"scene{index}.mp4"),
                         ]
                     )
@@ -353,10 +437,12 @@ class LocalRenderer:
                         "ffmpeg",
                         "-v",
                         "error",
-                        "-threads",
+                        "-threads:v",
                         str(self.encoder_threads),
                         "-i",
                         str(source),
+                        "-filter_threads",
+                        str(self.filter_complex_threads),
                         "-vf",
                         motion,
                         "-frames:v",
@@ -366,6 +452,8 @@ class LocalRenderer:
                         "libx264",
                         "-preset",
                         "veryfast",
+                        "-threads:v",
+                        str(self.encoder_threads),
                         str(root / f"scene{index}.mp4"),
                     ]
                 )
@@ -373,11 +461,20 @@ class LocalRenderer:
                 futures = [pool.submit(command, args) for args in scene_commands]
                 for future in futures:
                     future.result()
-            args = ["ffmpeg", "-v", "error", "-threads", str(self.encoder_threads)]
-            if self.filter_complex_threads is not None:
-                args += ["-filter_complex_threads", str(self.filter_complex_threads)]
+            args = [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-filter_complex_threads",
+                str(self.filter_complex_threads),
+            ]
             for index in range(len(scenes)):
-                args += ["-i", str(root / f"scene{index}.mp4")]
+                args += [
+                    "-threads:v",
+                    str(self.encoder_threads),
+                    "-i",
+                    str(root / f"scene{index}.mp4"),
+                ]
             filters = [
                 f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS[v{i}]"
                 for i in range(len(scenes))
@@ -407,6 +504,8 @@ class LocalRenderer:
                 "libx264",
                 "-preset",
                 "veryfast",
+                "-threads:v",
+                str(self.encoder_threads),
                 "-t",
                 str(timeline["final_seconds"]),
                 str(root / "visual.mp4"),
@@ -418,10 +517,12 @@ class LocalRenderer:
                 "ffmpeg",
                 "-v",
                 "error",
-                "-threads",
+                "-threads:v",
                 str(self.encoder_threads),
                 "-i",
                 str(root / "visual.mp4"),
+                "-threads:a",
+                str(self.encoder_threads),
                 "-i",
                 str(audio_copy),
                 "-map",
@@ -435,7 +536,16 @@ class LocalRenderer:
                 # Preserve approved narration bytes separately and derive the
                 # delivery-only AAC master required by the MP4 contract.
                 audio_operation = "derived_master"
-                master_args += ["-af", "loudnorm=I=-16:TP=-1.0:LRA=11", "-c:a", "aac"]
+                master_args += [
+                    "-filter_threads",
+                    str(self.filter_complex_threads),
+                    "-af",
+                    "loudnorm=I=-16:TP=-1.0:LRA=11",
+                    "-c:a",
+                    "aac",
+                    "-threads:a",
+                    str(self.encoder_threads),
+                ]
             else:
                 master_args += ["-c:a", "copy"]
             master_args.append(str(master))

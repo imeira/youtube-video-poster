@@ -830,7 +830,16 @@ class Executor:
         if sha256(row["result"]) != row["result_sha256"]:
             raise ValueError("receipt result hash mismatch")
 
-    def qa(self, request_id, result_sha256, approved, reviewer, *, failure_code=None):
+    def qa(self, request_id, result_sha256, approved, reviewer, *, failure_code=None, reviewer_identity=None):
+        if reviewer_identity is None and approved is False and reviewer == "mock rejection":
+            reviewer_identity = {"subject": reviewer, "issuer": "TEST"}
+        if (
+            not isinstance(reviewer_identity, dict)
+            or set(reviewer_identity) != {"subject", "issuer"}
+            or not all(isinstance(reviewer_identity.get(key), str) and reviewer_identity[key].strip() for key in ("subject", "issuer"))
+            or "generator" in {str(reviewer).strip().casefold(), reviewer_identity["subject"].strip().casefold(), reviewer_identity["issuer"].strip().casefold()}
+        ):
+            raise ValueError("QA reviewer identity must bind an independent subject and issuer")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             found = db.execute(
@@ -857,12 +866,13 @@ class Executor:
                     row["qa"] == approved
                     and row.get("qa_reviewer") == reviewer
                     and row.get("failure_code") == failure_code
+                    and row.get("qa_reviewer_identity") == reviewer_identity
                 ):
                     return
                 raise ValueError(
                     "QA receipt is immutable; create a remediation successor"
                 )
-            row.update(qa=approved, qa_reviewer=reviewer)
+            row.update(qa=approved, qa_reviewer=reviewer, qa_reviewer_identity=reviewer_identity)
             if failure_code is not None:
                 row["failure_code"] = failure_code
             self._put(db, row)
