@@ -66,29 +66,14 @@ class _TrustedRegistry:
 
 
 def trusted_provider_registry(provider: object) -> _TrustedRegistry:
-    """Build the small trusted composition used by Director integration/tests.
+    """Reject ad-hoc registration until deployed trusted composition exists.
 
-    This factory intentionally derives endpoint identity from the adapter class
-    contract rather than accepting caller-supplied ``qualified`` flags.
+    An in-process adapter, its Python attributes, and a caller-provided endpoint
+    cannot establish the independently provisioned trust service required for a
+    paid LIVE operation.  TEST transports use TEST-only executor paths instead.
     """
-    if getattr(provider, "mode", None) != "LIVE":
-        raise LiveAdmissionError("only a LIVE provider can be registered")
-    # Production adapters expose an endpoint through their submitted Job.  The
-    # sealed transport is allowed solely for offline mechanics coverage and is
-    # never a source of policy, quote, license, or publication authority.
-    endpoint = "fal-ai/flux-2/klein/9b/edit"
-    if provider.__class__.__module__ == "src.hybrid.live":
-        from src.hybrid.live import FalFluxProvider
-
-        if not isinstance(provider, FalFluxProvider):
-            raise LiveAdmissionError("unrecognized production provider adapter")
-    elif getattr(provider, "test_transport", False):
-        endpoint = getattr(provider, "trusted_endpoint", None)
-        if endpoint not in _ALLOWED_ENDPOINTS:
-            raise LiveAdmissionError("sealed transport has no approved endpoint identity")
-    else:
-        raise LiveAdmissionError("unrecognized provider adapter")
-    return _TrustedRegistry({endpoint: provider})
+    del provider
+    raise LiveAdmissionError("trusted composition service is not configured; LIVE remains blocked")
 
 
 class JacoExecutionPolicyResolver:
@@ -139,6 +124,14 @@ class JacoExecutionPolicyResolver:
         job: Job | None = None,
     ) -> LiveAdmission:
         policy = self.resolve()
+        # No configured composition-owned trust service currently verifies the
+        # complete source, issuer, hash/schema, endpoint, model/payload,
+        # request/currency/quote/expiry/price-bound, licensing, and prior
+        # authority chain.  Do not turn local strings or object attributes into
+        # a second admission route while that service is absent.
+        raise LiveAdmissionError(
+            "trusted composition service is not available; LIVE remains blocked"
+        )
         if license_status != "VERIFIED":
             raise LiveAdmissionError("verified license evidence is required before LIVE admission")
         if not isinstance(provider_registry, _TrustedRegistry):

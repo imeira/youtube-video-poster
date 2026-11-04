@@ -15,35 +15,31 @@ from src.config.loader import BudgetConfig, get_config
 from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
 from src.hybrid.execution import Executor, Job, ProviderResult
 from src.hybrid.planner import Config
-from src.state.machine import EpisodeState, EpisodeStateStore
-from src.storage.episode_fs import EpisodeFS
 
 REQUEST = "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9"
 REVISION = "818556d97edb648f"
 
 
-def _manifest(tmp_path: Path) -> Manifest:
+def _manifest(tmp_path: Path, mode: str = "TEST") -> Manifest:
     reference = tmp_path / "reference.png"
     Image.new("RGB", (32, 18), "green").save(reference)
-    asset = FrozenAsset.approve(reference, "independent-qa", "LIVE")
+    asset = FrozenAsset.approve(reference, "independent-qa", mode)
     sheet = tmp_path / "sheet.png"
     contact_sheet((asset,), sheet)
-    return Manifest.freeze((asset,), FrozenAsset.approve(sheet, "independent-qa", "LIVE"), "independent-qa", "LIVE")
+    return Manifest.freeze((asset,), FrozenAsset.approve(sheet, "independent-qa", mode), "independent-qa", mode)
 
 
 def _job(tmp_path: Path) -> Job:
-    return Job("S001", "first", "LIVE", "seedance-v1-5-pro-i2v", {
+    return Job("S001", "first", "TEST", "seedance-v1-5-pro-i2v", {
         "prompt": "Jacó rests safely at Betel", "image_urls": [str(tmp_path / "reference.png")],
         "image_size": {"width": 32, "height": 18},
     }, _manifest(tmp_path), Decimal("0.04"))
 
 
 class SealedTestTransport:
-    """A local deterministic transport: it can prove mechanics, never authority."""
+    """A local deterministic TEST transport; it cannot request LIVE admission."""
 
-    mode = "LIVE"
-    test_transport = True
-    trusted_endpoint = "seedance-v1-5-pro-i2v"
+    mode = "TEST"
 
     def __init__(self, root: Path):
         self.root = root
@@ -81,7 +77,7 @@ def test_current_jaco_policy_preserves_historical_generation_false_and_disables_
     assert policy.historical_generation_authorized is False
 
 
-def test_missing_license_or_unregistered_provider_fails_closed_before_admission(tmp_path):
+def test_live_admission_is_blocked_before_license_or_provider_use(tmp_path):
     from src.hybrid.live_execution_policy import (
         JacoExecutionPolicyResolver,
         LiveAdmissionError,
@@ -91,35 +87,23 @@ def test_missing_license_or_unregistered_provider_fails_closed_before_admission(
     historical.write_text('{"schema":"jaco-factory-financial-reconciliation/1","request_hash":"' + REQUEST + '","revision":"' + REVISION + '","currency":"USD","total_episode_cap":"10.00","status":"APPROVED_USD10","approval_scope":"FINANCIAL_ONLY","authorizes_generation":false}', encoding="utf-8")
     resolver = JacoExecutionPolicyResolver(historical)
 
-    with pytest.raises(LiveAdmissionError, match="license"):
+    with pytest.raises(LiveAdmissionError, match="LIVE remains blocked"):
         resolver.admit(provider=SealedTestTransport(tmp_path), license_status="MISSING", provider_registry={})
     assert not (tmp_path / "candidate.png").exists()
 
 
 @pytest.mark.asyncio
-async def test_sealed_test_transport_exercises_live_executor_admission_without_test_authority(tmp_path):
-    from src.hybrid.live_execution_policy import (
-        JacoExecutionPolicyResolver,
-        trusted_provider_registry,
-    )
-
-    historical = tmp_path / "financial.json"
-    historical.write_text('{"schema":"jaco-factory-financial-reconciliation/1","request_hash":"' + REQUEST + '","revision":"' + REVISION + '","currency":"USD","total_episode_cap":"10.00","status":"APPROVED_USD10","approval_scope":"FINANCIAL_ONLY","authorizes_generation":false}', encoding="utf-8")
+async def test_sealed_test_transport_exercises_test_executor_without_live_authority(tmp_path):
     provider = SealedTestTransport(tmp_path)
     job = _job(tmp_path)
-    resolver = JacoExecutionPolicyResolver(historical)
-    admission = resolver.admit(
-        provider=provider, license_status="VERIFIED", provider_registry=trusted_provider_registry(provider),
-        price_quote={"endpoint": job.endpoint, "amount": "0.04", "evidence": "sealed-test-quote"}, job=job,
-    )
     executor = Executor(tmp_path / "jobs.sqlite3", Config(limit=Decimal("10.00"), concurrency=1))
 
-    receipt = await executor.run(job, provider, authorization=admission.authorization, price=admission.price)
+    receipt = await executor.run(job, provider)
 
     assert receipt["status"] == "COMPLETE"
     assert provider.submits == 1
-    assert receipt["authorization"]["reviewer"] == "CURRENT_POLICY_MACHINE_ADMISSION"
-    assert admission.policy.publication_enabled is False
+    assert receipt["mode"] == "TEST"
+    assert receipt["authorization"] is None
 
 
 def test_test_mode_provider_cannot_be_registered_as_live(tmp_path):
@@ -129,99 +113,99 @@ def test_test_mode_provider_cannot_be_registered_as_live(tmp_path):
     )
 
     transport = SealedTestTransport(tmp_path)
-    transport.mode = "TEST"
-    with pytest.raises(LiveAdmissionError, match="LIVE"):
+    with pytest.raises(LiveAdmissionError, match="trusted composition"):
         trusted_provider_registry(transport)
 
 
-@pytest.mark.asyncio
-async def test_director_handoff_uses_current_policy_then_existing_live_kernel(tmp_path, monkeypatch):
-    """Policy -> Director -> Executor reserve/submit -> QA packet is one slice."""
-    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path / "episodes"))
+def test_caller_controlled_transport_attributes_cannot_register_or_admit_live(tmp_path):
+    """No Python attributes, local quote, or literal license can create LIVE authority."""
+    from src.hybrid.live_execution_policy import (
+        JacoExecutionPolicyResolver,
+        LiveAdmissionError,
+        trusted_provider_registry,
+    )
+
     historical = tmp_path / "financial.json"
-    historical.write_text('{"schema":"jaco-factory-financial-reconciliation/1","request_hash":"' + REQUEST + '","revision":"' + REVISION + '","currency":"USD","total_episode_cap":"10.00","status":"APPROVED_USD10","approval_scope":"FINANCIAL_ONLY","authorizes_generation":false}', encoding="utf-8")
-    config = replace(get_config(), budget=BudgetConfig(target_usd=5, warning_usd=8, hard_limit_usd=10, require_approval_above_limit=True))
-    director = DirectorAgent(config=config)
-    fs = EpisodeFS("JACO_GENESIS28", config)
-    fs.create_dirs()
-    EpisodeStateStore(episode_id="JACO_GENESIS28", current_state=EpisodeState.GENERATING_IMAGES).save(fs.paths.state_json)
-    job = _job(tmp_path)
+    historical.write_text(
+        '{"schema":"jaco-factory-financial-reconciliation/1","request_hash":"' + REQUEST
+        + '","revision":"' + REVISION
+        + '","currency":"USD","total_episode_cap":"10.00","status":"APPROVED_USD10",'
+        '"approval_scope":"FINANCIAL_ONLY","authorizes_generation":false}',
+        encoding="utf-8",
+    )
     provider = SealedTestTransport(tmp_path)
+    provider.mode = "LIVE"
+    provider.test_transport = True
+    provider.trusted_endpoint = "seedance-v1-5-pro-i2v"
+    with pytest.raises(LiveAdmissionError, match="trusted composition"):
+        trusted_provider_registry(provider)
+    test_job = _job(tmp_path)
+    forged_live_job = Job(
+        test_job.scene, test_job.category, "LIVE", test_job.endpoint,
+        {"model": "caller-selected", "payload": "caller-selected"},
+        test_job.manifest, Decimal("9.99"),
+    )
+    with pytest.raises(LiveAdmissionError, match="LIVE remains blocked"):
+        JacoExecutionPolicyResolver(historical).admit(
+            provider=provider,
+            license_status="VERIFIED",
+            provider_registry=object(),
+            price_quote={
+                "endpoint": forged_live_job.endpoint,
+                "amount": "9.99",
+                "evidence": "arbitrary-financial-json-string",
+            },
+            job=forged_live_job,
+        )
+    assert provider.submits == 0
+    assert provider.recovers == 0
+    assert not (tmp_path / "candidate.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_director_cannot_bypass_blocked_live_service_with_raw_executor(tmp_path):
+    """The Director facade must stop before price resolution or executor dispatch."""
+
+    from src.hybrid.live_execution_policy import LiveAdmissionError
+
+    historical = tmp_path / "financial.json"
+    historical.write_text(
+        '{"schema":"jaco-factory-financial-reconciliation/1","request_hash":"' + REQUEST
+        + '","revision":"' + REVISION
+        + '","currency":"USD","total_episode_cap":"10.00","status":"APPROVED_USD10",'
+        '"approval_scope":"FINANCIAL_ONLY","authorizes_generation":false}',
+        encoding="utf-8",
+    )
+    provider = SealedTestTransport(tmp_path)
+    provider.mode = "LIVE"
+    job = _job(tmp_path)
+    live_job = Job(job.scene, job.category, "LIVE", job.endpoint, job.payload, job.manifest, job.cost)
     executor = Executor(tmp_path / "jobs.sqlite3", Config(limit=Decimal("10.00"), concurrency=1))
+    price_calls = []
 
     class Pipeline:
         episode = SimpleNamespace(audio=SimpleNamespace(mode="LIVE"))
         run = SimpleNamespace(executor=executor)
-        def baseline_jobs(self): return (job,)
-        async def dispatch_baselines(self, actual_provider, *, authorizations, prices):
-            assert actual_provider is provider
-            return {job.request_id: await executor.run(job, provider, authorization=authorizations[job.request_id], price=prices[job.request_id])}
-        def prepare_qa_packets(self):
-            receipt = executor.inspect(job.request_id)
-            return {job.request_id: {"result_sha256": receipt["result_sha256"]}}
 
-    result = await director.dispatch_current_policy_baselines(
-        "JACO_GENESIS28", Pipeline(), provider, historical_financial_record=historical,
-        license_status="VERIFIED", price_resolver=lambda _: {"endpoint": job.endpoint, "amount": "0.04", "evidence": "sealed-test-quote"},
-    )
+        @staticmethod
+        def baseline_jobs():
+            return (live_job,)
 
-    assert result["state"] == "VISUAL_QA"
-    assert provider.submits == 1
-    assert executor.inspect(job.request_id)["status"] == "COMPLETE"
+        async def dispatch_baselines(self, *_args, **_kwargs):
+            raise AssertionError("blocked LIVE policy must not dispatch")
 
-
-@pytest.mark.asyncio
-async def test_director_policy_resume_recovers_remote_id_without_second_post_before_qa(tmp_path, monkeypatch):
-    """A fresh process recovers a checkpointed LIVE ID through the same facade."""
-    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path / "episodes"))
-    historical = tmp_path / "financial.json"
-    historical.write_text('{"schema":"jaco-factory-financial-reconciliation/1","request_hash":"' + REQUEST + '","revision":"' + REVISION + '","currency":"USD","total_episode_cap":"10.00","status":"APPROVED_USD10","approval_scope":"FINANCIAL_ONLY","authorizes_generation":false}', encoding="utf-8")
-    config = replace(get_config(), budget=BudgetConfig(target_usd=5, warning_usd=8, hard_limit_usd=10, require_approval_above_limit=True))
-    fs = EpisodeFS("JACO_GENESIS28", config)
-    fs.create_dirs()
-    EpisodeStateStore(episode_id="JACO_GENESIS28", current_state=EpisodeState.GENERATING_IMAGES).save(fs.paths.state_json)
-    job = _job(tmp_path)
-
-    class InterruptedTransport(SealedTestTransport):
-        async def submit(self, submitted_job, request_id, checkpoint):
-            self.submits += 1
-            checkpoint(provider_id="sealed-live-remote-id")
-            Image.new("RGB", (32, 18), "orange").save(self.root / "candidate.png")
-            raise TimeoutError("interrupted after remote ID checkpoint")
-
-    class Pipeline:
-        episode = SimpleNamespace(audio=SimpleNamespace(mode="LIVE"))
-
-        def __init__(self, executor):
-            self.run = SimpleNamespace(executor=executor)
-
-        def baseline_jobs(self): return (job,)
-
-        async def dispatch_baselines(self, provider, *, authorizations, prices):
-            return {job.request_id: await self.run.executor.run(job, provider, authorization=authorizations[job.request_id], price=prices[job.request_id])}
-
-        def prepare_qa_packets(self):
-            receipt = self.run.executor.inspect(job.request_id)
-            return {job.request_id: {"result_sha256": receipt["result_sha256"]}}
-
-    database = tmp_path / "jobs.sqlite3"
-    first = InterruptedTransport(tmp_path)
-    with pytest.raises(TimeoutError, match="remote ID"):
+    config = replace(get_config(), budget=BudgetConfig(
+        target_usd=5, warning_usd=8, hard_limit_usd=10, require_approval_above_limit=True,
+    ))
+    with pytest.raises(LiveAdmissionError, match="trusted composition"):
         await DirectorAgent(config=config).dispatch_current_policy_baselines(
-            "JACO_GENESIS28", Pipeline(Executor(database, Config(limit=Decimal("10.00"), concurrency=1))), first,
-            historical_financial_record=historical, license_status="VERIFIED",
-            price_resolver=lambda _: {"endpoint": job.endpoint, "amount": "0.04", "evidence": "sealed-test-quote"},
+            "JACO_GENESIS28", Pipeline(), provider,
+            historical_financial_record=historical,
+            license_status="VERIFIED",
+            price_resolver=lambda _job: price_calls.append(True),
         )
-    assert Executor(database, Config(limit=Decimal("10.00"), concurrency=1)).inspect(job.request_id)["provider_id"] == "sealed-live-remote-id"
 
-    fresh = SealedTestTransport(tmp_path)
-    result = await DirectorAgent(config=config).dispatch_current_policy_baselines(
-        "JACO_GENESIS28", Pipeline(Executor(database, Config(limit=Decimal("10.00"), concurrency=1))), fresh,
-        historical_financial_record=historical, license_status="VERIFIED",
-        price_resolver=lambda _: {"endpoint": job.endpoint, "amount": "0.04", "evidence": "sealed-test-quote"},
-    )
-
-    assert fresh.submits == 0
-    assert fresh.recovers == 1
-    assert result["state"] == "VISUAL_QA"
-    assert result["canonical_status"]["metrics"]["actual_cost_usd"] == "0.04"
+    assert price_calls == []
+    assert provider.submits == 0
+    assert provider.recovers == 0
+    assert not (tmp_path / "candidate.png").exists()
