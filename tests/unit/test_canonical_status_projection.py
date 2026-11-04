@@ -123,7 +123,8 @@ def test_metrics_only_report_actual_measured_fields_and_unknowns(tmp_path: Path)
 def test_test_only_benchmark_labels_fake_latency_and_measures_real_wall_time():
     from src.hybrid.status_metrics import benchmark_rolling_vs_barrier
 
-    result = benchmark_rolling_vs_barrier([0.01, 0.03, 0.02], cache_hits={1})
+    with pytest.deprecated_call(match="actual runner benchmark"):
+        result = benchmark_rolling_vs_barrier([0.01, 0.03, 0.02], cache_hits={1})
     assert result["mode"] == "TEST_ONLY_FAKE_PROVIDER_LATENCY"
     assert result["real_cost_gain"] == "NOT_MEASURED"
     assert result["benchmark_scope"] == "LOCAL_WALL_TIME_WITH_FAKE_PROVIDER_DELAY"

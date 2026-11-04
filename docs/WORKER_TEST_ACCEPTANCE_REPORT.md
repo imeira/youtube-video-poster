@@ -31,7 +31,7 @@ Observed result on this branch:
 | Read-only queue status | Status consumes the hash-bound JSON snapshot without opening SQLite and reports only `LOCAL_STATUS_ONLY`. |
 | Canonical facade is hash-bound and non-promotable | The facade reopens exact TEST executor receipts, emits only local canonical source records, rejects non-TEST receipts, and labels provider state `TEST_LOCAL_ONLY`. |
 | Unknown cost remains unknown | A TEST receipt with `actual_cost=None` and `charged=None` produces `None` ledger/metric cost rather than zero. Tokens and quota are not invented. |
-| TEST benchmark measures local wall time | `benchmark_rolling_vs_barrier` sleeps only explicit fake TEST delays, reports actual local wall time, labels `LOCAL_WALL_TIME_WITH_FAKE_PROVIDER_DELAY`, and reports `NOT_MEASURED` financial gain. |
+| Actual runner benchmark measures local wall time | `run_actual_runner_benchmark` invokes public runner `start`/`resume` against bounded TEST fake latency, records wall/queue/QA/in-flight/submit evidence, verifies exact-hash resume and fails closed on tamper. The deprecated `benchmark_rolling_vs_barrier` is not scheduler evidence. |
 
 ## Remaining not met
 

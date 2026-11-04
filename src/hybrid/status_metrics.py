@@ -6,6 +6,7 @@ import math
 import os
 import sqlite3
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -136,12 +137,17 @@ class StatusMetricsLedger:
 
 
 def benchmark_rolling_vs_barrier(fake_provider_latency_s: list[float], *, cache_hits: set[int] = frozenset()) -> dict[str, Any]:
-    """Measure local wall time using only explicit TEST fake provider delays.
+    """Deprecated synthetic delay-only comparison.
 
-    This benchmark never creates a provider, transport, or billing record.  Its
-    elapsed times measure local sleep scheduling only and cannot substantiate a
-    LIVE latency or financial claim.
+    It does not invoke ``AutonomousTwoGateRunner`` and therefore cannot prove
+    scheduler, queue, submit, resume, or QA behavior.  Use
+    ``runner_benchmark.run_actual_runner_benchmark`` for that acceptance scope.
     """
+    warnings.warn(
+        "benchmark_rolling_vs_barrier is synthetic; use the actual runner benchmark",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if any(type(value) not in {int, float} or value < 0 or not math.isfinite(value) for value in fake_provider_latency_s):
         raise ValueError("fake TEST latencies must be finite nonnegative numbers")
     effective = [0.0 if index in cache_hits else float(value) for index, value in enumerate(fake_provider_latency_s)]

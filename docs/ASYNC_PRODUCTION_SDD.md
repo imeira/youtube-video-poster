@@ -23,4 +23,4 @@ Resumption rebuilds only hash-bound unfinished jobs from `runner.json`, retains 
 - Every dispatched fresh job has an existing ledger reservation, and cancellation preserves `UNKNOWN` rather than retrying.
 
 ## Measurement
-The deterministic fixture benchmark compares serial (`1`) and bounded parallel (`2`) elapsed time with local delayed TEST providers. It reports fixture latency only; it is not a production, provider, cost, or paid-performance claim.
+The deterministic fixture benchmark invokes public `AutonomousTwoGateRunner.start()` and `resume()` with the same two-node DAG/input assets at serial (`1`) and bounded-parallel (`2`) provider limits. It records local monotonic wall time, queue wait, peak in-flight submissions, actual submit count, independent-QA timestamps, exact-hash fresh-resume submissions, and changed-asset QA invalidation. It repeats three bounded TEST fake-latency runs and uses Python's median. It is not a production, provider, cost, or paid-performance claim.
