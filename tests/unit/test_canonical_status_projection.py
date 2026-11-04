@@ -120,13 +120,16 @@ def test_metrics_only_report_actual_measured_fields_and_unknowns(tmp_path: Path)
     assert report["quota_units"] == 7
 
 
-def test_test_only_benchmark_labels_fake_latency_and_shows_rolling_cache_effect():
+def test_test_only_benchmark_labels_fake_latency_and_measures_real_wall_time():
     from src.hybrid.status_metrics import benchmark_rolling_vs_barrier
 
     result = benchmark_rolling_vs_barrier([0.01, 0.03, 0.02], cache_hits={1})
     assert result["mode"] == "TEST_ONLY_FAKE_PROVIDER_LATENCY"
     assert result["real_cost_gain"] == "NOT_MEASURED"
+    assert result["benchmark_scope"] == "LOCAL_WALL_TIME_WITH_FAKE_PROVIDER_DELAY"
     assert result["rolling_elapsed_s"] < result["barrier_elapsed_s"]
+    assert result["barrier_wall_time_s"] >= result["barrier_elapsed_s"]
+    assert result["rolling_wall_time_s"] >= result["rolling_elapsed_s"]
     assert result["cache_hits"] == 1
 
 
@@ -142,18 +145,18 @@ def test_canonical_status_consumer_reads_only_published_json(tmp_path: Path):
     assert CanonicalStatusConsumer.inspect(tmp_path / "missing.json") == {"status": "STALE", "reason": "MISSING"}
 
 
-def test_production_facade_projects_exact_executor_receipts_not_caller_pass_flags(tmp_path: Path):
-    """The façade derives Jacó status/metrics from the durable executor ledger."""
+def test_production_facade_projects_test_receipts_with_unknown_cost_without_fake_live_claim(tmp_path: Path):
+    """The local façade derives status only from a TEST durable receipt."""
     from src.hybrid.jaco_production_facade import JacoProductionFacade
 
     request_id = "a" * 64
     receipt = {
         "request_id": request_id,
         "status": "COMPLETE",
-        "mode": "LIVE",
+        "mode": "TEST",
         "result_sha256": "b" * 64,
-        "actual_cost": "0.04",
-        "charged": "0.04",
+        "actual_cost": None,
+        "charged": None,
         "authorization": {"reviewer": "CURRENT_POLICY_MACHINE_ADMISSION"},
     }
 
@@ -174,11 +177,11 @@ def test_production_facade_projects_exact_executor_receipts_not_caller_pass_flag
     snapshot = json.loads(Path(published["status"]["path"]).read_text(encoding="utf-8"))
     assert snapshot["canonical_status"] == "BLOCKED"  # QA is not fabricated.
     assert snapshot["sources"]["ledger"]["schema"] == "ledger/v1"
-    assert published["metrics"]["actual_cost_usd"] == "0.04"
+    assert published["metrics"]["actual_cost_usd"] is None
     assert published["metrics"]["pending_requests"] == 0
 
 
-def test_production_facade_fails_closed_for_unknown_executor_cost(tmp_path: Path):
+def test_production_facade_rejects_non_test_executor_receipt(tmp_path: Path):
     from src.hybrid.jaco_production_facade import JacoProductionFacade
 
     request_id = "c" * 64
@@ -198,5 +201,5 @@ def test_production_facade_fails_closed_for_unknown_executor_cost(tmp_path: Path
         def baseline_jobs():
             return (type("Job", (), {"request_id": request_id})(),)
 
-    with pytest.raises(ValueError, match="actual_cost"):
+    with pytest.raises(ValueError, match="TEST executor receipt"):
         JacoProductionFacade(tmp_path).publish_from_executor(Pipeline())

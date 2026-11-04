@@ -88,12 +88,28 @@ def test_compiled_worker_cli_fresh_process_two_gates_terminal_once(tmp_path):
     completion = workspace / "episodes" / "TEST-COMPILED-RECOVERY" / "qa" / "renderer_completion_receipt.json"
     assert completion.is_file()
     completion_bytes = completion.read_bytes()
+    staged = json.loads((root / "runner" / "runner.json").read_text(encoding="utf-8"))["media"]
+    thumbnail_path = Path(staged["thumbnail"]["path"])
+    thumbnail_bytes = thumbnail_path.read_bytes()
+    thumbnail_path.write_bytes(b"tampered TEST thumbnail")
+    code, rejected_thumbnail = _cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "thumbnail", "--test-approval")
+    assert code == 1 and rejected_thumbnail["status"] == "BLOCKED"
+    thumbnail_path.write_bytes(thumbnail_bytes)
+    code, rejected_out_of_order = _cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "video", "--test-approval")
+    assert code == 1 and rejected_out_of_order["status"] == "BLOCKED"
     code, thumbnail = _cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "thumbnail", "--test-approval")
     assert code == 0, thumbnail
     code, video_wait = _cli("run", "--once", "--workspace", str(workspace))
     assert code == 0 and video_wait["state"] == "WAITING_VIDEO_APPROVAL"
     assert sorted((root / "provider").glob("*.TEST.png")) == provider_outputs
     assert completion.read_bytes() == completion_bytes
+    staged = json.loads((root / "runner" / "runner.json").read_text(encoding="utf-8"))["media"]
+    video_path = Path(staged["video"]["path"])
+    video_bytes = video_path.read_bytes()
+    video_path.write_bytes(b"tampered TEST video")
+    code, rejected_video = _cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "video", "--test-approval")
+    assert code == 1 and rejected_video["status"] == "BLOCKED"
+    video_path.write_bytes(video_bytes)
     code, ready = _cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "video", "--test-approval")
     assert code == 0, ready
     code, done = _cli("run", "--once", "--workspace", str(workspace))
@@ -102,6 +118,14 @@ def test_compiled_worker_cli_fresh_process_two_gates_terminal_once(tmp_path):
     assert code == 0 and idle["status"] == "IDLE"
     assert sorted((root / "provider").glob("*.TEST.png")) == provider_outputs
     assert completion.read_bytes() == completion_bytes
+    probe = json.loads(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(video_path)],
+        text=True,
+    ))
+    video_stream = next(stream for stream in probe["streams"] if stream["codec_type"] == "video")
+    audio_stream = next(stream for stream in probe["streams"] if stream["codec_type"] == "audio")
+    assert (video_stream["codec_name"], video_stream["pix_fmt"]) == ("h264", "yuv420p")
+    assert audio_stream["codec_name"] == "aac"
 
 
 @pytest.mark.asyncio

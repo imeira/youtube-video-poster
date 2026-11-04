@@ -2,18 +2,18 @@
 
 ## Scope
 
-`JacoProductionFacade` is the one Jacó operator-status publisher. `DirectorAgent.dispatch_current_policy_baselines()` remains the only LIVE entrypoint: it resolves the immutable permanent policy and delegates to the existing compiled dispatcher and `Executor`. The facade runs only after that durable executor path returns and reopens its receipts; it never owns a provider, queue, runner, lease, retry, human gate, render, or publication path.
+`JacoProductionFacade` is the one Jacó **TEST-local** operator-status publisher for this acceptance slice. It accepts only an existing compiled pipeline's exact durable TEST executor receipts and reopens them; it never owns a provider, queue, runner, lease, retry, human gate, render, policy admission, or publication path. Any LIVE policy/Director path remains outside this facade's TEST contract.
 
 The existing `DurableEpisodeWorker` stays the sole TEST queue/lease runner. It is not duplicated for LIVE execution. Its cancellation/expired-lease path remains `UNKNOWN_REQUIRES_RECONCILIATION` with no automatic retry.
 
 ## Inputs and closed output
 
-The facade accepts only a compiled pipeline whose baseline job IDs resolve to `COMPLETE`, `LIVE` receipts in the existing executor. Each receipt must bind its exact request ID, result hash, charged cost, and actual cost. It produces four hashed local source documents and uses `CanonicalStatusProducer` to publish exactly one canonical snapshot at the established Jacó request root:
+The facade accepts only a compiled pipeline whose baseline job IDs resolve to `COMPLETE`, `TEST` receipts in the existing executor. Each receipt must bind its exact request ID and result hash. `actual_cost` and `charged` may be unknown and remain `null`; the facade never invents money, timing, tokens, or quota. It produces four hashed local source documents and uses `CanonicalStatusProducer` to publish exactly one canonical snapshot at the established Jacó request root:
 
 - `manifest/v1` derives candidate hashes from executor receipts;
 - `policy-qa/v1` is `PASS` only when the existing write-once executor QA receipts are all true; otherwise `PENDING`;
-- `ledger/v1` derives actual/pending amounts from durable receipt fields;
-- `provider-eligibility/v1` is `ELIGIBLE` only when each receipt records the existing policy-admission reviewer.
+- `ledger/v1` derives actual/pending amounts only when durable receipt fields measured them, otherwise preserves unknown;
+- `provider-eligibility/v1` is `TEST_LOCAL_ONLY` even when receipts contain the expected policy-admission reviewer.
 
 The resulting projection is always `LOCAL_STATUS_ONLY`. It is not provider billing readback, real-provider qualification, financial authorization, QA authority, human approval, or publication authority.
 
@@ -21,15 +21,14 @@ The resulting projection is always `LOCAL_STATUS_ONLY`. It is not provider billi
 
 ## Transitions and recovery
 
-1. Policy-qualified Director dispatch calls the existing executor.
-2. The executor durably reserves, submits once, checkpoints a remote ID, and writes the completion receipt before the Director moves to `VISUAL_QA`.
-3. The facade projects that exact receipt; absent QA stays `BLOCKED` rather than fabricating `PASS`.
-4. `DirectorAgent.record_compiled_visual_qa()` reprojects only after the existing hash-bound QA write. All-PASS becomes local `PENDING_READBACK_REQUIRED`, never approval.
-5. A crash after the remote-ID checkpoint is recovered by a fresh executor through `recover`, not another POST. Unknown/cancelled worker ownership remains quarantined.
+1. The durable TEST executor checkpoints a local fixture ID and writes its completion receipt before the runner moves to `VISUAL_QA`.
+2. The facade reopens and projects that exact TEST receipt; absent QA stays `BLOCKED` rather than fabricating `PASS`.
+3. `DirectorAgent.record_compiled_visual_qa()` can reproject only after the existing hash-bound QA write. All-PASS remains local `PENDING_READBACK_REQUIRED`, never approval.
+4. A crash after the remote-ID checkpoint is recovered by a fresh executor through `recover`, not another POST. Unknown/cancelled worker ownership remains quarantined.
 
 ## Negative acceptance
 
-- foreign/missing scope, hash mismatch, source modification, missing fields, stale source, malformed receipt, non-LIVE receipt, duplicate request identity, missing license/policy admission, unknown cost, and non-PASS QA fail closed;
+- foreign/missing scope, hash mismatch, source modification, missing fields, stale source, malformed receipt, non-TEST receipt, duplicate request identity, unknown cost normalization, and non-PASS QA fail closed;
 - receipt-derived status cannot be made PASS by caller flags;
 - sealed TEST transport proves transaction mechanics only and does not qualify a provider or authorize real production;
 - local worker status reads JSON only and never open SQLite.

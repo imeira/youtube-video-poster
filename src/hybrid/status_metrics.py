@@ -5,6 +5,8 @@ import json
 import math
 import os
 import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
@@ -134,8 +136,36 @@ class StatusMetricsLedger:
 
 
 def benchmark_rolling_vs_barrier(fake_provider_latency_s: list[float], *, cache_hits: set[int] = frozenset()) -> dict[str, Any]:
-    """Deterministic TEST-only scheduling model; it neither calls providers nor costs money."""
+    """Measure local wall time using only explicit TEST fake provider delays.
+
+    This benchmark never creates a provider, transport, or billing record.  Its
+    elapsed times measure local sleep scheduling only and cannot substantiate a
+    LIVE latency or financial claim.
+    """
     if any(type(value) not in {int, float} or value < 0 or not math.isfinite(value) for value in fake_provider_latency_s):
         raise ValueError("fake TEST latencies must be finite nonnegative numbers")
     effective = [0.0 if index in cache_hits else float(value) for index, value in enumerate(fake_provider_latency_s)]
-    return {"mode": "TEST_ONLY_FAKE_PROVIDER_LATENCY", "barrier_elapsed_s": sum(effective), "rolling_elapsed_s": max(effective, default=0.0), "cache_hits": len(cache_hits), "real_cost_gain": "NOT_MEASURED"}
+
+    def delay(seconds: float) -> None:
+        time.sleep(seconds)
+
+    barrier_started = time.perf_counter()
+    for latency in effective:
+        delay(latency)
+    barrier_wall_time_s = time.perf_counter() - barrier_started
+
+    rolling_started = time.perf_counter()
+    if effective:
+        with ThreadPoolExecutor(max_workers=len(effective), thread_name_prefix="test-fake-delay") as pool:
+            tuple(pool.map(delay, effective))
+    rolling_wall_time_s = time.perf_counter() - rolling_started
+    return {
+        "mode": "TEST_ONLY_FAKE_PROVIDER_LATENCY",
+        "benchmark_scope": "LOCAL_WALL_TIME_WITH_FAKE_PROVIDER_DELAY",
+        "barrier_elapsed_s": sum(effective),
+        "rolling_elapsed_s": max(effective, default=0.0),
+        "barrier_wall_time_s": barrier_wall_time_s,
+        "rolling_wall_time_s": rolling_wall_time_s,
+        "cache_hits": len(cache_hits),
+        "real_cost_gain": "NOT_MEASURED",
+    }

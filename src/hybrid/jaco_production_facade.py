@@ -63,6 +63,12 @@ class JacoProductionFacade:
         return amount
 
     @staticmethod
+    def _optional_money(value: object, field: str) -> Decimal | None:
+        if value is None:
+            return None
+        return JacoProductionFacade._money(value, field)
+
+    @staticmethod
     def _receipt(executor, request_id: str) -> dict[str, Any]:
         receipt = executor.inspect(request_id)
         required = {"request_id", "status", "mode", "result_sha256", "actual_cost", "charged"}
@@ -71,13 +77,13 @@ class JacoProductionFacade:
             or not required.issubset(receipt)
             or receipt.get("request_id") != request_id
             or receipt.get("status") != "COMPLETE"
-            or receipt.get("mode") != "LIVE"
+            or receipt.get("mode") != "TEST"
             or not isinstance(receipt.get("result_sha256"), str)
             or len(receipt["result_sha256"]) != 64
         ):
-            raise ValueError("canonical status requires exact completed LIVE executor receipt")
-        JacoProductionFacade._money(receipt["actual_cost"], "actual_cost")
-        JacoProductionFacade._money(receipt["charged"], "charged")
+            raise ValueError("canonical status requires exact completed TEST executor receipt")
+        JacoProductionFacade._optional_money(receipt["actual_cost"], "actual_cost")
+        JacoProductionFacade._optional_money(receipt["charged"], "charged")
         return receipt
 
     def publish_from_executor(self, pipeline) -> dict[str, Any]:
@@ -109,8 +115,13 @@ class JacoProductionFacade:
             and admission.get("reviewer") == "CURRENT_POLICY_MACHINE_ADMISSION"
             for admission in admissions
         )
-        actual_cost = sum((self._money(receipt["actual_cost"], "actual_cost") for receipt in receipts), Decimal(0))
-        pending_cost = sum((self._money(receipt["charged"], "charged") for receipt in receipts), Decimal(0)) - actual_cost
+        # TEST receipts can prove a local transaction but cannot prove billing.
+        # Aggregate only fully observed cost fields; a partial/absent observation
+        # stays unknown rather than being turned into zero.
+        actual_costs = [self._optional_money(receipt["actual_cost"], "actual_cost") for receipt in receipts]
+        charged_costs = [self._optional_money(receipt["charged"], "charged") for receipt in receipts]
+        actual_cost = None if any(value is None for value in actual_costs) else sum(actual_costs, Decimal(0))
+        pending_cost = None if any(value is None for value in charged_costs) or actual_cost is None else sum(charged_costs, Decimal(0)) - actual_cost
         scope = {"request_id": REQUEST_ID, "active_revision": REVISION, "episode": EPISODE}
         sources = {
             "manifest": self._write_source("manifest", {
@@ -124,12 +135,13 @@ class JacoProductionFacade:
             }),
             "ledger": self._write_source("ledger", {
                 "schema": "ledger/v1", "scope": scope,
-                "actual_cost_usd": str(actual_cost), "pending_cost_usd": str(pending_cost),
+                "actual_cost_usd": None if actual_cost is None else str(actual_cost),
+                "pending_cost_usd": None if pending_cost is None else str(pending_cost),
                 "receipt_hashes": [self._hash(receipt) for receipt in receipts],
             }),
             "provider_eligibility": self._write_source("provider_eligibility", {
                 "schema": "provider-eligibility/v1", "scope": scope,
-                "status": "ELIGIBLE" if eligible else "BLOCKED",
+                "status": "TEST_LOCAL_ONLY" if eligible else "BLOCKED",
                 "policy_admission_receipt_hashes": [self._hash(admission) if isinstance(admission, dict) else None for admission in admissions],
             }),
         }
