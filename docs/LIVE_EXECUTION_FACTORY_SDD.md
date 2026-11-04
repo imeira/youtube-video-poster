@@ -1,60 +1,49 @@
-# SDD — fail-closed LIVE preflight boundary
+# SDD — configured execution composition
 
-## Current state: preflight-only, not qualified for execution
+## State and scope
 
-`LiveExecutionService` has no provider factory, transport selector, provider import,
-reservation, settlement, or call to `Executor.run`. `dispatch()` first revalidates the
-write-once preflight hash and exact job binding, then always raises `PermissionError`.
-There is no environment flag, policy field, test builder, or package configuration that
-can turn this into a dispatch path.
+`ConfiguredTestExecutionComposition` is the sole newly-composed execution path. It composes the existing `AuthenticatedBudgetBridge` with its bridge-created `Executor`; it does not accept a raw ledger, policy mapping, provider/license `VERIFIED` string, quote dictionary, or a LIVE adapter. `production_eligible` is always an empty tuple. Consequently no object produced here can issue a usable LIVE `Authorization`, construct a production provider, or change the default LIVE deny.
 
-This is intentional. The repository has no existing externally administered signature
-verification mechanism for LIVE trust roots/independent reviews and does not integrate
-the standalone GET-only FAL billing consumer into a durable authenticated receipt,
-reservation, or settlement path. Its transport readback is informational and does not
-establish authorization or qualification. Hashes produced by this package are integrity
-labels, not authority. The legacy `FalFluxProvider` is not changed or selected by this
-service.
+The historical Jacó USD 10 financial record remains financial-only. `JacoExecutionPolicyResolver` and `DirectorAgent.dispatch_current_policy_baselines()` retain their LIVE fail-closed behavior until the provisioning contract below is met.
 
-## Inputs and persistence
+## TEST composition contract
 
-The constructor requires an absolute, non-link `trust_root` outside the package. Its
-closed `live-trust-root.json` contract is deliberately limited to
-`verification: "UNAVAILABLE"`; claiming a local root is verified is rejected. Identity
-and assets QA must be separate persisted regular files below that root, use closed
-schemas, bind the exact request and frozen manifest, and name distinct reviewers. Their
-bytes are hashed only to retain lineage; independence remains explicitly unverified.
+The factory interface is:
 
-Policy schema 2 and quote schema are closed. A quote is only a **reserved maximum**:
-it must bind endpoint and maximum, and expires in at most 300 seconds. The preflight
-records `actual_cost_usd: "UNKNOWN"` and `billing_status: "UNAUTHENTICATED"`; it never
-maps `Job.cost` or a provider result to actual cost. Evidence is bounded by depth,
-items, keys, strings and total serialized bytes, and rejects credential-like keys and
-Bearer/basic/API-key-like values before persistence.
+```python
+ConfiguredTestExecutionComposition.from_authenticated_budget_bridge(
+    bridge: AuthenticatedBudgetBridge,
+    executor_database: Path,
+    executor_config: Config,
+    provider_factory: Callable[[], Provider],
+    capability_root: Path,
+    clock: Callable[[], float],
+)
+```
 
-Preflight uses a write-once path and readback. Its self-hash covers every other field.
-Dispatch rehashes it and validates the request/endpoint/manifest binding before the
-unconditional deny, so a later execution implementation cannot consume a changed
-preflight unnoticed.
+It first revalidates the bridge's authenticated TEST receipt and makes the executor through `bridge.create_executor`. At execution, it requires an exact `Job(mode="TEST")`, the policy-authorized endpoint, a bounded model field, a fresh finite quote expiry (at most five minutes), and closed QA evidence `{verdict: "PASS", request: job.request_id}`. It writes an exclusive/fsync/read-back `TEST_EXECUTION_CAPABILITY` record containing the request payload hash, endpoint, model, USD currency, quote expiry, authenticated budget scope, and QA-evidence hash. It then calls only:
 
-## Required work before any LIVE implementation
+```
+bridge.admit_executor_intent(executor, job)
+executor.run(job, factory_provider, submit_prepared=True)
+```
 
-1. Add an external, configured trust-root verifier and signed, persisted review/approval
-   receipts; prove reviewer independence from a verifier-controlled identity, not names.
-2. Add an authenticated billing-evidence adapter. Reserve a conservative maximum before
-   a network operation; retain the reservation and block later spend while actual cost is
-   `UNKNOWN`; settle only a bound authenticated billing receipt.
-3. Build an isolated TEST-only transport factory outside the production package. It must
-   be impossible to select it through package policy/configuration and must reject network
-   configuration before construction.
-4. Integrate the qualified runner with the real coordinator and add WAL/fsync recovery
-   tests for crashes before/after reserve, submit, provider receipt, and settlement with
-   no resubmit. This SDD does **not** claim that such integration exists.
+The existing bridge therefore performs `PREPARED → reserve → durable admitted marker`; the existing executor rereads the exact claim/marker immediately before provider submission and uses its normal durable recovery logic. The composition creates the provider only after that admission succeeds. It has no direct executor/ledger/provider bypass.
 
-## Tests exercised now
+TEST providers are isolated local fakes. A provider returned as `LIVE`, a LIVE job, an expired quote, missing/tampered QA binding, unavailable bridge, or a policy/endpoint mismatch fails before provider submission. Capability receipts are immutable lineage records, not financial settlement, provider qualification, or LIVE authority.
 
-`tests/unit/test_live_execution_service.py` verifies: preflight persistence and explicit
-unqualified status; unconditional no-executor/no-ledger dispatch blocking including
-replay; preflight tamper detection; closed schema/finite quote window; inline QA and
-Bearer evidence rejection; and absence of a package LIVE factory/test transport selector.
-These are preflight/blocking tests, not provider-integration or billing tests.
+## Provisioning contract required for LIVE eligibility
+
+A production composition remains unavailable until deployment supplies all of the following independently administered stores and adapters:
+
+1. A pinned `PRODUCTION` Ed25519 root containing distinct authorized QA and LICENSE signer keys, revocation data, key validity windows, and an evidence root outside the package.
+2. Signed, closed, finite-expiry QA and license attestations bound to the immutable request payload, endpoint/model, manifest, Jacó policy digest, and provider identity. QA provenance is not financial authority.
+3. A configured provider-qualification registry signed by the production authority. Every entry must bind adapter implementation hash, endpoint, model, geometry/payload schema, credential source identity, supported recovery/readback contract, and finite qualification expiry. The current registry is empty.
+4. An authenticated provider quote/price record in USD, bound to request, endpoint, model, payload hash, quote ID, maximum amount, currency, and expiry; and a provider billing readback adapter that produces the existing canonical settlement receipt bound to the durable remote request ID.
+5. A LIVE-capable authenticated budget authority and a composition-owned coordinator that binds the durable intent, reservation, remote-ID checkpoint, recovery, and settlement. TEST budget receipts/fake transports must be rejected here even when their bytes have valid hashes or signatures.
+
+No additional routine human approval is introduced: after those deployment prerequisites are installed, the existing routine gates remain thumbnail and final-video acceptance. Publication remains separately disabled until its existing exact command and receipt contract are satisfied.
+
+## Acceptance tests
+
+`tests/unit/test_live_execution_composition.py` runs the actual authenticated TEST bridge, its executor, its durable reservation/marker gates, and a TEST-only provider. It verifies persisted capability bindings and rejects TEST→LIVE escalation, stale expiry, unavailable/forged bridge, and forged QA before any provider effect. `tests/unit/test_live_execution_policy.py` continues to verify that the Jacó LIVE resolver and Director path remain blocked.
