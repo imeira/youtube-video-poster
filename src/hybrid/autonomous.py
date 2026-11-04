@@ -249,8 +249,14 @@ class OperationalMetricsLedger:
         self.snapshot_path = self.path.with_suffix(".snapshot.json")
         self.lock_path = self.path.with_suffix(".metrics.lock")
         self.read_only = read_only
-        catalog = self._DEFAULT_MODEL_CATALOG if model_catalog is None else frozenset(model_catalog)
-        if any(not isinstance(item, str) or not item or len(item) > 128 for item in catalog):
+        catalog = (
+            self._DEFAULT_MODEL_CATALOG
+            if model_catalog is None
+            else frozenset(model_catalog)
+        )
+        if any(
+            not isinstance(item, str) or not item or len(item) > 128 for item in catalog
+        ):
             raise ValueError("model catalog must contain bounded model identifiers")
         self.model_catalog = catalog
         if read_only:
@@ -272,7 +278,9 @@ class OperationalMetricsLedger:
                   PRIMARY KEY(identity_kind, identity_value, conflicting_payload_sha256))""")
                 db.commit()
                 rows = list(db.execute("SELECT * FROM observations"))
-                conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
+                conflicts = db.execute(
+                    "SELECT COUNT(*) FROM observation_conflicts"
+                ).fetchone()[0]
                 self._write_snapshot("CURRENT", self._report_from_rows(rows, conflicts))
             finally:
                 db.close()
@@ -281,7 +289,9 @@ class OperationalMetricsLedger:
         import sqlite3
 
         if self.read_only:
-            db = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+            db = sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=30
+            )
         else:
             db = sqlite3.connect(self.path, timeout=30)
             db.execute("PRAGMA journal_mode=WAL")
@@ -293,12 +303,16 @@ class OperationalMetricsLedger:
     def _text(value, field, optional=False):
         if value is None and optional:
             return None
-        if not isinstance(value, str) or not OperationalMetricsLedger._OPAQUE_IDENTIFIER.fullmatch(value):
+        if not isinstance(
+            value, str
+        ) or not OperationalMetricsLedger._OPAQUE_IDENTIFIER.fullmatch(value):
             raise ValueError(f"{field} must be a bounded opaque identifier")
         # Identity is not display text: accepted caller values are stored and keyed exactly.
         return value
 
-    def _write_snapshot(self, status: str, report: dict[str, Any] | None = None) -> None:
+    def _write_snapshot(
+        self, status: str, report: dict[str, Any] | None = None
+    ) -> None:
         document: dict[str, Any] = {
             "schema": self._SNAPSHOT_SCHEMA,
             "status": status,
@@ -325,60 +339,109 @@ class OperationalMetricsLedger:
     @classmethod
     def _valid_bucket(cls, value: object) -> bool:
         if not isinstance(value, dict) or set(value) != {
-            "requests", "money_usd", "unknown_billing_requests", "unauthenticated_billing_requests"
+            "requests",
+            "money_usd",
+            "unknown_billing_requests",
+            "unauthenticated_billing_requests",
         }:
             return False
-        return (
-            all(cls._nonnegative_integer(value[key]) for key in (
-                "requests", "unknown_billing_requests", "unauthenticated_billing_requests"
-            ))
-            and (value["money_usd"] is None or cls._valid_money(value["money_usd"]))
-        )
+        return all(
+            cls._nonnegative_integer(value[key])
+            for key in (
+                "requests",
+                "unknown_billing_requests",
+                "unauthenticated_billing_requests",
+            )
+        ) and (value["money_usd"] is None or cls._valid_money(value["money_usd"]))
 
     @classmethod
     def _valid_report(cls, report: object) -> bool:
         expected = {
-            "schema", "requests", "money_usd", "unknown_billing_requests",
-            "unauthenticated_billing_requests", "tokens", "quota_units", "latency_s",
-            "unknown_timestamp_requests", "conflicts", "models", "by_episode",
-            "by_month_utc", "by_experiment", "by_worker",
+            "schema",
+            "requests",
+            "money_usd",
+            "unknown_billing_requests",
+            "unauthenticated_billing_requests",
+            "tokens",
+            "quota_units",
+            "latency_s",
+            "unknown_timestamp_requests",
+            "conflicts",
+            "models",
+            "by_episode",
+            "by_month_utc",
+            "by_experiment",
+            "by_worker",
         }
-        if not isinstance(report, dict) or set(report) != expected or report.get("schema") != 1:
+        if (
+            not isinstance(report, dict)
+            or set(report) != expected
+            or report.get("schema") != 1
+        ):
             return False
-        if not all(cls._nonnegative_integer(report[key]) for key in (
-            "requests", "unknown_billing_requests", "unauthenticated_billing_requests",
-            "quota_units", "unknown_timestamp_requests", "conflicts",
-        )):
+        if not all(
+            cls._nonnegative_integer(report[key])
+            for key in (
+                "requests",
+                "unknown_billing_requests",
+                "unauthenticated_billing_requests",
+                "quota_units",
+                "unknown_timestamp_requests",
+                "conflicts",
+            )
+        ):
             return False
-        if report["money_usd"] is not None and not cls._valid_money(report["money_usd"]):
+        if report["money_usd"] is not None and not cls._valid_money(
+            report["money_usd"]
+        ):
             return False
         latency = report["latency_s"]
-        if latency is not None and (type(latency) not in {int, float} or not math.isfinite(latency) or latency < 0):
+        if latency is not None and (
+            type(latency) not in {int, float}
+            or not math.isfinite(latency)
+            or latency < 0
+        ):
             return False
         tokens = report["tokens"]
-        if not isinstance(tokens, dict) or set(tokens) != {"input", "cached", "output", "reasoning"}:
+        if not isinstance(tokens, dict) or set(tokens) != {
+            "input",
+            "cached",
+            "output",
+            "reasoning",
+        }:
             return False
         if not all(cls._nonnegative_integer(value) for value in tokens.values()):
             return False
         models = report["models"]
         if not isinstance(models, list) or models != sorted(set(models)):
             return False
-        if any(not isinstance(model, str) or not model or len(model) > 128 for model in models):
+        if any(
+            not isinstance(model, str) or not model or len(model) > 128
+            for model in models
+        ):
             return False
         for dimension in ("by_episode", "by_month_utc", "by_experiment", "by_worker"):
             buckets = report[dimension]
-            if not isinstance(buckets, dict) or not all(cls._valid_bucket(bucket) for bucket in buckets.values()):
+            if not isinstance(buckets, dict) or not all(
+                cls._valid_bucket(bucket) for bucket in buckets.values()
+            ):
                 return False
-            if dimension == "by_month_utc" and any(not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", key) for key in buckets):
+            if dimension == "by_month_utc" and any(
+                not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", key) for key in buckets
+            ):
                 return False
             if dimension == "by_experiment" and set(buckets) - {"true", "false"}:
                 return False
-            if dimension in {"by_episode", "by_worker"} and any(not cls._OPAQUE_IDENTIFIER.fullmatch(key) for key in buckets):
+            if dimension in {"by_episode", "by_worker"} and any(
+                not cls._OPAQUE_IDENTIFIER.fullmatch(key) for key in buckets
+            ):
                 return False
         return True
 
     @classmethod
-    def read_snapshot(cls, database_path: Path, *, now: datetime | None = None) -> dict[str, Any]:
+    def read_snapshot(
+        cls, database_path: Path, *, now: datetime | None = None
+    ) -> dict[str, Any]:
         """Read only an atomically replaced metrics report; never open SQLite."""
         snapshot_path = Path(database_path).with_suffix(".snapshot.json")
         if not snapshot_path.is_file():
@@ -388,7 +451,11 @@ class OperationalMetricsLedger:
             if not isinstance(document, dict):
                 raise TypeError("snapshot must be an object")
             claimed_hash = document.get("snapshot_sha256")
-            payload = {key: value for key, value in document.items() if key != "snapshot_sha256"}
+            payload = {
+                key: value
+                for key, value in document.items()
+                if key != "snapshot_sha256"
+            }
             if document.get("status") not in {"CURRENT", "WRITER_IN_PROGRESS"}:
                 raise ValueError("snapshot status schema mismatch")
             expected = {"schema", "status", "generated_at_utc", "snapshot_sha256"}
@@ -396,12 +463,16 @@ class OperationalMetricsLedger:
                 expected.add("report")
             if set(document) != expected:
                 raise ValueError("snapshot envelope schema mismatch")
-            if not isinstance(claimed_hash, str) or claimed_hash != _digest_json(payload):
+            if not isinstance(claimed_hash, str) or claimed_hash != _digest_json(
+                payload
+            ):
                 raise ValueError("snapshot hash mismatch")
             if document.get("schema") != cls._SNAPSHOT_SCHEMA:
                 raise ValueError("snapshot schema mismatch")
             generated_at = datetime.fromisoformat(document["generated_at_utc"])
-            if generated_at.tzinfo is None or generated_at.utcoffset() != UTC.utcoffset(generated_at):
+            if generated_at.tzinfo is None or generated_at.utcoffset() != UTC.utcoffset(
+                generated_at
+            ):
                 raise ValueError("snapshot timestamp must be UTC")
             if document.get("status") != "CURRENT" or "report" not in document:
                 return {"status": "STALE", "reason": "WRITER_IN_PROGRESS"}
@@ -412,7 +483,11 @@ class OperationalMetricsLedger:
             if age < 0:
                 return {"status": "STALE", "reason": "SNAPSHOT_CLOCK_POLICY"}
             if age > cls._SNAPSHOT_MAX_AGE_SECONDS:
-                return {"status": "STALE", "reason": "SNAPSHOT_EXPIRED", "generated_at_utc": document["generated_at_utc"]}
+                return {
+                    "status": "STALE",
+                    "reason": "SNAPSHOT_EXPIRED",
+                    "generated_at_utc": document["generated_at_utc"],
+                }
             if not cls._valid_report(document["report"]):
                 raise ValueError("snapshot report schema mismatch")
             return {**document, "snapshot_sha256": claimed_hash}
@@ -435,14 +510,22 @@ class OperationalMetricsLedger:
         if when is not None and (not isinstance(when, datetime) or when.tzinfo is None):
             raise ValueError("timezone-aware observed_at is required")
         counts = []
-        for key in ("tokens_input", "tokens_cached", "tokens_output", "tokens_reasoning", "quota_units"):
+        for key in (
+            "tokens_input",
+            "tokens_cached",
+            "tokens_output",
+            "tokens_reasoning",
+            "quota_units",
+        ):
             value = observation.get(key)
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{key} must be a nonnegative integer")
             counts.append(value)
         latency = observation.get("latency_s")
         if latency is not None and (
-            type(latency) not in {int, float} or not math.isfinite(latency) or latency < 0
+            type(latency) not in {int, float}
+            or not math.isfinite(latency)
+            or latency < 0
         ):
             raise ValueError("latency_s must be nonnegative")
         money = observation.get("money_usd")
@@ -450,94 +533,207 @@ class OperationalMetricsLedger:
             raise ValueError("unauthenticated or unknown billing cannot be real money")
         if billing == "AUTHENTICATED" and money is None:
             raise ValueError("authenticated billing requires reconciled money")
-        if not observation.get("missing_metrics") and all(value is None for value in (*counts, latency)):
+        if not observation.get("missing_metrics") and all(
+            value is None for value in (*counts, latency)
+        ):
             raise ValueError("missing metric measurements must be explicit")
         amount = None if money is None else str(_decimal(money, "money_usd"))
         occurred = None if when is None else when.astimezone(UTC)
         observed_at_utc = None if occurred is None else occurred.isoformat()
         model = observation.get("model")
-        model = model if isinstance(model, str) and model in self.model_catalog else None
+        model = (
+            model if isinstance(model, str) and model in self.model_catalog else None
+        )
         # Identity is the provider billing event, not the caller's readback
         # window or observation time.  Those are retained in the row as audit
         # metadata but must not turn an exact replay into another financial event.
-        payload = {"episode_id": episode_id, "experiment": observation["experiment"],
-                   "model": model, "tokens_input": counts[0], "tokens_cached": counts[1],
-                   "tokens_output": counts[2], "tokens_reasoning": counts[3],
-                   "latency_s": None if latency is None else float(latency), "quota_units": counts[4],
-                   "billing_status": billing, "money_usd": amount}
-        payload_sha256 = sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        row = (request_id, event_id, episode_id, observed_at_utc,
-               None if occurred is None else occurred.strftime("%Y-%m"), int(observation["experiment"]), worker,
-               model, *counts[:4], None if latency is None else float(latency), counts[4], billing, amount,
-               payload_sha256)
+        payload = {
+            "episode_id": episode_id,
+            "experiment": observation["experiment"],
+            "model": model,
+            "tokens_input": counts[0],
+            "tokens_cached": counts[1],
+            "tokens_output": counts[2],
+            "tokens_reasoning": counts[3],
+            "latency_s": None if latency is None else float(latency),
+            "quota_units": counts[4],
+            "billing_status": billing,
+            "money_usd": amount,
+        }
+        payload_sha256 = sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        row = (
+            request_id,
+            event_id,
+            episode_id,
+            observed_at_utc,
+            None if occurred is None else occurred.strftime("%Y-%m"),
+            int(observation["experiment"]),
+            worker,
+            model,
+            *counts[:4],
+            None if latency is None else float(latency),
+            counts[4],
+            billing,
+            amount,
+            payload_sha256,
+        )
         with file_lock(self.lock_path):
             self._write_snapshot("WRITER_IN_PROGRESS")
             db = self._db()
             try:
-                matches = list(db.execute("SELECT * FROM observations WHERE request_id=? OR event_id=?", (request_id, event_id)))
+                matches = list(
+                    db.execute(
+                        "SELECT * FROM observations WHERE request_id=? OR event_id=?",
+                        (request_id, event_id),
+                    )
+                )
                 if matches:
-                    if all(item["payload_sha256"] == payload_sha256 for item in matches):
+                    if all(
+                        item["payload_sha256"] == payload_sha256 for item in matches
+                    ):
                         rows = list(db.execute("SELECT * FROM observations"))
-                        conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
-                        self._write_snapshot("CURRENT", self._report_from_rows(rows, conflicts))
+                        conflicts = db.execute(
+                            "SELECT COUNT(*) FROM observation_conflicts"
+                        ).fetchone()[0]
+                        self._write_snapshot(
+                            "CURRENT", self._report_from_rows(rows, conflicts)
+                        )
                         return False
                     for item in matches:
-                        kind = "request_id" if item["request_id"] == request_id else "event_id"
+                        kind = (
+                            "request_id"
+                            if item["request_id"] == request_id
+                            else "event_id"
+                        )
                         value = request_id if kind == "request_id" else event_id
-                        db.execute("INSERT OR IGNORE INTO observation_conflicts VALUES(?,?,?,?)",
-                                   (kind, value, item["payload_sha256"], payload_sha256))
+                        db.execute(
+                            "INSERT OR IGNORE INTO observation_conflicts VALUES(?,?,?,?)",
+                            (kind, value, item["payload_sha256"], payload_sha256),
+                        )
                     # Conflict evidence is append-only even though the caller receives an error.
                     db.commit()
                     rows = list(db.execute("SELECT * FROM observations"))
-                    conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
-                    self._write_snapshot("CURRENT", self._report_from_rows(rows, conflicts))
-                    raise OperationalMetricsConflict("metrics identity collision has divergent canonical payload")
-                db.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+                    conflicts = db.execute(
+                        "SELECT COUNT(*) FROM observation_conflicts"
+                    ).fetchone()[0]
+                    self._write_snapshot(
+                        "CURRENT", self._report_from_rows(rows, conflicts)
+                    )
+                    raise OperationalMetricsConflict(
+                        "metrics identity collision has divergent canonical payload"
+                    )
+                db.execute(
+                    "INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    row,
+                )
                 db.commit()
                 rows = list(db.execute("SELECT * FROM observations"))
-                conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
+                conflicts = db.execute(
+                    "SELECT COUNT(*) FROM observation_conflicts"
+                ).fetchone()[0]
                 self._write_snapshot("CURRENT", self._report_from_rows(rows, conflicts))
             finally:
                 db.close()
         return True
 
-    def reconcile_executor_receipt(self, receipt, *, episode_id, worker="runner", experiment=False):
+    def reconcile_executor_receipt(
+        self, receipt, *, episode_id, worker="runner", experiment=False
+    ):
         request_id = receipt.get("request_id") if isinstance(receipt, dict) else None
         if not isinstance(request_id, str) or not request_id:
             raise ValueError("executor receipt request_id is required")
-        observation = {"event_id": f"executor:{request_id}:{receipt.get('status', 'UNKNOWN')}",
-            "request_id": request_id, "episode_id": episode_id, "worker": worker,
-            "experiment": experiment, "billing_status": "UNAUTHENTICATED" if receipt.get("status") == "COMPLETE" else "UNKNOWN",
-            "missing_metrics": True}
+        observation = {
+            "event_id": f"executor:{request_id}:{receipt.get('status', 'UNKNOWN')}",
+            "request_id": request_id,
+            "episode_id": episode_id,
+            "worker": worker,
+            "experiment": experiment,
+            "billing_status": "UNAUTHENTICATED"
+            if receipt.get("status") == "COMPLETE"
+            else "UNKNOWN",
+            "missing_metrics": True,
+        }
         if isinstance(receipt.get("observed_at"), datetime):
             observation["observed_at"] = receipt["observed_at"]
         return self.reconcile(observation)
 
     def _report_from_rows(self, rows, conflicts):
         tokens = {"input": 0, "cached": 0, "output": 0, "reasoning": 0}
-        buckets = {name: {} for name in ("by_episode", "by_month_utc", "by_experiment", "by_worker")}
-        money, latency, money_seen, latency_seen, models = Decimal(0), 0.0, False, False, set()
+        buckets = {
+            name: {}
+            for name in ("by_episode", "by_month_utc", "by_experiment", "by_worker")
+        }
+        money, latency, money_seen, latency_seen, models = (
+            Decimal(0),
+            0.0,
+            False,
+            False,
+            set(),
+        )
         for row in rows:
-            dimensions = (("by_episode", row["episode_id"]), ("by_experiment", str(bool(row["experiment"])).lower()), ("by_worker", row["worker"]))
+            dimensions = (
+                ("by_episode", row["episode_id"]),
+                ("by_experiment", str(bool(row["experiment"])).lower()),
+                ("by_worker", row["worker"]),
+            )
             if row["month_utc"] is not None:
                 dimensions += (("by_month_utc", row["month_utc"]),)
             for name, key in dimensions:
-                bucket = buckets[name].setdefault(key, {"requests": 0, "money_usd": None, "unknown_billing_requests": 0, "unauthenticated_billing_requests": 0})
+                bucket = buckets[name].setdefault(
+                    key,
+                    {
+                        "requests": 0,
+                        "money_usd": None,
+                        "unknown_billing_requests": 0,
+                        "unauthenticated_billing_requests": 0,
+                    },
+                )
                 bucket["requests"] += 1
-                if row["billing_status"] == "UNKNOWN": bucket["unknown_billing_requests"] += 1
-                if row["billing_status"] == "UNAUTHENTICATED": bucket["unauthenticated_billing_requests"] += 1
-                if row["money_usd"] is not None: bucket["money_usd"] = str(Decimal(bucket["money_usd"] or "0") + Decimal(row["money_usd"]))
-            for out, column in (("input", "tokens_input"), ("cached", "tokens_cached"), ("output", "tokens_output"), ("reasoning", "tokens_reasoning")): tokens[out] += row[column] or 0
-            if row["quota_units"] is None: pass
-            if row["latency_s"] is not None: latency, latency_seen = latency + row["latency_s"], True
-            if row["money_usd"] is not None: money, money_seen = money + Decimal(row["money_usd"]), True
-            if row["model"]: models.add(row["model"])
-        return {"schema": 1, "requests": len(rows), "money_usd": str(money) if money_seen else None,
-                "unknown_billing_requests": sum(row["billing_status"] == "UNKNOWN" for row in rows),
-                "unauthenticated_billing_requests": sum(row["billing_status"] == "UNAUTHENTICATED" for row in rows),
-                "tokens": tokens, "quota_units": sum(row["quota_units"] or 0 for row in rows), "latency_s": latency if latency_seen else None,
-                "unknown_timestamp_requests": sum(row["observed_at_utc"] is None for row in rows),
-                "conflicts": conflicts, "models": sorted(models), **buckets}
+                if row["billing_status"] == "UNKNOWN":
+                    bucket["unknown_billing_requests"] += 1
+                if row["billing_status"] == "UNAUTHENTICATED":
+                    bucket["unauthenticated_billing_requests"] += 1
+                if row["money_usd"] is not None:
+                    bucket["money_usd"] = str(
+                        Decimal(bucket["money_usd"] or "0") + Decimal(row["money_usd"])
+                    )
+            for out, column in (
+                ("input", "tokens_input"),
+                ("cached", "tokens_cached"),
+                ("output", "tokens_output"),
+                ("reasoning", "tokens_reasoning"),
+            ):
+                tokens[out] += row[column] or 0
+            if row["quota_units"] is None:
+                pass
+            if row["latency_s"] is not None:
+                latency, latency_seen = latency + row["latency_s"], True
+            if row["money_usd"] is not None:
+                money, money_seen = money + Decimal(row["money_usd"]), True
+            if row["model"]:
+                models.add(row["model"])
+        return {
+            "schema": 1,
+            "requests": len(rows),
+            "money_usd": str(money) if money_seen else None,
+            "unknown_billing_requests": sum(
+                row["billing_status"] == "UNKNOWN" for row in rows
+            ),
+            "unauthenticated_billing_requests": sum(
+                row["billing_status"] == "UNAUTHENTICATED" for row in rows
+            ),
+            "tokens": tokens,
+            "quota_units": sum(row["quota_units"] or 0 for row in rows),
+            "latency_s": latency if latency_seen else None,
+            "unknown_timestamp_requests": sum(
+                row["observed_at_utc"] is None for row in rows
+            ),
+            "conflicts": conflicts,
+            "models": sorted(models),
+            **buckets,
+        }
 
     def report(self):
         """Writer-side diagnostic projection; CLI status must call read_snapshot."""
@@ -546,7 +742,9 @@ class OperationalMetricsLedger:
         db = self._db()
         try:
             rows = list(db.execute("SELECT * FROM observations"))
-            conflicts = db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone()[0]
+            conflicts = db.execute(
+                "SELECT COUNT(*) FROM observation_conflicts"
+            ).fetchone()[0]
         finally:
             db.close()
         return self._report_from_rows(rows, conflicts)
@@ -639,7 +837,9 @@ class AutonomousTwoGateRunner:
         self.ledger = ledger
         self.path = self.root / "runner.json"
         self.lock_path = self.root / "runner.lock"
-        self.metrics = OperationalMetricsLedger(self.root / "operational-metrics.sqlite3")
+        self.metrics = OperationalMetricsLedger(
+            self.root / "operational-metrics.sqlite3"
+        )
         self._jobs: dict[str, Job] = {}
 
     def _load(self) -> dict[str, Any]:
@@ -689,6 +889,61 @@ class AutonomousTwoGateRunner:
             spec.get("predecessor", ""),
         )
 
+    @staticmethod
+    def _validate_job_dag(jobs: list[Job]) -> None:
+        """Reject invalid dependencies before runner state or paid intent exists."""
+        by_id = {job.request_id: job for job in jobs}
+        if len(by_id) != len(jobs):
+            raise ValueError("jobs must have unique request ids")
+        for request_id, job in by_id.items():
+            if job.predecessor and job.predecessor not in by_id:
+                raise ValueError(
+                    f"job predecessor is not in the runner DAG: {request_id}"
+                )
+            predecessor = by_id.get(job.predecessor)
+            valid_topology = False
+            if job.category in {"first", "thumbnail"}:
+                valid_topology = predecessor is None
+            elif job.category == "hero":
+                valid_topology = (
+                    predecessor is not None
+                    and predecessor.scene == job.scene
+                    and predecessor.category == "first"
+                )
+            elif job.category in {"alternative", "correction"}:
+                valid_topology = (
+                    predecessor is not None
+                    and predecessor.scene == job.scene
+                    and predecessor.category
+                    in {"first", "alternative", "correction", "thumbnail"}
+                )
+            elif job.category == "hero_retry":
+                valid_topology = (
+                    predecessor is not None
+                    and predecessor.scene == job.scene
+                    and predecessor.category in {"hero", "hero_retry"}
+                )
+            if not valid_topology:
+                raise ValueError(f"invalid runner job topology: {request_id}")
+
+        visiting = set()
+        visited = set()
+
+        def visit(request_id):
+            if request_id in visited:
+                return
+            if request_id in visiting:
+                raise ValueError("runner job dependency cycle")
+            visiting.add(request_id)
+            predecessor = by_id[request_id].predecessor
+            if predecessor:
+                visit(predecessor)
+            visiting.remove(request_id)
+            visited.add(request_id)
+
+        for request_id in by_id:
+            visit(request_id)
+
     def _rebuild_jobs(self, document: dict[str, Any]) -> None:
         jobs = [self._job_from_spec(item) for item in document.get("job_specs", [])]
         self.validate_resume_jobs(jobs)
@@ -698,6 +953,9 @@ class AutonomousTwoGateRunner:
             raise ValueError("packet bytes do not bind the started runner")
 
     def validate_resume_jobs(self, jobs: list[Job]) -> dict[str, dict[str, str]]:
+        self._validate_job_dag(jobs)
+        if any(job.mode != "TEST" for job in jobs):
+            raise PolicyError("persisted runner DAG contains a non-TEST job")
         expected = {
             item["request_id"]: {
                 "request_id": item["request_id"],
@@ -710,6 +968,44 @@ class AutonomousTwoGateRunner:
             raise ValueError("resume jobs do not match hash-bound started jobs")
         self._jobs = {job.request_id: job for job in jobs}
         return actual
+
+    def _validate_persisted_qa(self, document: dict[str, Any]) -> None:
+        """Rebind runner QA to current bytes and the Executor's write-once receipt."""
+        known = {item["request_id"] for item in document.get("jobs", [])}
+        for request_id, verdict in document.get("qa", {}).items():
+            receipt = self.executor.inspect(request_id)
+            identity = (
+                verdict.get("reviewer_identity") if isinstance(verdict, dict) else None
+            )
+            result = (
+                Path(receipt.get("result", "")) if isinstance(receipt, dict) else Path()
+            )
+            if (
+                request_id not in known
+                or not isinstance(verdict, dict)
+                or type(verdict.get("approved")) is not bool
+                or not isinstance(verdict.get("reviewer"), str)
+                or not verdict["reviewer"].strip()
+                or not isinstance(identity, dict)
+                or set(identity) != {"subject", "issuer"}
+                or not all(
+                    isinstance(identity.get(key), str) and identity[key].strip()
+                    for key in ("subject", "issuer")
+                )
+                or identity["subject"] == "generator"
+                or not isinstance(receipt, dict)
+                or receipt.get("status") != "COMPLETE"
+                or receipt.get("qa") != verdict["approved"]
+                or receipt.get("qa_reviewer") != verdict["reviewer"]
+                or receipt.get("qa_reviewer_identity") != identity
+                or receipt.get("result_sha256") != verdict.get("result_sha256")
+                or not result.is_file()
+                or sha256(result.read_bytes()).hexdigest()
+                != receipt.get("result_sha256")
+            ):
+                raise ValueError(
+                    "persisted runner QA does not bind current executor evidence"
+                )
 
     def start(self, packet: dict[str, Any], jobs: list[Job]) -> dict[str, Any]:
         with file_lock(self.lock_path):
@@ -729,6 +1025,7 @@ class AutonomousTwoGateRunner:
             return existing
         if not self.episode_id or not isinstance(packet, dict) or not jobs:
             raise ValueError("episode, packet and at least one job are required")
+        self._validate_job_dag(jobs)
         seen = set()
         serialized = []
         total = Decimal(0)
@@ -774,36 +1071,89 @@ class AutonomousTwoGateRunner:
         """Append immutable TEST successors and invalidate dependent media gates."""
         with file_lock(self.lock_path):
             document = self._load()
+            self._validate_persisted_qa(document)
             if document["state"] in {"PUBLISHED", "PUBLISH_INTENT"}:
-                raise PolicyError("published or ambiguous delivery cannot accept successors")
-            known = {item["request_id"]: item for item in document["jobs"]}
-            total = sum(Decimal(spec["cost"]) for spec in document["job_specs"])
+                raise PolicyError(
+                    "published or ambiguous delivery cannot accept successors"
+                )
+            candidate = json.loads(json.dumps(document))
+            known = {item["request_id"]: item for item in candidate["jobs"]}
+            total = sum(Decimal(spec["cost"]) for spec in candidate["job_specs"])
             added = False
             for job in jobs:
                 binding = self._job_binding(job)
                 existing = known.get(job.request_id)
                 if existing is not None:
                     if existing.get("job_sha256") != binding["job_sha256"]:
-                        raise ValueError("successor request ID conflicts with durable job")
+                        raise ValueError(
+                            "successor request ID conflicts with durable job"
+                        )
                     continue
                 if job.mode != "TEST" or not job.predecessor:
-                    raise PolicyError("only TEST hash-bound successor jobs are accepted")
+                    raise PolicyError(
+                        "only TEST hash-bound successor jobs are accepted"
+                    )
                 if job.predecessor not in known:
-                    raise ValueError("successor predecessor is not bound to this runner")
-                self.policy.authorize_paid(job.endpoint, job.cost, monthly_spend=Decimal(0), experiment_spend=Decimal(0))
+                    raise ValueError(
+                        "successor predecessor is not bound to this runner"
+                    )
+                predecessor_spec = next(
+                    spec
+                    for spec in candidate["job_specs"]
+                    if self._job_from_spec(spec).request_id == job.predecessor
+                )
+                predecessor = self._job_from_spec(predecessor_spec)
+                predecessor_qa = document["qa"].get(job.predecessor)
+                if job.scene != predecessor.scene:
+                    raise ValueError("successor must bind the predecessor scene")
+                if job.category == "hero":
+                    if (
+                        not predecessor_qa
+                        or predecessor_qa.get("approved") is not True
+                        or predecessor.category != "first"
+                    ):
+                        raise ValueError("hero requires an exact approved predecessor")
+                elif job.category in {"alternative", "correction", "hero_retry"}:
+                    if (
+                        not predecessor_qa
+                        or predecessor_qa.get("approved") is not False
+                    ):
+                        raise ValueError(
+                            "remediation requires an exact rejected predecessor"
+                        )
+                else:
+                    raise ValueError("unsupported successor category")
+                self.policy.authorize_paid(
+                    job.endpoint,
+                    job.cost,
+                    monthly_spend=Decimal(0),
+                    experiment_spend=Decimal(0),
+                )
                 total += job.cost
                 if total > self.policy.episode_cap_usd:
                     raise PolicyError("successor jobs exceed permanent budget ceiling")
-                document["jobs"].append(binding)
-                document["job_specs"].append(self._job_spec(job))
+                candidate["jobs"].append(binding)
+                candidate["job_specs"].append(self._job_spec(job))
                 known[job.request_id] = binding
-                for predecessor in document["jobs"]:
+                for predecessor in candidate["jobs"]:
                     if predecessor["request_id"] == job.predecessor:
                         predecessor["superseded_by"] = job.request_id
                         break
                 added = True
             if not added:
                 return document
+            candidate_jobs = [
+                self._job_from_spec(spec) for spec in candidate["job_specs"]
+            ]
+            self._validate_job_dag(candidate_jobs)
+            remediation_predecessors = [
+                job.predecessor
+                for job in candidate_jobs
+                if job.category in {"alternative", "correction", "hero_retry"}
+            ]
+            if len(remediation_predecessors) != len(set(remediation_predecessors)):
+                raise ValueError("one remediation successor is allowed per predecessor")
+            document = candidate
             document["media"] = {}
             document["delivery"] = {}
             document.pop("technical_qa", None)
@@ -831,11 +1181,13 @@ class AutonomousTwoGateRunner:
             self.validate_resume_jobs(jobs)
         else:
             self._rebuild_jobs(document)
+        self._validate_persisted_qa(document)
         if document["state"] not in {"READY", "RUNNING"}:
             return document
         document["state"] = "RUNNING"
         self._save(document)
-        for binding in document["jobs"]:
+
+        async def process_binding(binding):
             request_id = binding["request_id"]
             receipt = self.executor.inspect(request_id)
             if receipt is None or (
@@ -849,21 +1201,35 @@ class AutonomousTwoGateRunner:
                 # First persist a provider-free executor intent.  The FAL-bound
                 # standing claim is admitted only from that durable intent and
                 # before executor.run can call the provider.
-                prepared = self.executor.prepare_intent(job, auth_scope="TEST_LOCAL_ONLY")
+                prepared = self.executor.prepare_intent(
+                    job, auth_scope="TEST_LOCAL_ONLY"
+                )
                 if self.ledger is not None:
                     self.ledger.reserve(
-                        request_id, self.episode_id, job.endpoint, job.cost,
+                        request_id,
+                        self.episode_id,
+                        job.endpoint,
+                        job.cost,
                         settlement_mode="FAL_READBACK_V2",
                         auth_scope=prepared["settlement_binding"]["auth_scope"],
-                        provider_request_id=prepared["settlement_binding"]["provider_request_id"],
+                        provider_request_id=prepared["settlement_binding"][
+                            "provider_request_id"
+                        ],
                         authority_mode=prepared["settlement_binding"]["authority_mode"],
                     )
                 try:
                     await self.executor.run(
-                        job, provider,
+                        job,
+                        provider,
                         settlement_checkpoint=(
-                            lambda local_id, remote_id: self.ledger.bind_provider_request_id(local_id, remote_id)
-                        ) if self.ledger is not None else None,
+                            lambda local_id, remote_id: (
+                                self.ledger.bind_provider_request_id(
+                                    local_id, remote_id
+                                )
+                            )
+                        )
+                        if self.ledger is not None
+                        else None,
                         submit_prepared=True,
                     )
                 except asyncio.CancelledError:
@@ -879,7 +1245,9 @@ class AutonomousTwoGateRunner:
                 # A crash after the executor checkpoint but before the ledger
                 # attach is recovered without a second submit or binding rewrite.
                 if self.ledger is not None:
-                    self.ledger.bind_provider_request_id(request_id, receipt["provider_id"])
+                    self.ledger.bind_provider_request_id(
+                        request_id, receipt["provider_id"]
+                    )
                 job = self._jobs.get(request_id)
                 if job is None:
                     raise RuntimeError(
@@ -887,10 +1255,17 @@ class AutonomousTwoGateRunner:
                     )
                 try:
                     await self.executor.run(
-                        job, provider,
+                        job,
+                        provider,
                         settlement_checkpoint=(
-                            lambda local_id, remote_id: self.ledger.bind_provider_request_id(local_id, remote_id)
-                        ) if self.ledger is not None else None,
+                            lambda local_id, remote_id: (
+                                self.ledger.bind_provider_request_id(
+                                    local_id, remote_id
+                                )
+                            )
+                        )
+                        if self.ledger is not None
+                        else None,
                     )
                 except asyncio.CancelledError:
                     if self.ledger is not None:
@@ -904,7 +1279,9 @@ class AutonomousTwoGateRunner:
             if receipt.get("status") != "COMPLETE":
                 if self.ledger is not None:
                     self.ledger.mark_unknown(request_id)
-                self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
+                self.metrics.reconcile_executor_receipt(
+                    receipt, episode_id=self.episode_id
+                )
                 raise RuntimeError(
                     "incomplete job requires resume_with_jobs; no ambiguous resubmit"
                 )
@@ -920,61 +1297,147 @@ class AutonomousTwoGateRunner:
                 # Preserve the reservation until explicit FAL billing reconciliation.
                 self.ledger.mark_unknown(request_id)
             self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
-            if request_id not in document["qa"]:
-                verdict = independent_qa(receipt)
-                if asyncio.iscoroutine(verdict):
-                    verdict = await verdict
-                identity = (
-                    verdict.get("reviewer_identity")
-                    if isinstance(verdict, dict)
-                    else None
-                )
+            if request_id in document["qa"]:
+                return request_id, None, None
+            if receipt.get("qa") is not None:
+                identity = receipt.get("qa_reviewer_identity")
                 if (
-                    not isinstance(verdict, dict)
-                    or verdict.get("request_id") != request_id
-                    or verdict.get("result_sha256") != receipt["result_sha256"]
+                    not isinstance(receipt.get("qa"), bool)
+                    or not isinstance(receipt.get("qa_reviewer"), str)
+                    or not receipt["qa_reviewer"].strip()
                     or not isinstance(identity, dict)
+                    or set(identity) != {"subject", "issuer"}
                     or not all(
-                        isinstance(identity.get(k), str) and identity[k].strip()
-                        for k in ("subject", "issuer")
+                        isinstance(identity.get(key), str) and identity[key].strip()
+                        for key in ("subject", "issuer")
                     )
                     or identity["subject"] == "generator"
                 ):
-                    document["qa"][request_id] = {
+                    raise RuntimeError(
+                        "durable executor QA lacks identity evidence; reconciliation required"
+                    )
+                return (
+                    request_id,
+                    {
+                        "approved": receipt["qa"],
+                        "result_sha256": receipt["result_sha256"],
+                        "reviewer": receipt["qa_reviewer"],
+                        "reviewer_identity": identity,
+                        "codes": [],
+                    },
+                    None,
+                )
+            verdict = independent_qa(receipt)
+            if asyncio.iscoroutine(verdict):
+                verdict = await verdict
+            identity = (
+                verdict.get("reviewer_identity") if isinstance(verdict, dict) else None
+            )
+            if (
+                not isinstance(verdict, dict)
+                or verdict.get("request_id") != request_id
+                or verdict.get("result_sha256") != receipt["result_sha256"]
+                or not isinstance(identity, dict)
+                or not all(
+                    isinstance(identity.get(k), str) and identity[k].strip()
+                    for k in ("subject", "issuer")
+                )
+                or identity["subject"] == "generator"
+                or type(verdict.get("approved")) is not bool
+                or not isinstance(verdict.get("reviewer"), str)
+                or not verdict["reviewer"].strip()
+            ):
+                return (
+                    request_id,
+                    {
                         "approved": False,
                         "codes": ["QA_CONTRACT_INVALID"],
-                    }
-                    document["state"] = "REJECTED"
-                    self._save(document)
-                    raise ValueError(
+                    },
+                    ValueError(
                         "independent QA must bind request_id, result_sha256, and non-generator identity"
-                    )
-                if (
-                    verdict.get("approved") is not True
-                    or not isinstance(verdict.get("reviewer"), str)
-                    or not verdict["reviewer"].strip()
-                ):
-                    document["qa"][request_id] = {
+                    ),
+                )
+            self.executor.qa(
+                request_id,
+                receipt["result_sha256"],
+                verdict["approved"],
+                verdict["reviewer"],
+                reviewer_identity=identity,
+            )
+            if verdict["approved"] is not True:
+                return (
+                    request_id,
+                    {
                         "approved": False,
                         "codes": verdict.get("codes", ["QA_FAIL"]),
                         "request_id": request_id,
                         "result_sha256": receipt["result_sha256"],
                         "reviewer": verdict.get("reviewer", ""),
                         "reviewer_identity": identity,
-                    }
-                    document["state"] = "REJECTED"
-                    return self._save(document)
-                self.executor.qa(
-                    request_id, receipt["result_sha256"], True, verdict["reviewer"]
+                    },
+                    None,
                 )
-                document["qa"][request_id] = {
+            return (
+                request_id,
+                {
                     "approved": True,
                     "result_sha256": receipt["result_sha256"],
                     "reviewer": verdict["reviewer"],
                     "reviewer_identity": identity,
                     "codes": verdict.get("codes", []),
-                }
-                self._save(document)
+                },
+                None,
+            )
+
+        pending_bindings = list(document["jobs"])
+        active = set()
+        verified = set()
+        concurrency = self.executor.config.concurrency
+
+        def admit():
+            admitted = True
+            while len(active) < concurrency and admitted:
+                admitted = False
+                for binding in tuple(pending_bindings):
+                    predecessor = self._jobs[binding["request_id"]].predecessor
+                    if predecessor and predecessor not in verified:
+                        continue
+                    pending_bindings.remove(binding)
+                    active.add(asyncio.create_task(process_binding(binding)))
+                    admitted = True
+                    if len(active) >= concurrency:
+                        break
+
+        admit()
+        try:
+            while active:
+                done, active = await asyncio.wait(
+                    active, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    request_id, qa_record, contract_error = task.result()
+                    if qa_record is None:
+                        verified.add(request_id)
+                        continue
+                    document["qa"][request_id] = qa_record
+                    if qa_record.get("approved") is not True:
+                        document["state"] = "REJECTED"
+                    self._save(document)
+                    if contract_error is not None:
+                        raise contract_error
+                    if document["state"] == "REJECTED":
+                        for pending in active:
+                            pending.cancel()
+                        await asyncio.gather(*active, return_exceptions=True)
+                        return document
+                    verified.add(request_id)
+                admit()
+                if not active and pending_bindings:
+                    raise RuntimeError("runner DAG has no dependency-ready job")
+        finally:
+            for pending in active:
+                pending.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
         document["state"] = "MEDIA_PENDING"
         return self._save(document)
 
@@ -984,6 +1447,10 @@ class AutonomousTwoGateRunner:
         return await self.resume(provider, independent_qa, jobs)
 
     def record_qa(self, request_id: str, receipt: dict, verdict: dict) -> None:
+        with file_lock(self.lock_path):
+            self._record_qa(request_id, receipt, verdict)
+
+    def _record_qa(self, request_id: str, receipt: dict, verdict: dict) -> None:
         """Record only a PASS with identity evidence; FAIL is a terminal remediation signal."""
         if verdict.get("approved") is not True:
             raise ValueError(
@@ -994,6 +1461,9 @@ class AutonomousTwoGateRunner:
             not isinstance(identity, dict)
             or not identity.get("subject")
             or not identity.get("issuer")
+            or identity.get("subject") == "generator"
+            or not isinstance(verdict.get("reviewer"), str)
+            or not verdict["reviewer"].strip()
         ):
             raise ValueError("independent QA requires verifier identity evidence")
         if request_id not in {item["request_id"] for item in self._load()["jobs"]}:
@@ -1006,7 +1476,11 @@ class AutonomousTwoGateRunner:
         ):
             raise ValueError("QA receipt hash mismatch")
         self.executor.qa(
-            request_id, receipt["result_sha256"], True, verdict["reviewer"]
+            request_id,
+            receipt["result_sha256"],
+            True,
+            verdict["reviewer"],
+            reviewer_identity=identity,
         )
 
     def stage_delivery(
@@ -1020,6 +1494,7 @@ class AutonomousTwoGateRunner:
     ) -> dict[str, Any]:
         """Open a gate only for QA'd, hash-bound, decodable TEST media."""
         document = self._load()
+        self._validate_persisted_qa(document)
         active = [
             item["request_id"]
             for item in document["jobs"]
@@ -1028,7 +1503,10 @@ class AutonomousTwoGateRunner:
         if (
             document["state"] != "MEDIA_PENDING"
             or not all(request_id in document["qa"] for request_id in active)
-            or any(document["qa"][request_id].get("approved") is False for request_id in active)
+            or any(
+                document["qa"][request_id].get("approved") is False
+                for request_id in active
+            )
         ):
             raise ValueError("media staging requires completed hash-bound source QA")
         if (
@@ -1253,7 +1731,9 @@ class AutonomousCompiledTestAdapter:
             elif job.category in {"hero", "hero_retry"}:
                 self.pipeline.run._heroes[job.scene] = job
             else:
-                raise ValueError("runner contains unsupported compiled successor category")
+                raise ValueError(
+                    "runner contains unsupported compiled successor category"
+                )
 
     def packet(self) -> dict[str, str]:
         """Stable binding for the immutable compiled inputs, not an approval."""
@@ -1267,10 +1747,14 @@ class AutonomousCompiledTestAdapter:
     def start(self) -> dict[str, Any]:
         jobs = list(self.pipeline.baseline_jobs())
         if not jobs:
-            raise ValueError("compiled adapter requires at least one dispatchable baseline")
+            raise ValueError(
+                "compiled adapter requires at least one dispatchable baseline"
+            )
         return self.runner.start(self.packet(), jobs)
 
-    async def resume(self, provider, independent_qa: Callable[[dict], dict]) -> dict[str, Any]:
+    async def resume(
+        self, provider, independent_qa: Callable[[dict], dict]
+    ) -> dict[str, Any]:
         """Resume runner dispatch, then promote only its exact completed QA PASSes."""
 
         async def qa_after_technical_check(receipt: dict) -> dict:
@@ -1328,10 +1812,14 @@ class AutonomousCompiledTestAdapter:
                 receipt["result_sha256"],
                 verdict.get("approved") is True,
                 reviewer,
+                reviewer_identity=verdict.get("reviewer_identity"),
             )
 
     async def remediate(
-        self, corrections: dict[str, str], provider, independent_qa: Callable[[dict], dict]
+        self,
+        corrections: dict[str, str],
+        provider,
+        independent_qa: Callable[[dict], dict],
     ) -> dict[str, Any]:
         """Create only QA-rejected compiled successors, then resume the same runner."""
         self._synchronize_runner_qa(self.runner._load())
@@ -1368,7 +1856,9 @@ class AutonomousCompiledTestAdapter:
                 or not isinstance(verdict.get("reviewer"), str)
                 or not verdict["reviewer"].strip()
             ):
-                raise ValueError("runner PASS is incomplete or does not bind compiled receipt")
+                raise ValueError(
+                    "runner PASS is incomplete or does not bind compiled receipt"
+                )
             job = self.pipeline.run._completed_job_for_result(
                 receipt["request"]["scene"], receipt["result_sha256"]
             )
@@ -1379,6 +1869,7 @@ class AutonomousCompiledTestAdapter:
                 receipt["result_sha256"],
                 True,
                 verdict["reviewer"],
+                reviewer_identity=verdict.get("reviewer_identity"),
             )
 
     @staticmethod
@@ -1397,20 +1888,27 @@ class AutonomousCompiledTestAdapter:
                 hours, milliseconds = divmod(milliseconds, 3_600_000)
                 minutes, milliseconds = divmod(milliseconds, 60_000)
                 seconds, milliseconds = divmod(milliseconds, 1000)
-                return f"{hours:02}:{minutes:02}:{seconds:02}{separator}{milliseconds:03}"
+                return (
+                    f"{hours:02}:{minutes:02}:{seconds:02}{separator}{milliseconds:03}"
+                )
 
             text = f"TEST ONLY — scene {frame.scene_id}: {frame.semantic_action}"
             rows.append((index, stamp(start, ","), stamp(end, ","), text))
         transcript = directory / "transcript.TEST.txt"
-        transcript.write_text("\n".join(row[3] for row in rows) + "\n", encoding="utf-8")
+        transcript.write_text(
+            "\n".join(row[3] for row in rows) + "\n", encoding="utf-8"
+        )
         srt = directory / "captions.TEST.srt"
         srt.write_text(
-            "\n".join(f"{n}\n{start} --> {end}\n{text}\n" for n, start, end, text in rows),
+            "\n".join(
+                f"{n}\n{start} --> {end}\n{text}\n" for n, start, end, text in rows
+            ),
             encoding="utf-8",
         )
         vtt = directory / "captions.TEST.vtt"
         vtt.write_text(
-            "WEBVTT\n\n" + "\n".join(
+            "WEBVTT\n\n"
+            + "\n".join(
                 f"{n}\n{start.replace(',', '.')} --> {end.replace(',', '.')}\n{text}\n"
                 for n, start, end, text in rows
             ),
@@ -1422,12 +1920,22 @@ class AutonomousCompiledTestAdapter:
         }
 
     def _verify_existing_delivery(self, evidence: dict[str, Any], manifest) -> None:
-        if evidence.get("mode") != "TEST" or evidence.get("manifest_sha256") != manifest.checksum:
-            raise ValueError("existing delivery evidence does not bind this compiled manifest")
-        for kind, item in {**evidence.get("media", {}), **evidence.get("sidecars", {})}.items():
+        if (
+            evidence.get("mode") != "TEST"
+            or evidence.get("manifest_sha256") != manifest.checksum
+        ):
+            raise ValueError(
+                "existing delivery evidence does not bind this compiled manifest"
+            )
+        for kind, item in {
+            **evidence.get("media", {}),
+            **evidence.get("sidecars", {}),
+        }.items():
             path = Path(item.get("path", ""))
             if not path.is_file() or self._file_digest(path) != item.get("sha256"):
-                raise ValueError(f"existing {kind} bytes do not match delivery evidence")
+                raise ValueError(
+                    f"existing {kind} bytes do not match delivery evidence"
+                )
 
     def stage_local_delivery(
         self, renderer, independent_media_qa: Callable[[dict], dict], *, hold: int = 4
@@ -1445,9 +1953,15 @@ class AutonomousCompiledTestAdapter:
         delivery = self.pipeline.workspace / "delivery"
         evidence_path = delivery / "evidence.json"
         if document["state"] != "MEDIA_PENDING":
-            if document["state"] in {
-                "WAITING_THUMBNAIL_APPROVAL", "WAITING_VIDEO_APPROVAL", "READY_TO_PUBLISH"
-            } and evidence_path.is_file():
+            if (
+                document["state"]
+                in {
+                    "WAITING_THUMBNAIL_APPROVAL",
+                    "WAITING_VIDEO_APPROVAL",
+                    "READY_TO_PUBLISH",
+                }
+                and evidence_path.is_file()
+            ):
                 evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
                 self._verify_existing_delivery(evidence, manifest)
                 return document
@@ -1478,8 +1992,14 @@ class AutonomousCompiledTestAdapter:
             if self._file_digest(video) != receipt.get("output_sha256"):
                 raise ValueError("renderer receipt does not bind local master bytes")
             media = {
-                "thumbnail": {"path": str(thumbnail.resolve()), "sha256": self._file_digest(thumbnail)},
-                "video": {"path": str(video.resolve()), "sha256": self._file_digest(video)},
+                "thumbnail": {
+                    "path": str(thumbnail.resolve()),
+                    "sha256": self._file_digest(thumbnail),
+                },
+                "video": {
+                    "path": str(video.resolve()),
+                    "sha256": self._file_digest(video),
+                },
             }
             evidence = {
                 "schema": "compiled-test-local-delivery-v1",
@@ -1496,7 +2016,9 @@ class AutonomousCompiledTestAdapter:
         verdict = independent_media_qa(dict(evidence))
         if asyncio.iscoroutine(verdict):
             raise ValueError("independent local media QA must be synchronous")
-        identity = verdict.get("reviewer_identity") if isinstance(verdict, dict) else None
+        identity = (
+            verdict.get("reviewer_identity") if isinstance(verdict, dict) else None
+        )
         if (
             not isinstance(verdict, dict)
             or verdict.get("approved") is not True
@@ -1506,21 +2028,27 @@ class AutonomousCompiledTestAdapter:
             or not isinstance(identity, dict)
             or not identity.get("subject")
             or not identity.get("issuer")
-            or any(verdict.get(f"{kind}_sha256") != media[kind]["sha256"] for kind in media)
+            or any(
+                verdict.get(f"{kind}_sha256") != media[kind]["sha256"] for kind in media
+            )
             or verdict.get("sidecars_sha256")
             != {kind: item["sha256"] for kind, item in evidence["sidecars"].items()}
             or verdict.get("manifest_sha256") != manifest.checksum
         ):
-            raise ValueError("independent TEST media QA rejected or did not bind delivery evidence")
+            raise ValueError(
+                "independent TEST media QA rejected or did not bind delivery evidence"
+            )
         evidence["independent_technical_qa"] = verdict
         _atomic_json(evidence_path, evidence)
         return self.runner.stage_delivery(
-            Path(media["thumbnail"]["path"]), Path(media["video"]["path"]), qa={
+            Path(media["thumbnail"]["path"]),
+            Path(media["video"]["path"]),
+            qa={
                 "approved": True,
                 "mode": "TEST",
                 "subject": identity["subject"],
                 "issuer": identity["issuer"],
                 "reviewer": verdict["reviewer"],
                 "evidence_sha256": self._file_digest(evidence_path),
-            }
+            },
         )

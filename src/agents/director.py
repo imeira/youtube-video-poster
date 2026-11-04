@@ -373,7 +373,9 @@ class DirectorAgent:
         )
         return AutonomousCompiledTestAdapter(runner, pipeline)
 
-    def import_preproduction_handoff(self, workspace: Path, request_id: str, manifest_path: Path):
+    def import_preproduction_handoff(
+        self, workspace: Path, request_id: str, manifest_path: Path
+    ):
         """Verify one local PREPRODUCTION import without activating production.
 
         The importer deliberately stops before state transition, pipeline,
@@ -384,16 +386,29 @@ class DirectorAgent:
         return import_real_preproduction_handoff(workspace, request_id, manifest_path)
 
     def import_preproduction_audio_candidate(
-        self, workspace: Path, request_id: str, audio_path: Path, timing_path: Path,
-        license_path: Path, *, alignment_attestation_path: Path | None = None, app_config: object, clock,
+        self,
+        workspace: Path,
+        request_id: str,
+        audio_path: Path,
+        timing_path: Path,
+        license_path: Path,
+        *,
+        alignment_attestation_path: Path | None = None,
+        app_config: object,
+        clock,
     ):
         """Materialize a verified local candidate while retaining blocked TTS state."""
         from src.hybrid.audio_preproduction import import_real_audio_candidate
 
         return import_real_audio_candidate(
-            workspace, request_id, audio_path, timing_path, license_path,
+            workspace,
+            request_id,
+            audio_path,
+            timing_path,
+            license_path,
             alignment_attestation_path=alignment_attestation_path,
-            app_config=app_config, clock=clock,
+            app_config=app_config,
+            clock=clock,
         )
 
     def import_audio_qualification_evidence(
@@ -446,63 +461,121 @@ class DirectorAgent:
 
         raw = getattr(app_config, "raw", None)
         configured = raw.get("external_trust_root") if isinstance(raw, dict) else None
-        evidence_root = configured.get("evidence_root") if isinstance(configured, dict) else None
+        evidence_root = (
+            configured.get("evidence_root") if isinstance(configured, dict) else None
+        )
         if not isinstance(evidence_root, str) or not evidence_root:
-            raise ValueError("configured evidence root is required before readback service")
+            raise ValueError(
+                "configured evidence root is required before readback service"
+            )
         root = Path(evidence_root)
         if not root.is_absolute():
-            raise ValueError("configured evidence root is invalid before readback service")
+            raise ValueError(
+                "configured evidence root is invalid before readback service"
+            )
         try:
             candidate, _candidate_file_sha, _ = load_strict_json_snapshot(
-                candidate_receipt_path, "immutable audio candidate receipt", contained_by=root, include_bytes=True,
+                candidate_receipt_path,
+                "immutable audio candidate receipt",
+                contained_by=root,
+                include_bytes=True,
             )
             submission, _submission_file_sha, _ = load_strict_json_snapshot(
-                submission_receipt_path, "durable submission receipt", contained_by=root, include_bytes=True,
+                submission_receipt_path,
+                "durable submission receipt",
+                contained_by=root,
+                include_bytes=True,
             )
         except TrustRootVerificationError as error:
             raise ValueError("missing or invalid durable submission receipt") from error
 
         candidate_fields = {
-            "schema", "mode", "candidate_class", "request_id", "source_sha256",
-            "script_sha256", "audio_sha256", "provider_id", "voice_id", "receipt_sha256",
+            "schema",
+            "mode",
+            "candidate_class",
+            "request_id",
+            "source_sha256",
+            "script_sha256",
+            "audio_sha256",
+            "provider_id",
+            "voice_id",
+            "receipt_sha256",
         }
         submission_fields = {
-            "schema", "mode", "request_id", "provider", "history_item_id",
-            "source_sha256", "script_sha256", "audio_sha256", "voice_id",
-            "candidate_receipt_sha256", "receipt_sha256",
+            "schema",
+            "mode",
+            "request_id",
+            "provider",
+            "history_item_id",
+            "source_sha256",
+            "script_sha256",
+            "audio_sha256",
+            "voice_id",
+            "candidate_receipt_sha256",
+            "receipt_sha256",
         }
 
         def receipt_digest(receipt: dict[str, object]) -> str:
-            projection = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+            projection = {
+                key: value for key, value in receipt.items() if key != "receipt_sha256"
+            }
             return hashlib.sha256(
-                json.dumps(projection, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                json.dumps(projection, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
             ).hexdigest()
 
-        if set(candidate) != candidate_fields or candidate.get("schema") != "elevenlabs-origin-readback-candidate-fixture-v1":
+        if (
+            set(candidate) != candidate_fields
+            or candidate.get("schema")
+            != "elevenlabs-origin-readback-candidate-fixture-v1"
+        ):
             raise ValueError("immutable candidate receipt contract is unavailable")
         if candidate.get("receipt_sha256") != receipt_digest(candidate):
             raise ValueError("immutable candidate receipt_sha256 is invalid")
         if "history_item_id" not in submission:
-            raise ValueError("history_item_id is required in durable submission receipt")
+            raise ValueError(
+                "history_item_id is required in durable submission receipt"
+            )
         if set(submission) != submission_fields:
             raise ValueError("durable submission receipt contract is invalid")
         if submission.get("receipt_sha256") != receipt_digest(submission):
             raise ValueError("durable submission receipt_sha256 is invalid")
-        if candidate.get("mode") != "TEST" or candidate.get("candidate_class") != "TEST":
-            raise ValueError("real immutable ElevenLabs candidate producer is unavailable")
+        if (
+            candidate.get("mode") != "TEST"
+            or candidate.get("candidate_class") != "TEST"
+        ):
+            raise ValueError(
+                "real immutable ElevenLabs candidate producer is unavailable"
+            )
         if submission.get("mode") != "TEST":
             raise ValueError("real submission receipt producer is unavailable")
-        if submission.get("schema") != "elevenlabs-history-submission-receipt-fixture-v1":
+        if (
+            submission.get("schema")
+            != "elevenlabs-history-submission-receipt-fixture-v1"
+        ):
             raise ValueError("durable submission receipt contract is invalid")
-        bindings = {"request_id", "source_sha256", "script_sha256", "audio_sha256", "voice_id"}
-        if any(submission.get(key) != candidate.get(key) for key in bindings) or submission.get(
-            "candidate_receipt_sha256"
-        ) != candidate.get("receipt_sha256"):
+        bindings = {
+            "request_id",
+            "source_sha256",
+            "script_sha256",
+            "audio_sha256",
+            "voice_id",
+        }
+        if any(
+            submission.get(key) != candidate.get(key) for key in bindings
+        ) or submission.get("candidate_receipt_sha256") != candidate.get(
+            "receipt_sha256"
+        ):
             raise ValueError("submission receipt does not bind immutable candidate")
-        if submission.get("provider") != "elevenlabs" or candidate.get("provider_id") != "elevenlabs":
+        if (
+            submission.get("provider") != "elevenlabs"
+            or candidate.get("provider_id") != "elevenlabs"
+        ):
             raise ValueError("submission receipt provider binding is invalid")
         if not all(
-            isinstance(candidate.get(key), str) and len(candidate[key]) == 64
+            isinstance(candidate.get(key), str)
+            and len(candidate[key]) == 64
             and all(char in "0123456789abcdef" for char in candidate[key])
             for key in ("source_sha256", "script_sha256", "audio_sha256")
         ):
@@ -521,12 +594,16 @@ class DirectorAgent:
         origin = await readback_service(binding, root / "elevenlabs-origin-readback")
         quarantine = root / "elevenlabs-origin-readback"
         expected_audio_path = quarantine / f"{submission['history_item_id']}.audio"
-        expected_receipt_path = quarantine / f"{submission['history_item_id']}.receipt.json"
+        expected_receipt_path = (
+            quarantine / f"{submission['history_item_id']}.receipt.json"
+        )
         if (
             Path(getattr(origin, "audio_path", "")) != expected_audio_path
             or Path(getattr(origin, "receipt_path", "")) != expected_receipt_path
         ):
-            raise ValueError("readback service returned paths outside the configured quarantine")
+            raise ValueError(
+                "readback service returned paths outside the configured quarantine"
+            )
         try:
             receipt, _receipt_file_sha, receipt_bytes = load_strict_json_snapshot(
                 expected_receipt_path,
@@ -542,8 +619,12 @@ class DirectorAgent:
             )
             try:
                 opened = os.fstat(descriptor)
-                if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
-                    raise ValueError("materialized origin audio is missing or not a regular file")
+                if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(
+                    before, opened
+                ):
+                    raise ValueError(
+                        "materialized origin audio is missing or not a regular file"
+                    )
                 with os.fdopen(descriptor, "rb") as stream:
                     descriptor = None
                     audio = stream.read()
@@ -555,25 +636,52 @@ class DirectorAgent:
                     os.close(descriptor)
         except (TrustRootVerificationError, ValueError, OSError) as error:
             raise ValueError("materialized origin readback is unavailable") from error
-        if receipt_bytes != json.dumps(
-            receipt, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8") or getattr(origin, "receipt", None) != receipt:
+        if (
+            receipt_bytes
+            != json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+            or getattr(origin, "receipt", None) != receipt
+        ):
             raise ValueError("materialized origin receipt differs from callback result")
         receipt_fields = {
-            "schema", "request_id", "provider", "history_item_id", "provider_request_id", "source",
-            "voice_id", "model_id", "date_unix", "output_format", "returned_text_sha256",
-            "history_metadata_sha256", "voice_metadata_sha256", "audio_sha256", "audio_bytes",
-            "provider_output_hash", "authenticated_readback", "origin_provenance",
-            "voice_access_observation", "commercial_license", "acoustic_alignment",
-            "qualification_status", "status", "operations", "receipt_sha256",
+            "schema",
+            "request_id",
+            "provider",
+            "history_item_id",
+            "provider_request_id",
+            "source",
+            "voice_id",
+            "model_id",
+            "date_unix",
+            "output_format",
+            "returned_text_sha256",
+            "history_metadata_sha256",
+            "voice_metadata_sha256",
+            "audio_sha256",
+            "audio_bytes",
+            "provider_output_hash",
+            "authenticated_readback",
+            "origin_provenance",
+            "voice_access_observation",
+            "commercial_license",
+            "acoustic_alignment",
+            "qualification_status",
+            "status",
+            "operations",
+            "receipt_sha256",
         }
         if (
             set(receipt) != receipt_fields
             or receipt.get("schema") != "elevenlabs-history-origin-readback-v1"
             or receipt.get("receipt_sha256") != receipt_digest(receipt)
         ):
-            raise ValueError("materialized origin receipt schema or canonical hash is invalid")
-        if hashlib.sha256(audio).hexdigest() != receipt.get("audio_sha256") or len(audio) != receipt.get("audio_bytes"):
+            raise ValueError(
+                "materialized origin receipt schema or canonical hash is invalid"
+            )
+        if hashlib.sha256(audio).hexdigest() != receipt.get("audio_sha256") or len(
+            audio
+        ) != receipt.get("audio_bytes"):
             raise ValueError("materialized origin audio does not match its receipt")
         origin_bindings = {
             "request_id": candidate["request_id"],
@@ -585,17 +693,24 @@ class DirectorAgent:
             "audio_sha256": candidate["audio_sha256"],
         }
         if any(receipt.get(key) != value for key, value in origin_bindings.items()):
-            raise ValueError("materialized origin receipt does not close candidate and submission bindings")
+            raise ValueError(
+                "materialized origin receipt does not close candidate and submission bindings"
+            )
         if (
             receipt.get("authenticated_readback") != "TEST_NOT_AUTHORITY"
             or receipt.get("qualification_status") != "NOT_QUALIFIED"
             or receipt.get("status") != "TTS_REQUIRED"
-            or receipt.get("operations") != {
-                "provider_dispatch": "BLOCKED", "render": "BLOCKED",
-                "telegram": "BLOCKED", "publication": "BLOCKED",
+            or receipt.get("operations")
+            != {
+                "provider_dispatch": "BLOCKED",
+                "render": "BLOCKED",
+                "telegram": "BLOCKED",
+                "publication": "BLOCKED",
             }
         ):
-            raise ValueError("injected readback service returned an unsafe authority claim")
+            raise ValueError(
+                "injected readback service returned an unsafe authority claim"
+            )
         return {
             "candidate_receipt_sha256": candidate["receipt_sha256"],
             "submission_receipt_sha256": submission["receipt_sha256"],
@@ -714,6 +829,23 @@ class DirectorAgent:
         qa_packets = pipeline.prepare_qa_packets()
         if set(qa_packets) != set(receipts):
             raise ValueError("every completed compiled baseline requires a QA packet")
+        technical_rejections = {
+            scene_id: packet
+            for scene_id, packet in qa_packets.items()
+            if packet.get("technical_pass") is not True
+        }
+        if technical_rejections:
+            return {
+                "receipts": receipts,
+                "qa_packets": {},
+                "pending_visual_qa": {
+                    scene_id: packet
+                    for scene_id, packet in qa_packets.items()
+                    if scene_id not in technical_rejections
+                },
+                "technical_rejections": technical_rejections,
+                "state": state.current_state.value,
+            }
         state.transition_to(
             EpisodeState.VISUAL_QA,
             agent="CompiledProduction",
@@ -723,6 +855,64 @@ class DirectorAgent:
         return {
             "receipts": receipts,
             "qa_packets": qa_packets,
+            "technical_rejections": {},
+            "state": state.current_state.value,
+        }
+
+    async def dispatch_compiled_remediation(
+        self,
+        episode_id: str,
+        pipeline,
+        corrections: dict[str, str],
+        provider,
+        *,
+        prefetch: int = 0,
+        authorizations=None,
+        prices=None,
+    ) -> dict[str, Any]:
+        """Run hash-bound successors after technical rejection, then reopen visual QA."""
+        fs = EpisodeFS(episode_id, self.config)
+        state = EpisodeStateStore.load(fs.paths.state_json)
+        if state.current_state is not EpisodeState.GENERATING_IMAGES:
+            raise ValueError("compiled remediation requires GENERATING_IMAGES state")
+        receipts = await pipeline.dispatch_remediation_wave(
+            corrections,
+            provider,
+            prefetch=prefetch,
+            authorizations=authorizations,
+            prices=prices,
+        )
+        pipeline.run.executor.sync_cost_ledger(
+            fs.paths.costs_json, episode_id=episode_id, budget=self.config.budget
+        )
+        qa_packets = pipeline.prepare_qa_packets()
+        technical_rejections = {
+            scene_id: packet
+            for scene_id, packet in qa_packets.items()
+            if packet.get("technical_pass") is not True
+        }
+        if technical_rejections:
+            return {
+                "receipts": receipts,
+                "qa_packets": {},
+                "pending_visual_qa": {
+                    scene_id: packet
+                    for scene_id, packet in qa_packets.items()
+                    if scene_id not in technical_rejections
+                },
+                "technical_rejections": technical_rejections,
+                "state": state.current_state.value,
+            }
+        state.transition_to(
+            EpisodeState.VISUAL_QA,
+            agent="CompiledProduction",
+            note="technically valid remediation awaits independent visual QA",
+        )
+        state.save(fs.paths.state_json)
+        return {
+            "receipts": receipts,
+            "qa_packets": qa_packets,
+            "technical_rejections": {},
             "state": state.current_state.value,
         }
 
@@ -742,6 +932,7 @@ class DirectorAgent:
                 "result_sha256",
                 "approved",
                 "reviewer",
+                "reviewer_identity",
             }:
                 raise ValueError("visual QA decision schema is invalid")
             scene_id = decision["scene_id"]
@@ -751,6 +942,14 @@ class DirectorAgent:
                 not isinstance(decision["approved"], bool)
                 or not isinstance(decision["reviewer"], str)
                 or not decision["reviewer"].strip()
+                or not isinstance(decision["reviewer_identity"], dict)
+                or set(decision["reviewer_identity"]) != {"subject", "issuer"}
+                or not all(
+                    isinstance(decision["reviewer_identity"].get(key), str)
+                    and decision["reviewer_identity"][key].strip()
+                    for key in ("subject", "issuer")
+                )
+                or decision["reviewer_identity"]["subject"] == "generator"
             ):
                 raise ValueError(
                     "visual QA decision requires boolean verdict and reviewer"
@@ -770,6 +969,7 @@ class DirectorAgent:
                 decision["result_sha256"],
                 decision["approved"],
                 decision["reviewer"],
+                reviewer_identity=decision["reviewer_identity"],
             )
             approved[scene_id] = str(asset.path) if asset else ""
         if (
@@ -859,7 +1059,22 @@ class DirectorAgent:
         self, episode_id: str, pipeline, renderer, *, hold: int = 4
     ) -> dict[str, Any]:
         """Render a compiled master and materialize all evidence required by final QA."""
-        receipt = self.render_compiled_video(episode_id, pipeline, renderer, hold=hold)
+        render_task = asyncio.create_task(
+            asyncio.to_thread(
+                self.render_compiled_video,
+                episode_id,
+                pipeline,
+                renderer,
+                hold=hold,
+            )
+        )
+        try:
+            receipt = await asyncio.shield(render_task)
+        except asyncio.CancelledError:
+            # A worker thread cannot be stopped safely. Retain coroutine ownership
+            # until FFmpeg/state publication has unwound, then propagate cancellation.
+            await render_task
+            raise
         sidecars = await self.prepare_delivery_sidecars(episode_id, pipeline)
         return {"render_receipt": receipt, "sidecars": sidecars}
 
@@ -1365,16 +1580,22 @@ class DirectorAgent:
             EpisodeState.WAITING_THUMBNAIL_APPROVAL,
             EpisodeState.WAITING_VIDEO_APPROVAL,
         }:
-            raise ValueError("approval delivery requires an active thumbnail or video gate")
+            raise ValueError(
+                "approval delivery requires an active thumbnail or video gate"
+            )
 
         def delivery_identity(kind, path):
             receipt_path = fs.paths.qa_dir / "delivery" / f"{kind}.json"
             if receipt_path.is_file():
                 try:
-                    receipt = ApprovalReceipt(**_read_json_file(receipt_path)["approval"])
+                    receipt = ApprovalReceipt(
+                        **_read_json_file(receipt_path)["approval"]
+                    )
                     receipt.verify()
                 except (KeyError, TypeError, ValueError) as error:
-                    raise ValueError("delivery receipt no longer binds current media") from error
+                    raise ValueError(
+                        "delivery receipt no longer binds current media"
+                    ) from error
                 if Path(receipt.artifact_path).resolve() != Path(path).resolve():
                     raise ValueError("delivery path changed")
                 return receipt
@@ -1390,14 +1611,18 @@ class DirectorAgent:
                 receipt_dir=fs.paths.qa_dir / "delivery",
                 after_persist=after_persist,
             )
-        thumbnail_approval = load_approval_receipt(fs.paths.qa_dir / "approval-thumbnail.json")
+        thumbnail_approval = load_approval_receipt(
+            fs.paths.qa_dir / "approval-thumbnail.json"
+        )
         thumbnail_approval.verify()
         if (
             thumbnail_approval.artifact_kind != "thumbnail"
             or thumbnail_approval.artifact_path != thumbnail.artifact_path
             or thumbnail_approval.artifact_sha256 != thumbnail.artifact_sha256
         ):
-            raise ValueError("persisted thumbnail approval does not bind delivered thumbnail")
+            raise ValueError(
+                "persisted thumbnail approval does not bind delivered thumbnail"
+            )
         video = delivery_identity("video", fs.paths.final_video)
         return await controller.deliver_for_approval(
             chat_id=chat_id,

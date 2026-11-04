@@ -90,7 +90,9 @@ def _production(root: Path, *, workers: int, image_count: int, cas) -> Productio
 
 def _metrics(receipts, provider_submissions, maximum, queue: DurableQueue) -> dict:
     return {
-        "cache_hits": sum(receipt.get("cache_hit") is True for receipt in receipts.values()),
+        "cache_hits": sum(
+            receipt.get("cache_hit") is True for receipt in receipts.values()
+        ),
         "jobs": len(receipts),
         "max_active_workers": maximum,
         "provider_submissions": provider_submissions,
@@ -101,7 +103,9 @@ def _metrics(receipts, provider_submissions, maximum, queue: DurableQueue) -> di
 async def _run(root: Path, *, workers: int, prefetch: int, image_count: int) -> dict:
     store = ContentAddressedStore(root / "cas")
     provider = _BenchmarkProvider(root / "provider-results")
-    cold_run = _production(root / "cold", workers=workers, image_count=image_count, cas=store)
+    cold_run = _production(
+        root / "cold", workers=workers, image_count=image_count, cas=store
+    )
 
     cold_receipts = await cold_run.dispatch_baselines(provider, prefetch=prefetch)
     cold_queue = DurableQueue(
@@ -114,8 +118,33 @@ async def _run(root: Path, *, workers: int, prefetch: int, image_count: int) -> 
         queue=cold_queue,
     )
 
+    # Reconstruct the production control plane over the same durable queue and
+    # executor database. Completed receipts must survive restart without POST.
+    restarted_run = _production(
+        root / "cold", workers=workers, image_count=image_count, cas=store
+    )
+    before_restart = provider.submissions
+    provider.maximum = 0
+    restarted_receipts = await restarted_run.dispatch_baselines(
+        provider, prefetch=prefetch
+    )
+    restart = _metrics(
+        restarted_receipts,
+        provider_submissions=provider.submissions - before_restart,
+        maximum=provider.maximum,
+        queue=DurableQueue(
+            restarted_run.baseline_queue_path, workers=workers, prefetch=prefetch
+        ),
+    )
+
     for scene, receipt in cold_receipts.items():
-        cold_run.record_visual_qa(scene, receipt["result_sha256"], False, "benchmark-qa")
+        cold_run.record_visual_qa(
+            scene,
+            receipt["result_sha256"],
+            False,
+            "benchmark-qa",
+            reviewer_identity={"subject": "benchmark-qa", "issuer": "TEST"},
+        )
     before_corrections = provider.submissions
     provider.maximum = 0
     correction_receipts = await cold_run.dispatch_remediation_wave(
@@ -136,7 +165,9 @@ async def _run(root: Path, *, workers: int, prefetch: int, image_count: int) -> 
         queue=correction_queue,
     )
 
-    warm_run = _production(root / "warm", workers=workers, image_count=image_count, cas=store)
+    warm_run = _production(
+        root / "warm", workers=workers, image_count=image_count, cas=store
+    )
     before_warm = provider.submissions
     provider.maximum = 0
     warm_receipts = await warm_run.dispatch_baselines(provider, prefetch=prefetch)
@@ -153,6 +184,7 @@ async def _run(root: Path, *, workers: int, prefetch: int, image_count: int) -> 
     return {
         "schema": 1,
         "cold": cold,
+        "restart": restart,
         "warm": warm,
         "corrections": corrections,
         "worker_budget": {

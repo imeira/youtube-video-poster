@@ -44,19 +44,48 @@ def probe(path):
     )
 
 
-def measure_loudness(path):
+def measure_loudness(path, *, threads=1, filter_threads=1):
     """Analyze decoded final audio; loudnorm input values are measurements, not targets."""
-    result = subprocess.run(["ffmpeg", "-hide_banner", "-nostdin", "-v", "info",
-        "-i", str(path), "-map", "0:a:0", "-vn", "-sn", "-af",
-        "loudnorm=I=-16:TP=-1:print_format=json", "-f", "null", "-"],
-        capture_output=True, text=True, timeout=1800)
+    if any(type(value) is not int or value < 1 for value in (threads, filter_threads)):
+        raise ValueError("positive loudness analysis thread budgets required")
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-v",
+            "info",
+            "-threads",
+            str(threads),
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-filter_threads",
+            str(filter_threads),
+            "-af",
+            "loudnorm=I=-16:TP=-1:print_format=json",
+            "-f",
+            "null",
+            "-",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
     if result.returncode:
         raise ValueError("final audio analysis failed")
     matches = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', result.stderr)
     if len(matches) != 1:
         raise ValueError("final audio measurements missing")
     values = json.loads(matches[0])
-    measured = dict(integrated_lufs=float(values["input_i"]), true_peak_dbtp=float(values["input_tp"]))
+    measured = {
+        "integrated_lufs": float(values["input_i"]),
+        "true_peak_dbtp": float(values["input_tp"]),
+    }
     if not all(math.isfinite(v) for v in measured.values()):
         raise ValueError("non-finite final audio measurements")
     return measured
@@ -139,16 +168,23 @@ def validate_srt(path, duration):
 
 
 class LocalRenderer:
-    def __init__(self, width=1920, height=1080, fps=30, *, filter_complex_threads=None, scene_workers=1, encoder_threads=1):
+    def __init__(
+        self,
+        width=1920,
+        height=1080,
+        fps=30,
+        *,
+        filter_complex_threads=1,
+        scene_workers=1,
+        encoder_threads=1,
+    ):
         if (
             any(type(n) is not int or n <= 0 for n in (width, height, fps))
             or width % 2
             or height % 2
         ):
             raise ValueError("positive fps and even geometry required")
-        if filter_complex_threads is not None and (
-            type(filter_complex_threads) is not int or filter_complex_threads < 1
-        ):
+        if type(filter_complex_threads) is not int or filter_complex_threads < 1:
             raise ValueError("positive filter-complex thread budget required")
         if type(scene_workers) is not int or scene_workers < 1:
             raise ValueError("positive scene worker budget required")
@@ -158,7 +194,9 @@ class LocalRenderer:
         self.filter_complex_threads = filter_complex_threads
         self.scene_workers, self.encoder_threads = scene_workers, encoder_threads
 
-    def render_compiled(self, production, scenes, manifest, audio, srt, output, *, hold=4):
+    def render_compiled(
+        self, production, scenes, manifest, audio, srt, output, *, hold=4
+    ):
         """Render only after the compiled control plane has immutable QA receipts."""
         if not production.render_ready():
             raise ValueError("compiled QA receipts are incomplete; rendering blocked")
@@ -237,10 +275,12 @@ class LocalRenderer:
                             "ffmpeg",
                             "-v",
                             "error",
-                            "-threads",
+                            "-threads:v",
                             str(self.encoder_threads),
                             "-i",
                             str(source),
+                            "-filter_threads",
+                            str(self.filter_complex_threads),
                             "-vf",
                             filters,
                             "-t",
@@ -250,6 +290,8 @@ class LocalRenderer:
                             "libx264",
                             "-preset",
                             "veryfast",
+                            "-threads:v",
+                            str(self.encoder_threads),
                             str(root / f"scene{index}.mp4"),
                         ]
                     )
@@ -271,10 +313,12 @@ class LocalRenderer:
                         "ffmpeg",
                         "-v",
                         "error",
-                        "-threads",
+                        "-threads:v",
                         str(self.encoder_threads),
                         "-i",
                         str(source),
+                        "-filter_threads",
+                        str(self.filter_complex_threads),
                         "-vf",
                         motion,
                         "-frames:v",
@@ -284,6 +328,8 @@ class LocalRenderer:
                         "libx264",
                         "-preset",
                         "veryfast",
+                        "-threads:v",
+                        str(self.encoder_threads),
                         str(root / f"scene{index}.mp4"),
                     ]
                 )
@@ -291,11 +337,20 @@ class LocalRenderer:
                 futures = [pool.submit(command, args) for args in scene_commands]
                 for future in futures:
                     future.result()
-            args = ["ffmpeg", "-v", "error"]
-            if self.filter_complex_threads is not None:
-                args += ["-filter_complex_threads", str(self.filter_complex_threads)]
+            args = [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-filter_complex_threads",
+                str(self.filter_complex_threads),
+            ]
             for index in range(len(scenes)):
-                args += ["-i", str(root / f"scene{index}.mp4")]
+                args += [
+                    "-threads:v",
+                    str(self.encoder_threads),
+                    "-i",
+                    str(root / f"scene{index}.mp4"),
+                ]
             filters = [
                 f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS[v{i}]"
                 for i in range(len(scenes))
@@ -325,6 +380,8 @@ class LocalRenderer:
                 "libx264",
                 "-preset",
                 "veryfast",
+                "-threads:v",
+                str(self.encoder_threads),
                 "-t",
                 str(timeline["final_seconds"]),
                 str(root / "visual.mp4"),
@@ -336,8 +393,12 @@ class LocalRenderer:
                 "ffmpeg",
                 "-v",
                 "error",
+                "-threads:v",
+                str(self.encoder_threads),
                 "-i",
                 str(root / "visual.mp4"),
+                "-threads:a",
+                str(self.encoder_threads),
                 "-i",
                 str(audio_copy),
                 "-map",
@@ -351,7 +412,16 @@ class LocalRenderer:
                 # Preserve approved narration bytes separately and derive the
                 # delivery-only AAC master required by the MP4 contract.
                 audio_operation = "derived_master"
-                master_args += ["-af", "loudnorm=I=-16:TP=-1.0:LRA=11", "-c:a", "aac"]
+                master_args += [
+                    "-filter_threads",
+                    str(self.filter_complex_threads),
+                    "-af",
+                    "loudnorm=I=-16:TP=-1.0:LRA=11",
+                    "-c:a",
+                    "aac",
+                    "-threads:a",
+                    str(self.encoder_threads),
+                ]
             else:
                 master_args += ["-c:a", "copy"]
             master_args.append(str(master))

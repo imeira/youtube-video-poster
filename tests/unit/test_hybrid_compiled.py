@@ -68,7 +68,9 @@ def test_compile_rejects_nonsemantic_or_overlapping_timestamps(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_compiled_episode_batches_baselines_and_releases_only_approved_heroes(tmp_path):
+async def test_compiled_episode_batches_baselines_and_releases_only_approved_heroes(
+    tmp_path,
+):
     from src.hybrid.compiled import CompiledEpisode, FrameSpec, ProductionRun
 
     audio = tmp_path / "narration.wav"
@@ -84,7 +86,9 @@ async def test_compiled_episode_batches_baselines_and_releases_only_approved_her
     manifest = source_manifest(tmp_path)
     executor = Executor(tmp_path / "control.db", Config(concurrency=2))
     provider = Provider(tmp_path)
-    run = ProductionRun(episode, executor, manifest, endpoint="flux", image_cost=Decimal(".02"))
+    run = ProductionRun(
+        episode, executor, manifest, endpoint="flux", image_cost=Decimal(".02")
+    )
 
     receipts = await run.dispatch_baselines(provider)
 
@@ -93,10 +97,36 @@ async def test_compiled_episode_batches_baselines_and_releases_only_approved_her
     assert all(job.payload["prompt"].startswith("prompt") for job in provider.calls)
     assert run.eligible_hero_jobs(Decimal(".26"), "seedance") == ()
 
-    run.record_visual_qa("R001", receipts["R001"]["result_sha256"], True, "independent-qa")
-    run.record_visual_qa("R002", receipts["R002"]["result_sha256"], True, "independent-qa")
+    with pytest.raises(ValueError, match="independent"):
+        run.record_visual_qa(
+            "R001",
+            receipts["R001"]["result_sha256"],
+            True,
+            "mock rejection",
+        )
+
+    run.record_visual_qa(
+        "R001",
+        receipts["R001"]["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+    )
+    run.record_visual_qa(
+        "R002",
+        receipts["R002"]["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+    )
     with pytest.raises(ValueError, match="immutable"):
-        run.record_visual_qa("R001", receipts["R001"]["result_sha256"], False, "other-qa")
+        run.record_visual_qa(
+            "R001",
+            receipts["R001"]["result_sha256"],
+            False,
+            "other-qa",
+            reviewer_identity={"subject": "other-qa", "issuer": "TEST"},
+        )
     heroes = run.eligible_hero_jobs(Decimal(".26"), "seedance")
 
     assert len(heroes) == 1
@@ -104,9 +134,17 @@ async def test_compiled_episode_batches_baselines_and_releases_only_approved_her
     assert run.render_ready() is False
 
     hero_receipt = await executor.run(heroes[0], provider)
-    resumed = ProductionRun(episode, executor, manifest, endpoint="flux", image_cost=Decimal(".02"))
+    resumed = ProductionRun(
+        episode, executor, manifest, endpoint="flux", image_cost=Decimal(".02")
+    )
     assert resumed.eligible_hero_jobs(Decimal(".26"), "seedance") == ()
-    run.record_visual_qa("R001", hero_receipt["result_sha256"], True, "independent-qa")
+    run.record_visual_qa(
+        "R001",
+        hero_receipt["result_sha256"],
+        True,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+    )
     assert run.render_ready() is True
 
 
@@ -149,7 +187,9 @@ def test_compiled_run_allows_one_remediation_only_after_hash_bound_rejection(tmp
     audio = tmp_path / "narration.wav"
     audio.write_bytes(b"approved narration")
     episode = CompiledEpisode.compile(
-        "EP8", FrozenAsset.approve(audio, "audio-qa", "TEST"), (FrameSpec("R001", 0, 2, "prompt", "ação"),)
+        "EP8",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        (FrameSpec("R001", 0, 2, "prompt", "ação"),),
     )
     run = ProductionRun(
         episode,
@@ -170,7 +210,9 @@ def test_renderer_refuses_compiled_run_without_all_qa_receipts(tmp_path):
     audio = tmp_path / "narration.wav"
     audio.write_bytes(b"approved narration")
     episode = CompiledEpisode.compile(
-        "EP8", FrozenAsset.approve(audio, "audio-qa", "TEST"), (FrameSpec("R001", 0, 2, "prompt", "ação"),)
+        "EP8",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        (FrameSpec("R001", 0, 2, "prompt", "ação"),),
     )
     run = ProductionRun(
         episode,
@@ -181,4 +223,6 @@ def test_renderer_refuses_compiled_run_without_all_qa_receipts(tmp_path):
     )
 
     with pytest.raises(ValueError, match="compiled QA"):
-        LocalRenderer().render_compiled(run, (), None, None, None, tmp_path / "final.mkv")
+        LocalRenderer().render_compiled(
+            run, (), None, None, None, tmp_path / "final.mkv"
+        )

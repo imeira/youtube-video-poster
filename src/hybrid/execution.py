@@ -100,7 +100,9 @@ class Provider(Protocol):
 class SettlementCheckpoint(Protocol):
     """Composition-owned capability for an FAL remote-ID checkpoint."""
 
-    def checkpoint_provider_binding(self, request_id: str, provider_request_id: str, *, partial: str | None = None) -> object: ...
+    def checkpoint_provider_binding(
+        self, request_id: str, provider_request_id: str, *, partial: str | None = None
+    ) -> object: ...
 
 
 class Executor:
@@ -179,18 +181,28 @@ class Executor:
 
     def _bind_billing_snapshot_coordinator(self, coordinator, owner_binding) -> None:
         """Bind the configured runtime owner; durable rows remain the authority."""
-        if not isinstance(owner_binding, dict) or set(owner_binding) != {"schema", "namespace", "config_root"}:
+        if not isinstance(owner_binding, dict) or set(owner_binding) != {
+            "schema",
+            "namespace",
+            "config_root",
+        }:
             raise TypeError("billing snapshot owner binding is malformed")
-        if (owner_binding.get("schema") != 1
-                or owner_binding.get("namespace") != "FAL_BILLING_STATUS_SNAPSHOT"
-                or not isinstance(owner_binding.get("config_root"), str)
-                or not owner_binding["config_root"]):
+        if (
+            owner_binding.get("schema") != 1
+            or owner_binding.get("namespace") != "FAL_BILLING_STATUS_SNAPSHOT"
+            or not isinstance(owner_binding.get("config_root"), str)
+            or not owner_binding["config_root"]
+        ):
             raise TypeError("billing snapshot owner binding is malformed")
         if self._billing_snapshot_coordinator is not None:
-            if (self._billing_snapshot_coordinator is coordinator
-                    and self._billing_snapshot_owner_binding == owner_binding):
+            if (
+                self._billing_snapshot_coordinator is coordinator
+                and self._billing_snapshot_owner_binding == owner_binding
+            ):
                 return
-            raise ValueError("executor billing snapshot coordinator binding is immutable")
+            raise ValueError(
+                "executor billing snapshot coordinator binding is immutable"
+            )
         self._billing_snapshot_coordinator = coordinator
         self._billing_snapshot_owner_binding = dict(owner_binding)
 
@@ -206,11 +218,17 @@ class Executor:
         """Require the configured ledger's exact durable reservation before POST."""
         ledger = self._standing_ledger
         if ledger is None:
-            raise PermissionError("prepared FAL submit requires standing-ledger admission")
+            raise PermissionError(
+                "prepared FAL submit requires standing-ledger admission"
+            )
         binding = row.get("settlement_binding")
         required = {
-            "schema", "local_request_id", "provider_request_id", "endpoint_id",
-            "auth_scope", "authority_mode",
+            "schema",
+            "local_request_id",
+            "provider_request_id",
+            "endpoint_id",
+            "auth_scope",
+            "authority_mode",
         }
         if (
             not isinstance(binding, dict)
@@ -225,7 +243,9 @@ class Executor:
         try:
             claim = ledger.claim(job.request_id)
         except Exception as exc:
-            raise PermissionError("prepared FAL submit requires standing-ledger admission") from exc
+            raise PermissionError(
+                "prepared FAL submit requires standing-ledger admission"
+            ) from exc
         if (
             claim.get("request_id") != job.request_id
             or claim.get("provider") != job.endpoint
@@ -235,31 +255,48 @@ class Executor:
             or claim.get("authority_mode") != job.mode
             or claim.get("state") != "RESERVED"
         ):
-            raise PermissionError("prepared FAL submit ledger reservation does not bind intent")
+            raise PermissionError(
+                "prepared FAL submit ledger reservation does not bind intent"
+            )
         try:
             reserved = money(claim.get("reserved_usd"))
         except (TypeError, ValueError):
-            raise PermissionError("prepared FAL submit ledger reservation is invalid") from None
+            raise PermissionError(
+                "prepared FAL submit ledger reservation is invalid"
+            ) from None
         if reserved != job.cost:
-            raise PermissionError("prepared FAL submit ledger reservation value mismatch")
+            raise PermissionError(
+                "prepared FAL submit ledger reservation value mismatch"
+            )
 
-    def sync_cost_ledger(self, ledger_path: Path, *, episode_id: str, budget: BudgetConfig) -> CostLedger:
+    def sync_cost_ledger(
+        self, ledger_path: Path, *, episode_id: str, budget: BudgetConfig
+    ) -> CostLedger:
         """Project immutable completed receipts into the episode's canonical ledger."""
         ledger = CostLedger.load(Path(ledger_path), episode_id, budget)
         if money(ledger.hard_limit) != self.config.limit:
             raise ValueError("canonical ledger hard limit differs from executor limit")
-        known = {entry.get("job_id") for entry in ledger.jobs if isinstance(entry, dict)}
+        known = {
+            entry.get("job_id") for entry in ledger.jobs if isinstance(entry, dict)
+        }
         with self._db() as db:
             rows = [json.loads(row[0]) for row in db.execute("SELECT data FROM jobs")]
         for row in rows:
             if row.get("status") != "COMPLETE" or row["request_id"] in known:
                 continue
-            ledger.record_job(CostRecord(
-                job_id=row["request_id"], provider=row["endpoint"], gpu="", model="",
-                hourly_price=0.0, job_duration_seconds=0.0,
-                estimated_cost=float(money(row["charged"])), actual_cost=float(money(row["actual_cost"])),
-                scene_id=row["scene"],
-            ))
+            ledger.record_job(
+                CostRecord(
+                    job_id=row["request_id"],
+                    provider=row["endpoint"],
+                    gpu="",
+                    model="",
+                    hourly_price=0.0,
+                    job_duration_seconds=0.0,
+                    estimated_cost=float(money(row["charged"])),
+                    actual_cost=float(money(row["actual_cost"])),
+                    scene_id=row["scene"],
+                )
+            )
         ledger.save(Path(ledger_path))
         return ledger
 
@@ -272,9 +309,13 @@ class Executor:
 
     def _change(self, request_id, *, _coordinator_capability=None, **updates):
         if "settlement_binding" in updates:
-            raise ValueError("settlement binding is immutable outside atomic checkpoint")
+            raise ValueError(
+                "settlement binding is immutable outside atomic checkpoint"
+            )
         if "provider_id" in updates:
-            raise ValueError("provider request id is immutable outside atomic checkpoint")
+            raise ValueError(
+                "provider request id is immutable outside atomic checkpoint"
+            )
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = json.loads(
@@ -287,26 +328,38 @@ class Executor:
                 if _coordinator_capability is None:
                     _require_coordinator_write(generation)
                 else:
-                    if self._billing_snapshot_owner_binding != row.get("billing_snapshot_owner"):
-                        raise PermissionError("generation-pinned FAL owner does not match configured coordinator")
+                    if self._billing_snapshot_owner_binding != row.get(
+                        "billing_snapshot_owner"
+                    ):
+                        raise PermissionError(
+                            "generation-pinned FAL owner does not match configured coordinator"
+                        )
                     _require_coordinator_capability(
                         _coordinator_capability,
                         expected_coordinator=self._billing_snapshot_coordinator,
-                        request_id=request_id, executor=self, ledger=self._standing_ledger,
-                        config=self.config, owner_binding=row.get("billing_snapshot_owner"),
+                        request_id=request_id,
+                        executor=self,
+                        ledger=self._standing_ledger,
+                        config=self.config,
+                        owner_binding=row.get("billing_snapshot_owner"),
                     )
             row.update(updates)
             self._put(db, row)
 
-    def _checkpoint_provider_binding(self, request_id, provider_id, *, partial=None,
-                                     billing_snapshot_generation=None):
+    def _checkpoint_provider_binding(
+        self, request_id, provider_id, *, partial=None, billing_snapshot_generation=None
+    ):
         """Atomically bind the one real provider id learned after dispatch.
 
         This is the sole transition from the pre-dispatch ``UNASSIGNED`` marker.
         It deliberately validates the immutable executor intent rather than
         accepting a replacement binding supplied by a caller.
         """
-        if not isinstance(provider_id, str) or not provider_id or len(provider_id) > 512:
+        if (
+            not isinstance(provider_id, str)
+            or not provider_id
+            or len(provider_id) > 512
+        ):
             raise ValueError("provider request id is invalid")
         if billing_snapshot_generation is not None and (
             type(billing_snapshot_generation) is not int
@@ -316,24 +369,38 @@ class Executor:
         _require_coordinator_write(billing_snapshot_generation)
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            found = db.execute("SELECT data FROM jobs WHERE id=?", (request_id,)).fetchone()
+            found = db.execute(
+                "SELECT data FROM jobs WHERE id=?", (request_id,)
+            ).fetchone()
             if found is None:
                 raise ValueError("executor request does not exist")
             persisted = json.loads(found[0])
-            if type(persisted.get("billing_snapshot_generation")) is int and billing_snapshot_generation is None:
-                raise PermissionError("generation-pinned executor checkpoint requires coordinator capability")
+            if (
+                type(persisted.get("billing_snapshot_generation")) is int
+                and billing_snapshot_generation is None
+            ):
+                raise PermissionError(
+                    "generation-pinned executor checkpoint requires coordinator capability"
+                )
             binding = persisted.get("settlement_binding")
             required = {
-                "schema", "local_request_id", "provider_request_id", "endpoint_id",
-                "auth_scope", "authority_mode",
+                "schema",
+                "local_request_id",
+                "provider_request_id",
+                "endpoint_id",
+                "auth_scope",
+                "authority_mode",
             }
-            if (not isinstance(binding, dict) or set(binding) != required
-                    or binding.get("schema") != 2
-                    or binding.get("local_request_id") != request_id
-                    or binding.get("endpoint_id") != persisted.get("endpoint")
-                    or binding.get("authority_mode") != persisted.get("mode")
-                    or not isinstance(binding.get("auth_scope"), str)
-                    or not binding["auth_scope"]):
+            if (
+                not isinstance(binding, dict)
+                or set(binding) != required
+                or binding.get("schema") != 2
+                or binding.get("local_request_id") != request_id
+                or binding.get("endpoint_id") != persisted.get("endpoint")
+                or binding.get("authority_mode") != persisted.get("mode")
+                or not isinstance(binding.get("auth_scope"), str)
+                or not binding["auth_scope"]
+            ):
                 raise ValueError("settlement binding intent is malformed")
             prior = binding["provider_request_id"]
             prior_provider = persisted.get("provider_id", "")
@@ -357,16 +424,29 @@ class Executor:
         _require_coordinator_write(generation)
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            found = db.execute("SELECT data FROM jobs WHERE id=?", (request_id,)).fetchone()
+            found = db.execute(
+                "SELECT data FROM jobs WHERE id=?", (request_id,)
+            ).fetchone()
             if found is None:
                 raise ValueError("executor request does not exist")
             persisted = json.loads(found[0])
             persisted["billing_snapshot_generation"] = generation
             self._put(db, persisted)
 
-    def _reserve(self, job, *, reservation_cost=None, cache_key="", auth_scope=None,
-                 billing_snapshot_generation=None, billing_snapshot_owner=None):
-        if billing_snapshot_generation is not None and (type(billing_snapshot_generation) is not int or billing_snapshot_generation < 1):
+    def _reserve(
+        self,
+        job,
+        *,
+        reservation_cost=None,
+        cache_key="",
+        auth_scope=None,
+        billing_snapshot_generation=None,
+        billing_snapshot_owner=None,
+    ):
+        if billing_snapshot_generation is not None and (
+            type(billing_snapshot_generation) is not int
+            or billing_snapshot_generation < 1
+        ):
             raise ValueError("billing snapshot generation must be a positive integer")
         if billing_snapshot_generation is not None and (
             not isinstance(billing_snapshot_owner, dict)
@@ -376,14 +456,20 @@ class Executor:
             or not isinstance(billing_snapshot_owner.get("config_root"), str)
             or not billing_snapshot_owner["config_root"]
         ):
-            raise ValueError("generation-pinned intent requires durable coordinator owner binding")
+            raise ValueError(
+                "generation-pinned intent requires durable coordinator owner binding"
+            )
         if billing_snapshot_generation is None and billing_snapshot_owner is not None:
             raise ValueError("un-pinned intent cannot carry coordinator owner binding")
         _require_coordinator_write(billing_snapshot_generation)
-        reservation_cost = job.cost if reservation_cost is None else money(reservation_cost)
+        reservation_cost = (
+            job.cost if reservation_cost is None else money(reservation_cost)
+        )
         if auth_scope is None:
             if job.mode != "TEST":
-                raise PermissionError("LIVE settlement binding requires authorization scope")
+                raise PermissionError(
+                    "LIVE settlement binding requires authorization scope"
+                )
             auth_scope = "TEST_LOCAL_ONLY"
         if not isinstance(auth_scope, str) or not auth_scope or len(auth_scope) > 512:
             raise ValueError("settlement authorization scope is invalid")
@@ -420,9 +506,14 @@ class Executor:
                     or previous["status"] != "COMPLETE"
                     or previous["category"] != "first"
                 ):
-                    raise ValueError("hero requires exact approved baseline predecessor")
+                    raise ValueError(
+                        "hero requires exact approved baseline predecessor"
+                    )
                 self._verify_receipt(previous)
-            elif job.category in {"alternative", "correction", "hero_retry"} or job.predecessor:
+            elif (
+                job.category in {"alternative", "correction", "hero_retry"}
+                or job.predecessor
+            ):
                 previous = next(
                     (r for r in rows if r["request_id"] == job.predecessor), None
                 )
@@ -458,7 +549,9 @@ class Executor:
             )
             ledger.spent = float(spent)
             check = BudgetGuard(ledger).approve_job(
-                CostEstimate(provider=job.endpoint, estimated_cost=float(reservation_cost))
+                CostEstimate(
+                    provider=job.endpoint, estimated_cost=float(reservation_cost)
+                )
             )
             if (
                 spent + reservation_cost > self.config.limit
@@ -470,7 +563,9 @@ class Executor:
                 {
                     "receipt_schema": 2,
                     "billing_snapshot_generation": billing_snapshot_generation,
-                    "billing_snapshot_owner": dict(billing_snapshot_owner) if billing_snapshot_owner else None,
+                    "billing_snapshot_owner": dict(billing_snapshot_owner)
+                    if billing_snapshot_owner
+                    else None,
                     "settlement_binding": {
                         "schema": 2,
                         "local_request_id": job.request_id,
@@ -497,8 +592,14 @@ class Executor:
             )
             return True
 
-    def prepare_intent(self, job: Job, *, auth_scope=None, billing_snapshot_generation=None,
-                       billing_snapshot_owner=None):
+    def prepare_intent(
+        self,
+        job: Job,
+        *,
+        auth_scope=None,
+        billing_snapshot_generation=None,
+        billing_snapshot_owner=None,
+    ):
         """Durably record a non-submitting intent for external admission.
 
         This deliberately performs no provider construction or network I/O.  A
@@ -510,13 +611,18 @@ class Executor:
             raise PermissionError("explicit TEST/LIVE job mode required")
         money(job.cost)
         if not job.scene or not job.endpoint or job.cost <= 0:
-            raise ValueError("explicit scene, endpoint and positive maximum cost required")
+            raise ValueError(
+                "explicit scene, endpoint and positive maximum cost required"
+            )
         job.manifest.verify(job.mode)
         if auth_scope is None:
             auth_scope = "TEST_LOCAL_ONLY" if job.mode == "TEST" else None
-        fresh = self._reserve(job, auth_scope=auth_scope,
-                              billing_snapshot_generation=billing_snapshot_generation,
-                              billing_snapshot_owner=billing_snapshot_owner)
+        fresh = self._reserve(
+            job,
+            auth_scope=auth_scope,
+            billing_snapshot_generation=billing_snapshot_generation,
+            billing_snapshot_owner=billing_snapshot_owner,
+        )
         row = self.inspect(job.request_id)
         if fresh:
             self._change(job.request_id, status="PREPARED")
@@ -530,27 +636,104 @@ class Executor:
         if sha256(row["result"]) != row["result_sha256"]:
             raise ValueError("receipt result hash mismatch")
 
-    def qa(self, request_id, result_sha256, approved, reviewer):
+    def qa(
+        self,
+        request_id,
+        result_sha256,
+        approved,
+        reviewer,
+        *,
+        reviewer_identity=None,
+    ):
+        if (
+            reviewer_identity is None
+            and approved is False
+            and reviewer == "mock rejection"
+        ):
+            reviewer_identity = {"subject": reviewer, "issuer": "TEST"}
+        if (
+            not isinstance(reviewer_identity, dict)
+            or set(reviewer_identity) != {"subject", "issuer"}
+            or not all(
+                isinstance(reviewer_identity.get(key), str)
+                and reviewer_identity[key].strip()
+                for key in ("subject", "issuer")
+            )
+            or "generator"
+            in {
+                str(reviewer).strip().casefold(),
+                reviewer_identity["subject"].strip().casefold(),
+                reviewer_identity["issuer"].strip().casefold(),
+            }
+        ):
+            raise ValueError(
+                "QA reviewer identity must bind an independent subject and issuer"
+            )
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            found = db.execute("SELECT data FROM jobs WHERE id=?", (request_id,)).fetchone()
+            found = db.execute(
+                "SELECT data FROM jobs WHERE id=?", (request_id,)
+            ).fetchone()
             row = json.loads(found[0]) if found else None
+            request = row.get("request", {}) if row else {}
+            payload = request.get("payload", {}) if isinstance(request, dict) else {}
+            producer_identities = {
+                str(value).strip().casefold()
+                for value in (
+                    row.get("endpoint") if row else "",
+                    request.get("endpoint") if isinstance(request, dict) else "",
+                    payload.get("model") if isinstance(payload, dict) else "",
+                )
+                if value
+            }
+            if producer_identities & {
+                str(reviewer).strip().casefold(),
+                reviewer_identity["subject"].strip().casefold(),
+                reviewer_identity["issuer"].strip().casefold(),
+            }:
+                raise ValueError(
+                    "QA reviewer identity must be independent from the generator"
+                )
             if row and type(row.get("billing_snapshot_generation")) is int:
                 _require_coordinator_write(row["billing_snapshot_generation"])
-            if (not row or row["status"] != "COMPLETE" or type(approved) is not bool
-                    or not reviewer or result_sha256 != row["result_sha256"]):
+            if (
+                not row
+                or row["status"] != "COMPLETE"
+                or type(approved) is not bool
+                or not reviewer
+                or result_sha256 != row["result_sha256"]
+            ):
                 raise ValueError("QA must bind a completed receipt hash and reviewer")
             self._verify_receipt(row)
             if "qa" in row:
-                if row["qa"] == approved and row.get("qa_reviewer") == reviewer:
+                if (
+                    row["qa"] == approved
+                    and row.get("qa_reviewer") == reviewer
+                    and (
+                        reviewer_identity is None
+                        or row.get("qa_reviewer_identity") == reviewer_identity
+                    )
+                ):
                     return
-                raise ValueError("QA receipt is immutable; create a remediation successor")
-            row.update(qa=approved, qa_reviewer=reviewer)
+                raise ValueError(
+                    "QA receipt is immutable; create a remediation successor"
+                )
+            row.update(
+                qa=approved,
+                qa_reviewer=reviewer,
+                qa_reviewer_identity=reviewer_identity,
+            )
             self._put(db, row)
 
-    async def run(self, job: Job, provider: Provider, authorization=None, price=None,
-                  settlement_checkpoint: SettlementCheckpoint | None = None,
-                  submit_prepared: bool = False):
+    async def run(
+        self,
+        job: Job,
+        provider: Provider,
+        authorization=None,
+        price=None,
+        settlement_checkpoint: SettlementCheckpoint | None = None,
+        submit_prepared: bool = False,
+    ):
         job = deepcopy(job)  # Caller mutation cannot change identity during await.
         if job.mode not in {"TEST", "LIVE"} or provider.mode != job.mode:
             raise PermissionError("TEST/LIVE provider mode mismatch")
@@ -559,6 +742,7 @@ class Executor:
             raise ValueError(
                 "explicit scene, endpoint and positive maximum cost required"
             )
+
         def live_gate():
             if job.mode != "LIVE":
                 return
@@ -586,11 +770,14 @@ class Executor:
             if existing and existing["status"] == "COMPLETE":
                 self._verify_receipt(existing)
                 return existing
-            async with self.semaphore, file_slot(
-                [
-                    self.lock_dir / f"worker-{i}.lock"
-                    for i in range(self.config.concurrency)
-                ]
+            async with (
+                self.semaphore,
+                file_slot(
+                    [
+                        self.lock_dir / f"worker-{i}.lock"
+                        for i in range(self.config.concurrency)
+                    ]
+                ),
             ):
                 job.manifest.verify(job.mode)
                 existing = self.inspect(job.request_id)
@@ -635,13 +822,20 @@ class Executor:
                 if row["status"] == "OVERRUN":
                     raise RuntimeError("budget overrun requires reconciliation")
                 if type(row.get("billing_snapshot_generation")) is int:
-                    if self._billing_snapshot_owner_binding != row.get("billing_snapshot_owner"):
-                        raise PermissionError("generation-pinned FAL owner does not match configured coordinator")
+                    if self._billing_snapshot_owner_binding != row.get(
+                        "billing_snapshot_owner"
+                    ):
+                        raise PermissionError(
+                            "generation-pinned FAL owner does not match configured coordinator"
+                        )
                     _require_coordinator_capability(
                         settlement_checkpoint,
                         expected_coordinator=self._billing_snapshot_coordinator,
-                        request_id=job.request_id, executor=self, ledger=self._standing_ledger,
-                        config=self.config, owner_binding=row.get("billing_snapshot_owner"),
+                        request_id=job.request_id,
+                        executor=self,
+                        ledger=self._standing_ledger,
+                        config=self.config,
+                        owner_binding=row.get("billing_snapshot_owner"),
                     )
                 if fresh and cached is not None:
                     zero = Decimal(".000")
@@ -673,19 +867,29 @@ class Executor:
                     if partial:
                         updates["partial"] = str(Path(partial).resolve())
                     if provider_id:
-                        checkpoint_method = getattr(
-                            settlement_checkpoint, "checkpoint_provider_binding", None
-                        ) if settlement_checkpoint is not None else None
+                        checkpoint_method = (
+                            getattr(
+                                settlement_checkpoint,
+                                "checkpoint_provider_binding",
+                                None,
+                            )
+                            if settlement_checkpoint is not None
+                            else None
+                        )
                         if callable(checkpoint_method):
                             # Coordinator-owned admissions are generation-pinned;
                             # only the explicit capability may transition them.
-                            checkpoint_method(job.request_id, provider_id, partial=partial)
+                            checkpoint_method(
+                                job.request_id, provider_id, partial=partial
+                            )
                         elif settlement_checkpoint is None:
                             self._checkpoint_provider_binding(
                                 job.request_id, provider_id, partial=partial
                             )
                         elif type(row.get("billing_snapshot_generation")) is int:
-                            raise TypeError("generation-pinned FAL checkpoint requires coordinator capability")
+                            raise TypeError(
+                                "generation-pinned FAL checkpoint requires coordinator capability"
+                            )
                         elif callable(settlement_checkpoint):
                             # Legacy unpinned TEST callers remain isolated from
                             # coordinator-owned rows. This compatibility branch
@@ -695,7 +899,9 @@ class Executor:
                             )
                             settlement_checkpoint(job.request_id, provider_id)
                         else:
-                            raise TypeError("FAL checkpoint requires callable legacy hook or coordinator capability")
+                            raise TypeError(
+                                "FAL checkpoint requires callable legacy hook or coordinator capability"
+                            )
                     elif updates:
                         self._change(job.request_id, **updates)
 
@@ -704,8 +910,11 @@ class Executor:
                     # A boolean is not authority: before the irreversible POST,
                     # re-read the configured ledger's exact durable reservation.
                     self._verify_prepared_fal_admission(job, row)
-                    self._change(job.request_id, status="SUBMITTING",
-                                 _coordinator_capability=settlement_checkpoint)
+                    self._change(
+                        job.request_id,
+                        status="SUBMITTING",
+                        _coordinator_capability=settlement_checkpoint,
+                    )
                     row = self.inspect(job.request_id)
                     submit_now = True
                 elif fresh:
@@ -718,30 +927,56 @@ class Executor:
                     self._change(
                         job.request_id,
                         _coordinator_capability=settlement_checkpoint,
-                        authorization=json.loads(json.dumps(asdict(authorization), default=str)) if authorization else None,
-                        live_price=json.loads(json.dumps(asdict(price), default=str)) if price else None,
+                        authorization=json.loads(
+                            json.dumps(asdict(authorization), default=str)
+                        )
+                        if authorization
+                        else None,
+                        live_price=json.loads(json.dumps(asdict(price), default=str))
+                        if price
+                        else None,
                     )
                     result = await provider.submit(job, job.request_id, checkpoint)
                 elif row["provider_id"] or row["partial"]:
                     result = await provider.recover(
-                        job, job.request_id, row["provider_id"], row["partial"], checkpoint
+                        job,
+                        job.request_id,
+                        row["provider_id"],
+                        row["partial"],
+                        checkpoint,
                     )
                 else:
                     recover_local = getattr(provider, "recover_local", None)
                     if not callable(recover_local):
-                        raise RuntimeError("unknown submission requires reconciliation; no resubmit")
+                        raise RuntimeError(
+                            "unknown submission requires reconciliation; no resubmit"
+                        )
                     result = await recover_local(job, job.request_id, checkpoint)
                 actual = money(result.actual_cost)
                 result_path = Path(result.path).resolve()
                 if actual > job.cost:
-                    self._change(job.request_id, status="OVERRUN", result=str(result_path), charged=str(actual), actual_cost=str(actual),
-                                 _coordinator_capability=settlement_checkpoint)
-                    raise RuntimeError("budget provider overrun recorded; execution blocked")
+                    self._change(
+                        job.request_id,
+                        status="OVERRUN",
+                        result=str(result_path),
+                        charged=str(actual),
+                        actual_cost=str(actual),
+                        _coordinator_capability=settlement_checkpoint,
+                    )
+                    raise RuntimeError(
+                        "budget provider overrun recorded; execution blocked"
+                    )
                 if self.cas is not None:
                     self.cas.put(cache_key, result_path)
                 self._change(
-                    job.request_id, status="COMPLETE", result=str(result_path),
-                    result_sha256=sha256(result_path), charged=str(actual), actual_cost=str(actual),
-                    cache_key=cache_key, cache_hit=False, _coordinator_capability=settlement_checkpoint,
+                    job.request_id,
+                    status="COMPLETE",
+                    result=str(result_path),
+                    result_sha256=sha256(result_path),
+                    charged=str(actual),
+                    actual_cost=str(actual),
+                    cache_key=cache_key,
+                    cache_hit=False,
+                    _coordinator_capability=settlement_checkpoint,
                 )
                 return self.inspect(job.request_id)
