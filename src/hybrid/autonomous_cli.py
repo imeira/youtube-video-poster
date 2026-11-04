@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -117,9 +118,34 @@ class FixtureProvider:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def _record_test_post(self) -> None:
+        """Persist TEST-only POST evidence before the remote-ID checkpoint."""
+        counter = self.root / "fixture-post-count.json"
+        with file_lock(self.root / "fixture-post-count.lock"):
+            previous = json.loads(counter.read_text(encoding="utf-8")) if counter.is_file() else {"posts": 0}
+            if set(previous) != {"posts"} or type(previous["posts"]) is not int or previous["posts"] < 0:
+                raise RuntimeError("TEST fixture POST counter is invalid")
+            _atomic_json(counter, {"posts": previous["posts"] + 1})
+
+    def _image_result(self, job, rid):
+        out = self.root / f"{rid}.TEST.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        image = Image.new("RGB", (1280, 720), "#14213d")
+        ImageDraw.Draw(image).text(
+            (20, 20), "TEST FIXTURE - NOT EPISODE MEDIA", fill="white"
+        )
+        image.save(out)
+        image.save(self.root / "fixture-source.png")
+        return ProviderResult(out, job.cost)
+
     async def submit(self, job, rid, checkpoint):
         self.root.mkdir(parents=True, exist_ok=True)
+        self._record_test_post()
         checkpoint(provider_id="TEST-" + rid[:12])
+        # Acceptance-only fault injection. It is unreachable without the
+        # explicit TEST host flag and never constructs a network provider.
+        if os.environ.get("HYBRID_TEST_CRASH_AFTER_CHECKPOINT") == "1":
+            os._exit(86)
         if job.category in {"hero", "hero_retry"}:
             out = self.root / f"{rid}.TEST.mp4"
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -134,18 +160,16 @@ class FixtureProvider:
                 check=True,
             )
             return ProviderResult(out, job.cost)
-        out = self.root / f"{rid}.TEST.png"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        image = Image.new("RGB", (1280, 720), "#14213d")
-        ImageDraw.Draw(image).text(
-            (20, 20), "TEST FIXTURE - NOT EPISODE MEDIA", fill="white"
-        )
-        image.save(out)
-        image.save(self.root / "fixture-source.png")
-        return ProviderResult(out, job.cost)
+        return self._image_result(job, rid)
 
-    async def recover(self, *args):
-        raise RuntimeError("TEST fixture cannot remotely recover")
+    async def recover(self, job, rid, provider_id, partial, checkpoint):
+        if provider_id != "TEST-" + rid[:12] or partial:
+            raise RuntimeError("TEST fixture recovery binding is invalid")
+        # Recovery uses the checkpointed remote identity and deliberately does
+        # not invoke submit or increment the persisted POST counter.
+        if job.category in {"hero", "hero_retry"}:
+            raise RuntimeError("TEST fixture hero recovery requires explicit reconciliation")
+        return self._image_result(job, rid)
 
 
 def runner(root, rid, *, ownership_assertion=None):
@@ -770,9 +794,34 @@ def _approve_compiled_gate(workspace: Path, request_id: str, kind: str):
             queue.leases.release(lease, now=time.time())
 
 
+async def _serve_test_host(worker, *, concurrency: int) -> dict:
+    """Host the existing worker without chat, provider, or gateway startup."""
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, getattr(signal, "SIGTERM", signal.SIGINT)):
+        try:
+            loop.add_signal_handler(signum, stop.set)
+        except (NotImplementedError, RuntimeError):
+            # Windows console signal delivery still reaches KeyboardInterrupt;
+            # the caller below converts it into the same bounded cancellation.
+            pass
+    serving = asyncio.create_task(worker.serve(stop=stop, concurrency=concurrency))
+    try:
+        await stop.wait()
+    except asyncio.CancelledError:
+        stop.set()
+        serving.cancel()
+        raise
+    finally:
+        if not serving.done():
+            serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+    return {"status": "STOPPED", "mode": "TEST"}
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("start", "enqueue", "run", "serve", "worker-status", "preproduce", "advance", "audio-preflight", "real-handoff-preflight", "compile-preproduction", "run-preproduction-test", "status", "resume", "remediate", "heroes", "approve", "publish"))
+    p.add_argument("action", choices=("start", "enqueue", "run", "serve", "host", "worker-status", "preproduce", "advance", "audio-preflight", "real-handoff-preflight", "compile-preproduction", "run-preproduction-test", "status", "resume", "remediate", "heroes", "approve", "publish"))
     p.add_argument("--workspace", required=True, type=Path)
     p.add_argument("--prompt-file", type=Path)
     p.add_argument("--source-file", type=Path)
@@ -790,6 +839,12 @@ def main(argv=None):
     p.add_argument("--test-reject-scene")
     p.add_argument("--correction", action="append", default=[])
     p.add_argument("--once", action="store_true", help="run at most one queued TEST task")
+    p.add_argument("--host-mode", choices=("TEST",), default="TEST", help="host only the allowlisted local TEST queue")
+    p.add_argument("--concurrency", type=int, default=1, help="DurableEpisodeWorker host concurrency (must be 1)")
+    p.add_argument("--lease-ttl-seconds", type=float, default=30, help="positive TEST worker lease TTL")
+    p.add_argument("--poll-seconds", type=float, default=1, help="positive idle backoff interval")
+    p.add_argument("--shutdown-deadline-seconds", type=float, default=10, help="positive bounded handler shutdown wait")
+    p.add_argument("--test-crash-after-checkpoint", action="store_true", help=argparse.SUPPRESS)
     a = p.parse_args(argv)
     try:
         if a.action == "worker-status":
@@ -804,7 +859,7 @@ def main(argv=None):
             root = fixture_root if fixture_root.is_dir() else compiled_root / "runner"
             result = EpisodeTaskQueue.read_status(queue_path, _worker_episode_id(root))
             result.pop("root", None)
-        elif a.action in {"enqueue", "run", "serve"}:
+        elif a.action in {"enqueue", "run", "serve", "host"}:
             from src.hybrid.worker import DurableEpisodeWorker, EpisodeTaskQueue
 
             queue_path = Path(a.workspace).resolve() / "TEST" / "worker.sqlite3"
@@ -827,17 +882,33 @@ def main(argv=None):
             else:
                 if a.action == "run" and not a.once:
                     p.error("run requires --once; use serve for the bounded worker loop")
+                if a.action == "host" and a.concurrency != 1:
+                    raise ValueError("host concurrency must be exactly one")
                 queue = EpisodeTaskQueue(queue_path)
-                worker = DurableEpisodeWorker(queue, f"cli-{__import__('os').getpid()}", _fixture_worker_handler)
+                worker_id = f"host-{os.getpid()}" if a.action == "host" else f"cli-{os.getpid()}"
+                worker = DurableEpisodeWorker(
+                    queue, worker_id, _fixture_worker_handler,
+                    lease_ttl_seconds=a.lease_ttl_seconds, poll_seconds=a.poll_seconds,
+                    shutdown_deadline_seconds=a.shutdown_deadline_seconds,
+                )
                 if a.action == "run":
+                    result = asyncio.run(worker.run_once()) or {"status": "IDLE", "mode": "TEST"}
+                elif a.action == "host" and a.once:
+                    if a.test_crash_after_checkpoint:
+                        os.environ["HYBRID_TEST_CRASH_AFTER_CHECKPOINT"] = "1"
                     result = asyncio.run(worker.run_once()) or {"status": "IDLE", "mode": "TEST"}
                 else:
                     try:
-                        asyncio.run(worker.serve())
+                        if a.action == "host":
+                            if a.test_crash_after_checkpoint:
+                                os.environ["HYBRID_TEST_CRASH_AFTER_CHECKPOINT"] = "1"
+                            result = asyncio.run(_serve_test_host(worker, concurrency=a.concurrency))
+                        else:
+                            asyncio.run(worker.serve())
                     except KeyboardInterrupt:
                         result = {"status": "STOPPED", "mode": "TEST"}
                     else:
-                        result = {"status": "STOPPED", "mode": "TEST"}
+                        result = result if a.action == "host" else {"status": "STOPPED", "mode": "TEST"}
         elif a.action == "preproduce":
             if a.prompt_file is None or a.compiled_input is not None:
                 p.error("preproduce requires --prompt-file and does not accept --compiled-input")

@@ -359,6 +359,14 @@ class DurableEpisodeWorker:
             if not retain:
                 self.leases.release(current, now=time.time())
 
-    async def serve(self):
-        while True:
-            await self.run_once(); await asyncio.sleep(self.poll_seconds)
+    async def serve(self, *, stop: asyncio.Event | None = None, concurrency: int = 1):
+        """Run the existing single-owner worker until its host requests stop."""
+        if type(concurrency) is not int or concurrency != 1:
+            raise ValueError("DurableEpisodeWorker host concurrency must be exactly one")
+        stop = stop or asyncio.Event()
+        while not stop.is_set():
+            await self.run_once()
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
+            except TimeoutError:
+                pass
