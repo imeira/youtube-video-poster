@@ -1,0 +1,144 @@
+{
+  "dag_request_ids": [
+    "775d4e2df67a9e443b43b0c1f40c940e087b02ba58a04bb14cd8e52b28d56fd3",
+    "94cf3eb07396eb0f080d2ec2d95e50bf0345842e18f67de8711efcc77003a18e"
+  ],
+  "fake_provider_latency_s": {
+    "fast": 0.1,
+    "slow": 0.5
+  },
+  "input_asset_sha256": {
+    "reference.png": "6485ea5c50c2eeee6ce812c5093b29462aa9deea793f241fb4427b33c77e9c48",
+    "sheet.png": "b0611ded4fd3500959bdf952aba5e72888aaa96b792bc4caf94060ea9fb4a34a"
+  },
+  "measurement_scope": "LOCAL_MONOTONIC_WALL_TIME",
+  "median_by_provider_concurrency": {
+    "1": {
+      "wall_time_s": 0.9839999999967404
+    },
+    "2": {
+      "wall_time_s": 0.75
+    }
+  },
+  "mode": "TEST_ONLY_FAKE_PROVIDER_LATENCY",
+  "production_claim": "NONE",
+  "provider": "LOCAL_TEST_FIXTURE_TRANSPORT",
+  "real_cost_gain": "NOT_MEASURED",
+  "repeats": 3,
+  "same_dag_input_assets": true,
+  "samples": {
+    "provider_concurrency_1": [
+      {
+        "changed_asset_invalidates_cached_qa": true,
+        "exact_hash_resume_submit_count": 0,
+        "max_inflight": 1,
+        "provider_concurrency": 1,
+        "qa_before_unrelated_slow_end": false,
+        "qa_times_s": {
+          "fast": 0.9380000000019209,
+          "slow": 0.7030000000013388
+        },
+        "queue_wait_s": {
+          "fast": 0.75,
+          "slow": 0.11000000000058208
+        },
+        "submit_count": 2,
+        "tamper_rejected_without_submit": true,
+        "wall_time_s": 0.9689999999973224
+      },
+      {
+        "changed_asset_invalidates_cached_qa": true,
+        "exact_hash_resume_submit_count": 0,
+        "max_inflight": 1,
+        "provider_concurrency": 1,
+        "qa_before_unrelated_slow_end": false,
+        "qa_times_s": {
+          "fast": 0.9369999999980791,
+          "slow": 0.6869999999980791
+        },
+        "queue_wait_s": {
+          "fast": 0.7339999999967404,
+          "slow": 0.125
+        },
+        "submit_count": 2,
+        "tamper_rejected_without_submit": true,
+        "wall_time_s": 0.9839999999967404
+      },
+      {
+        "changed_asset_invalidates_cached_qa": true,
+        "exact_hash_resume_submit_count": 0,
+        "max_inflight": 1,
+        "provider_concurrency": 1,
+        "qa_before_unrelated_slow_end": false,
+        "qa_times_s": {
+          "fast": 0.9689999999973224,
+          "slow": 0.7189999999973224
+        },
+        "queue_wait_s": {
+          "fast": 0.7659999999959837,
+          "slow": 0.14099999999598367
+        },
+        "submit_count": 2,
+        "tamper_rejected_without_submit": true,
+        "wall_time_s": 1.0159999999959837
+      }
+    ],
+    "provider_concurrency_2": [
+      {
+        "changed_asset_invalidates_cached_qa": true,
+        "exact_hash_resume_submit_count": 0,
+        "max_inflight": 2,
+        "provider_concurrency": 2,
+        "qa_before_unrelated_slow_end": true,
+        "qa_times_s": {
+          "fast": 0.4530000000013388,
+          "slow": 0.7030000000013388
+        },
+        "queue_wait_s": {
+          "fast": 0.25,
+          "slow": 0.125
+        },
+        "submit_count": 2,
+        "tamper_rejected_without_submit": true,
+        "wall_time_s": 0.75
+      },
+      {
+        "changed_asset_invalidates_cached_qa": true,
+        "exact_hash_resume_submit_count": 0,
+        "max_inflight": 2,
+        "provider_concurrency": 2,
+        "qa_before_unrelated_slow_end": true,
+        "qa_times_s": {
+          "fast": 0.48400000000401633,
+          "slow": 0.7340000000040163
+        },
+        "queue_wait_s": {
+          "fast": 0.28100000000267755,
+          "slow": 0.15600000000267755
+        },
+        "submit_count": 2,
+        "tamper_rejected_without_submit": true,
+        "wall_time_s": 0.7810000000026776
+      },
+      {
+        "changed_asset_invalidates_cached_qa": true,
+        "exact_hash_resume_submit_count": 0,
+        "max_inflight": 2,
+        "provider_concurrency": 2,
+        "qa_before_unrelated_slow_end": true,
+        "qa_times_s": {
+          "fast": 0.43800000000192085,
+          "slow": 0.7189999999973224
+        },
+        "queue_wait_s": {
+          "fast": 0.25,
+          "slow": 0.125
+        },
+        "submit_count": 2,
+        "tamper_rejected_without_submit": true,
+        "wall_time_s": 0.75
+      }
+    ]
+  },
+  "schema": "autonomous-two-gate-runner-benchmark/v1"
+}

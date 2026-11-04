@@ -269,6 +269,8 @@ def test_renderer_accepts_a_bounded_ffmpeg_thread_budget():
     assert renderer.filter_complex_threads == 2
     with pytest.raises(ValueError, match="thread"):
         LocalRenderer(width=320, height=180, filter_complex_threads=0)
+    with pytest.raises(ValueError, match="thread"):
+        LocalRenderer(width=320, height=180, filter_complex_threads=None)
 
 
 def test_renderer_accepts_bounded_parallel_scene_workers_and_encoder_threads():
@@ -328,7 +330,9 @@ def test_renderer_applies_declared_thread_budget_to_every_ffmpeg_encode(
         i for i, value in enumerate(graph) if value == "-threads:v"
     ][:-1]
     assert len(graph_decoder_threads) == len(graph_inputs)
-    assert all(thread < source for thread, source in zip(graph_decoder_threads, graph_inputs))
+    assert all(
+        thread < source for thread, source in zip(graph_decoder_threads, graph_inputs)
+    )
     assert graph[graph.index("-filter_complex_threads") + 1] == "1"
 
     master = next(

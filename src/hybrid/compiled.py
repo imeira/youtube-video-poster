@@ -32,6 +32,26 @@ from src.hybrid.quality_first_motion import (
 )
 from src.hybrid.technical_qa import inspect_clip, inspect_image
 from src.hybrid.throughput import DurableQueue, run_bounded_wave
+from src.storage.episode_id import validate_episode_id
+
+_SEMANTIC_REMEDIATION_CONSTRAINTS = {
+    "CAST": "Correct the cast while preserving the approved identity, garments, semantic action, source references, and timing.",
+    "GARMENT": "Correct the garments while preserving the approved cast, identity, semantic action, source references, and timing.",
+    "ACTION": "Correct the declared semantic action while preserving the approved cast, identity, garments, source references, and timing.",
+    "IDENTITY": "Correct the character identity while preserving the approved cast, garments, semantic action, source references, and timing.",
+    "SOURCE": "Correct the source-bound visual detail while preserving the approved cast, identity, garments, semantic action, and timing.",
+    "TIMING": "Correct the visual timing while preserving the approved cast, identity, garments, semantic action, and source references.",
+}
+
+
+def _semantic_remediation(finding):
+    """Validate a closed QA finding before it can alter an image prompt."""
+    if type(finding) is not dict or set(finding) != {"code"}:
+        raise ValueError("closed semantic finding requires exactly one code")
+    code = finding["code"]
+    if type(code) is not str or code not in _SEMANTIC_REMEDIATION_CONSTRAINTS:
+        raise ValueError("closed semantic finding code is invalid")
+    return {"code": code, "constraint": _SEMANTIC_REMEDIATION_CONSTRAINTS[code]}
 
 
 @dataclass(frozen=True)
@@ -65,8 +85,7 @@ class CompiledEpisode:
 
     @classmethod
     def compile(cls, episode_id: str, audio: FrozenAsset, frames):
-        if not episode_id.strip():
-            raise ValueError("episode_id required")
+        episode_id = validate_episode_id(episode_id)
         frames = tuple(frames)
         if not frames:
             raise ValueError("at least one semantic frame required")
@@ -313,22 +332,33 @@ class ProductionRun:
                 price=prices.get(job.request_id),
             )
 
-        jobs = tuple(self._baselines.values())
-        jobs_by_request = {job.request_id: job for job in jobs}
-
-        async def notify(request_id, result):
+        async def notify_completed(request_id, receipt):
             if on_completed is None:
                 return
-            job = jobs_by_request[request_id]
+            job = next(
+                candidate
+                for candidate in self._baselines.values()
+                if candidate.request_id == request_id
+            )
+            durable = self.executor.inspect(request_id)
+            if (
+                not isinstance(durable, dict)
+                or durable.get("status") != "COMPLETE"
+                or durable.get("result_sha256") != receipt.get("result_sha256")
+            ):
+                raise ValueError(
+                    "completion callback requires current durable executor receipt"
+                )
             if self._active_images.get(job.scene) == job:
-                await on_completed(self.executor.inspect(request_id) or result)
+                await on_completed(durable)
 
+        jobs = tuple(self._baselines.values())
         by_request = await run_bounded_wave(
             queue,
             ((job.request_id, job) for job in jobs),
             execute,
             recover_failed=True,
-            on_completed=notify,
+            on_completed=notify_completed,
         )
         return {job.scene: by_request[job.request_id] for job in jobs}
 
@@ -348,25 +378,30 @@ class ProductionRun:
         result_sha256: str,
         approved: bool,
         reviewer: str,
+        failure_code: str | None = None,
         *,
         reviewer_identity: dict | None = None,
     ):
-        if reviewer_identity is None:
-            if self.episode.audio.mode == "TEST" and (
+        if self.episode.audio.mode == "LIVE":
+            raise ValueError(
+                "LIVE visual QA requires trusted reviewer evidence; self-asserted identity is non-promotable"
+            )
+        if (
+            reviewer_identity is None
+            and self.episode.audio.mode == "TEST"
+            and (
                 reviewer == "TEST independent visual fixture"
                 or (reviewer == "mock rejection" and approved is False)
-            ):
-                reviewer_identity = {"subject": reviewer, "issuer": "TEST"}
-            elif self.episode.audio.mode == "LIVE" and reviewer.startswith(
-                "OpenRouter:"
-            ):
-                reviewer_identity = {"subject": reviewer, "issuer": "OPENROUTER"}
+            )
+        ):
+            reviewer_identity = {"subject": reviewer, "issuer": "TEST"}
         job = self._completed_job_for_result(scene_id, result_sha256)
         self.executor.qa(
             job.request_id,
             result_sha256,
             approved,
             reviewer,
+            failure_code=failure_code,
             reviewer_identity=reviewer_identity,
         )
 
@@ -438,11 +473,13 @@ class ProductionRun:
                     eligible.append(hero)
         return tuple(eligible)
 
-    def remediation_job(self, scene_id: str, correction_prompt: str):
+    def remediation_job(self, scene_id: str, finding: dict):
+        """Create one immutable successor from a closed independent-QA finding."""
         self._require_executable_motion_inventory()
+        remediation = _semantic_remediation(finding)
         existing = self._corrections.get(scene_id)
         if existing is not None:
-            if existing.payload["prompt"] != correction_prompt:
+            if existing.payload.get("semantic_remediation") != remediation:
                 raise ValueError("correction successor is immutable")
             return existing
         baseline = self._active_images.get(scene_id)
@@ -457,15 +494,16 @@ class ProductionRun:
             "correction",
             self.image_cost,
             predecessor=baseline.request_id,
-            prompt=correction_prompt,
+            prompt=f"{frame.prompt}\n\nCorrection requirement: {remediation['constraint']}",
         )
+        correction.payload["semantic_remediation"] = remediation
         self._corrections[scene_id] = correction
         self._active_images[scene_id] = correction
         return correction
 
     async def dispatch_remediation_wave(
         self,
-        corrections: dict[str, str],
+        corrections: dict[str, dict],
         provider: Provider,
         *,
         prefetch: int = 0,
@@ -480,10 +518,10 @@ class ProductionRun:
                 "correction wave must be a nonempty scene-to-prompt mapping"
             )
         unknown = set(corrections) - {frame.scene_id for frame in self.episode.frames}
-        if unknown or any(not str(prompt).strip() for prompt in corrections.values()):
-            raise ValueError(
-                "correction wave contains an unknown scene or empty prompt"
-            )
+        if unknown:
+            raise ValueError("correction wave contains an unknown scene")
+        for finding in corrections.values():
+            _semantic_remediation(finding)
         jobs = [
             self.remediation_job(frame.scene_id, corrections[frame.scene_id])
             for frame in self.episode.frames
@@ -510,25 +548,36 @@ class ProductionRun:
                 price=prices.get(job.request_id),
             )
 
-        jobs_by_request = {job.request_id: job for job in jobs}
-
-        async def notify(request_id, result):
+        async def notify_completed(request_id, receipt):
             if on_completed is None:
                 return
-            job = jobs_by_request[request_id]
+            job = next(
+                candidate for candidate in jobs if candidate.request_id == request_id
+            )
+            durable = self.executor.inspect(request_id)
+            if (
+                not isinstance(durable, dict)
+                or durable.get("status") != "COMPLETE"
+                or durable.get("result_sha256") != receipt.get("result_sha256")
+            ):
+                raise ValueError(
+                    "completion callback requires current durable executor receipt"
+                )
             if self._active_images.get(job.scene) == job:
-                await on_completed(self.executor.inspect(request_id) or result)
+                await on_completed(durable)
 
         by_request = await run_bounded_wave(
             queue,
             ((job.request_id, job) for job in jobs),
             execute,
             recover_failed=True,
-            on_completed=notify,
+            on_completed=notify_completed,
         )
         return {job.scene: by_request[job.request_id] for job in jobs}
 
     def render_ready(self):
+        if self.episode.audio.mode == "LIVE":
+            return False
         if (
             self.motion_inventory is not None
             and self.motion_inventory["status"] != "PASS"
@@ -630,13 +679,12 @@ class OperationalPipeline:
         result_sha256 = receipt["result_sha256"]
         job = self.run._completed_job_for_result(scene_id, result_sha256)
         reviewer = "technical-qa"
-        reviewer_identity = {"subject": reviewer, "issuer": "LOCAL_DETERMINISTIC"}
         self.run.record_visual_qa(
             scene_id,
             result_sha256,
             False,
             reviewer,
-            reviewer_identity=reviewer_identity,
+            reviewer_identity={"subject": reviewer, "issuer": "TECHNICAL_QA"},
         )
         atomic_json(
             self.workspace / "qa" / f"{job.request_id}.json",
@@ -645,7 +693,6 @@ class OperationalPipeline:
                 "result_sha256": result_sha256,
                 "approved": False,
                 "reviewer": reviewer,
-                "reviewer_identity": reviewer_identity,
                 "qa_kind": "technical",
                 "errors": packet.get("errors", []),
                 "compilation": self.episode.checksum,
@@ -683,7 +730,7 @@ class OperationalPipeline:
 
     async def dispatch_remediation_wave(
         self,
-        corrections: dict[str, str],
+        corrections: dict[str, dict],
         provider: Provider,
         *,
         prefetch: int = 0,
@@ -790,9 +837,14 @@ class OperationalPipeline:
         result_sha256: str,
         approved: bool,
         reviewer: str,
+        failure_code: str | None = None,
         *,
         reviewer_identity: dict | None = None,
     ):
+        if approved and failure_code is not None:
+            raise ValueError("approved visual QA cannot carry a failure code")
+        if failure_code is not None:
+            _semantic_remediation({"code": failure_code})
         job = self.run._completed_job_for_result(scene_id, result_sha256)
         selected = next(
             (
@@ -838,6 +890,7 @@ class OperationalPipeline:
             result_sha256,
             approved,
             reviewer,
+            failure_code=failure_code,
             reviewer_identity=reviewer_identity,
         )
         qa = {
@@ -853,6 +906,8 @@ class OperationalPipeline:
             category=job.category,
             predecessor=job.predecessor,
         )
+        if failure_code is not None:
+            qa["failure_code"] = failure_code
         atomic_json(self.workspace / "qa" / f"{job.request_id}.json", qa)
         if not approved:
             return None

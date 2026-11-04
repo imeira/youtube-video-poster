@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
+import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-
-from src.hybrid.locks import reject_reparse_path
 
 # Secret selectors are deliberately not configurable: generic uppercase-name
 # validation would permit PATH, HOME, a provider key, or a lookalike alias.
@@ -71,12 +72,68 @@ def _absolute_path(value: object, label: str) -> Path:
     return path
 
 
+def _reject_reparse_path(path: Path) -> Path:
+    """Keep bootstrap independent until its Studio root is proven."""
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    for candidate in (lexical, *lexical.parents):
+        try:
+            status = os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        if candidate.is_symlink() or bool(getattr(status, "st_file_attributes", 0) & 0x400):
+            raise ValueError("approval bridge paths reject symlink or reparse-point paths")
+    return lexical
+
+
 def _absolute_existing_regular_path(value: object, label: str) -> Path:
-    path = _absolute_path(value, label)
-    path = reject_reparse_path(path)
+    path = _reject_reparse_path(_absolute_path(value, label))
     if not path.is_file():
         raise ValueError(f"approval bridge {label} must name an existing regular file")
     return path
+
+
+def _studio_checkout(settings: Mapping[str, object]) -> Path:
+    root = _reject_reparse_path(_absolute_path(settings.get("studio_checkout_root"), "studio_checkout_root"))
+    revision = _required_string(settings.get("studio_checkout_commit"), "studio_checkout_commit")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision) or not root.is_dir():
+        raise ValueError("approval bridge Studio checkout must be an existing root pinned to a full lowercase commit")
+    for relative in ("src/__init__.py", "src/approval/hermes_bridge_composition.py", "src/approval/hermes_inbound_bridge.py"):
+        if not _reject_reparse_path(root / relative).is_file():
+            raise ValueError(f"approval bridge Studio checkout is missing {relative}")
+    result = subprocess.run(["git", "-C", os.fspath(root), "rev-parse", "HEAD"], text=True, capture_output=True, timeout=10, check=False)
+    if result.returncode != 0 or result.stdout.strip() != revision:
+        raise ValueError("approval bridge Studio checkout does not match its pinned commit")
+    loaded = sys.modules.get("src")
+    if loaded is not None:
+        loaded_file = getattr(loaded, "__file__", None)
+        if not isinstance(loaded_file, str) or _reject_reparse_path(Path(loaded_file)).parent != root / "src":
+            raise ValueError("approval bridge refuses a preloaded Studio package from another root")
+    if os.fspath(root) not in sys.path:
+        sys.path.insert(0, os.fspath(root))
+    return root
+
+
+def _state_paths(settings: Mapping[str, object]) -> tuple[Path, Path, Path]:
+    root = _reject_reparse_path(_absolute_path(settings.get("state_root"), "state_root"))
+    journal = _absolute_path(settings.get("journal_path"), "journal_path")
+    registry = _absolute_path(settings.get("registry_path"), "registry_path")
+    if journal.parent != root or registry.parent != root or journal.name == registry.name:
+        raise ValueError("approval bridge state files must be distinct direct children of state_root")
+    return root, journal, registry
+
+
+def _create_validated_state_root(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    root = _reject_reparse_path(root)
+    if not root.is_dir():
+        raise ValueError("approval bridge state_root is not a directory")
+    probe = root / ".bridge-write-probe"
+    try:
+        with probe.open("xb"):
+            pass
+    finally:
+        if probe.exists():
+            probe.unlink()
 
 
 def _settings(ctx: object) -> Mapping[str, object] | None:
@@ -108,15 +165,16 @@ def compose_from_context(ctx: object) -> Any | None:
         if not sender_ids:
             raise ValueError("approval bridge trusted_sender_ids is required")
         config_path = _absolute_existing_regular_path(settings.get("studio_config_path"), "studio_config_path")
-        journal_path = _absolute_path(settings.get("journal_path"), "journal_path")
-        registry_path = _absolute_path(settings.get("registry_path"), "registry_path")
+        _studio_checkout(settings)
+        state_root, journal_path, registry_path = _state_paths(settings)
         secret_names = _secret_names(settings)
         bridge_hmac = _env_secret(secret_names["bridge_hmac_env"])
         bot_token = _env_secret(secret_names["telegram_bot_token_env"])
         webhook_secret = _env_secret(secret_names["telegram_webhook_secret_env"])
         if hmac.compare_digest(bridge_hmac, webhook_secret):
             raise ValueError("approval bridge HMAC and Telegram webhook secret must differ")
-    except (OSError, TypeError, ValueError):
+        _create_validated_state_root(state_root)
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
         return None
 
     # Keep production imports behind successful opt-in validation. Director is

@@ -1,0 +1,19 @@
+{
+  "request_id": "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9",
+  "revision_id": "818556d97edb648f",
+  "request_root": "C:/HermesStudio/factory/PREPRODUCTION/72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9",
+  "gate_artifact": "C:/HermesStudio/factory/PREPRODUCTION/72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9/derived/financial_reconciliation_72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9.json",
+  "enabled": false,
+  "studio_checkout_root": "C:/HermesStudio/runtime/4cc03a48728e3b23d1626265c542b9a39ffa2c11",
+  "studio_checkout_commit": "4cc03a48728e3b23d1626265c542b9a39ffa2c11",
+  "state_root": "C:/HermesStudio/state",
+  "instance_id": "jaco-genesis28-818556d97edb648f",
+  "studio_config_path": "C:/HermesStudio/worktrees/jaco-production-activation/integrations/hermes/hermes_studio_approval_bridge/deployment/jaco-genesis28-studio-config.yaml",
+  "journal_path": "C:/HermesStudio/state/jaco-genesis28-approval-journal.sqlite3",
+  "registry_path": "C:/HermesStudio/state/jaco-genesis28-approval-deliveries.sqlite3",
+  "chat_id": "141718934",
+  "trusted_sender_ids": ["141718934"],
+  "bridge_hmac_env": "STUDIO_BRIDGE_HMAC",
+  "telegram_bot_token_env": "STUDIO_TELEGRAM_BOT_TOKEN",
+  "telegram_webhook_secret_env": "STUDIO_TELEGRAM_WEBHOOK_SECRET"
+}

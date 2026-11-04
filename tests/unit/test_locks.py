@@ -7,12 +7,13 @@ import pytest
 
 
 def test_try_lock_rejects_simulated_reparse_ancestor_before_mkdir_or_open(tmp_path, monkeypatch):
+    from src import path_guard
     from src.hybrid import locks
 
     lock_path = tmp_path / "junction" / "nested" / ".database.sqlite.init.lock"
     mkdir_calls, open_calls = [], []
     monkeypatch.setattr(
-        locks,
+        path_guard,
         "_is_reparse_point",
         lambda candidate: Path(candidate) == tmp_path / "junction",
     )
@@ -27,6 +28,7 @@ def test_try_lock_rejects_simulated_reparse_ancestor_before_mkdir_or_open(tmp_pa
 
 
 def test_try_lock_rechecks_simulated_reparse_after_mkdir_before_open(tmp_path, monkeypatch):
+    from src import path_guard
     from src.hybrid import locks
 
     lock_path = tmp_path / "created" / ".database.sqlite.init.lock"
@@ -42,7 +44,7 @@ def test_try_lock_rechecks_simulated_reparse_after_mkdir_before_open(tmp_path, m
         original_makedirs(*args, **kwargs)
         created = True
 
-    monkeypatch.setattr(locks, "_is_reparse_point", is_reparse)
+    monkeypatch.setattr(path_guard, "_is_reparse_point", is_reparse)
     monkeypatch.setattr(os, "makedirs", makedirs)
     monkeypatch.setattr(os, "open", lambda *args, **kwargs: open_calls.append(args))
 

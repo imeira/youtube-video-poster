@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -68,3 +69,38 @@ class TestEpisodeFS:
         assert not fs.exists()
         fs.create_dirs()
         assert fs.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires a native Windows junction")
+def test_episode_fs_rejects_constructor_junction_and_postconstruction_swaps(tmp_path):
+    """A real NTFS junction must never redirect EpisodeFS I/O outside its root."""
+    episodes_dir = tmp_path / "episodes"
+    episodes_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    config = SimpleNamespace(episodes_dir=episodes_dir, default_language="pt-BR", default_channel="test")
+    junction = episodes_dir / "EP8"
+
+    def make_junction():
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 0, (completed.stderr or completed.stdout).decode(errors="replace")
+
+    make_junction()
+    with pytest.raises(ValueError, match="reparse"):
+        EpisodeFS("EP8", config)
+    assert not any(outside.iterdir())
+
+    junction.rmdir()
+    fs = EpisodeFS("EP8", config)
+    make_junction()
+    with pytest.raises(ValueError, match="reparse"):
+        fs.create_dirs()
+    assert not any(outside.iterdir())
+
+    with pytest.raises(ValueError, match="reparse"):
+        fs.save_request("must not write outside")
+    assert not (outside / "request.json").exists()

@@ -12,10 +12,12 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -26,12 +28,26 @@ from typing import Any
 from src.hybrid.artifacts import FrozenAsset, Manifest
 from src.hybrid.cas import content_key
 from src.hybrid.execution import Executor, Job
-from src.hybrid.locks import file_lock, file_slot
-from src.hybrid.standing_budget import StandingBudgetLedger
+from src.hybrid.locks import file_lock, file_slot, reject_reparse_path
+from src.hybrid.standing_budget import BudgetDenied, StandingBudgetLedger
 
 
 class PolicyError(ValueError):
     """A policy is missing, malformed, or insufficient to authorize an action."""
+
+
+@dataclass(frozen=True)
+class RunnerOwnership:
+    """Opaque worker lease identity, checked by a runtime-bound assertion."""
+
+    episode_id: str
+    worker_id: str
+    fencing_token: int
+
+
+_ACTIVE_RUNNER_OWNERSHIP: ContextVar[RunnerOwnership | None] = ContextVar(
+    "active_runner_ownership", default=None
+)
 
 
 def _decimal(value: object, field: str) -> Decimal:
@@ -270,8 +286,19 @@ class OperationalMetricsLedger:
                   request_id TEXT PRIMARY KEY, event_id TEXT UNIQUE NOT NULL, episode_id TEXT NOT NULL,
                   observed_at_utc TEXT, month_utc TEXT, experiment INTEGER NOT NULL, worker TEXT NOT NULL, model TEXT,
                   tokens_input INTEGER, tokens_cached INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
-                  latency_s REAL, quota_units INTEGER, billing_status TEXT NOT NULL, money_usd TEXT,
+                  latency_s REAL, queue_wait_s REAL, pending_exposure_usd TEXT,
+                  quota_units INTEGER, billing_status TEXT NOT NULL, money_usd TEXT,
                   payload_sha256 TEXT NOT NULL)""")
+                # Existing TEST workspaces predate measured queue delay and
+                # pending exposure.  Add only nullable telemetry columns; this
+                # is not a second financial ledger.
+                columns = {row[1] for row in db.execute("PRAGMA table_info(observations)")}
+                for column, declaration in (
+                    ("queue_wait_s", "REAL"),
+                    ("pending_exposure_usd", "TEXT"),
+                ):
+                    if column not in columns:
+                        db.execute(f"ALTER TABLE observations ADD COLUMN {column} {declaration}")
                 db.execute("""CREATE TABLE IF NOT EXISTS observation_conflicts (
                   identity_kind TEXT NOT NULL, identity_value TEXT NOT NULL, payload_sha256 TEXT NOT NULL,
                   conflicting_payload_sha256 TEXT NOT NULL,
@@ -365,6 +392,9 @@ class OperationalMetricsLedger:
             "tokens",
             "quota_units",
             "latency_s",
+            "stage_latency_s",
+            "queue_wait_s",
+            "pending_exposure_usd",
             "unknown_timestamp_requests",
             "conflicts",
             "models",
@@ -395,12 +425,15 @@ class OperationalMetricsLedger:
             report["money_usd"]
         ):
             return False
-        latency = report["latency_s"]
-        if latency is not None and (
+        for metric in ("latency_s", "stage_latency_s", "queue_wait_s"):
+            latency = report[metric]
+            if latency is not None and (
             type(latency) not in {int, float}
             or not math.isfinite(latency)
             or latency < 0
-        ):
+            ):
+                return False
+        if report["pending_exposure_usd"] is not None and not cls._valid_money(report["pending_exposure_usd"]):
             return False
         tokens = report["tokens"]
         if not isinstance(tokens, dict) or set(tokens) != {
@@ -528,6 +561,14 @@ class OperationalMetricsLedger:
             or latency < 0
         ):
             raise ValueError("latency_s must be nonnegative")
+        queue_wait = observation.get("queue_wait_s")
+        if queue_wait is not None and (
+            type(queue_wait) not in {int, float} or not math.isfinite(queue_wait) or queue_wait < 0
+        ):
+            raise ValueError("queue_wait_s must be nonnegative")
+        exposure = observation.get("pending_exposure_usd")
+        if exposure is not None:
+            exposure = str(_decimal(exposure, "pending_exposure_usd"))
         money = observation.get("money_usd")
         if billing != "AUTHENTICATED" and money is not None:
             raise ValueError("unauthenticated or unknown billing cannot be real money")
@@ -556,6 +597,8 @@ class OperationalMetricsLedger:
             "tokens_output": counts[2],
             "tokens_reasoning": counts[3],
             "latency_s": None if latency is None else float(latency),
+            "queue_wait_s": None if queue_wait is None else float(queue_wait),
+            "pending_exposure_usd": exposure,
             "quota_units": counts[4],
             "billing_status": billing,
             "money_usd": amount,
@@ -574,6 +617,8 @@ class OperationalMetricsLedger:
             model,
             *counts[:4],
             None if latency is None else float(latency),
+            None if queue_wait is None else float(queue_wait),
+            exposure,
             counts[4],
             billing,
             amount,
@@ -625,7 +670,11 @@ class OperationalMetricsLedger:
                         "metrics identity collision has divergent canonical payload"
                     )
                 db.execute(
-                    "INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    """INSERT INTO observations(
+                        request_id,event_id,episode_id,observed_at_utc,month_utc,experiment,worker,model,
+                        tokens_input,tokens_cached,tokens_output,tokens_reasoning,latency_s,queue_wait_s,
+                        pending_exposure_usd,quota_units,billing_status,money_usd,payload_sha256
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     row,
                 )
                 db.commit()
@@ -659,15 +708,72 @@ class OperationalMetricsLedger:
             observation["observed_at"] = receipt["observed_at"]
         return self.reconcile(observation)
 
+    def reconcile_durable_receipt(self, receipt, *, claim, worker="runner"):
+        """Adapt durable executor/ledger evidence without making a second ledger.
+
+        Receipt `actual_cost`, `qa`, and completion are local facts, not billing
+        readback.  USD becomes actual only from a settled canonical claim.
+        """
+        if not isinstance(receipt, dict) or not isinstance(claim, dict):
+            raise TypeError("durable receipt and canonical claim are required")
+        request_id = self._text(receipt.get("request_id"), "request_id")
+        if claim.get("request_id") != request_id:
+            raise ValueError("receipt and claim request scope mismatch")
+        episode_id = self._text(claim.get("episode_id"), "episode_id")
+        endpoint = receipt.get("endpoint")
+        if endpoint != claim.get("provider"):
+            raise ValueError("receipt and claim provider scope mismatch")
+        operation_id = receipt.get("provider_id")
+        if operation_id is not None:
+            operation_id = self._text(operation_id, "provider operation id")
+        usage = receipt.get("usage", {})
+        if not isinstance(usage, dict):
+            raise TypeError("receipt usage must be an object")
+        aliases = {
+            "tokens_input": "input_tokens", "tokens_cached": "cached_tokens",
+            "tokens_output": "output_tokens", "tokens_reasoning": "reasoning_tokens",
+        }
+        counts = {target: usage.get(source) for target, source in aliases.items()}
+        quota = receipt.get("quota_units")
+        stage_latency = receipt.get("stage_latency_s", receipt.get("latency_s"))
+        queue_wait = receipt.get("queue_wait_s")
+        state, actual = claim.get("state"), claim.get("actual_usd")
+        authenticated = state == "SETTLED" and actual is not None
+        if authenticated:
+            billing_status, money = "AUTHENTICATED", actual
+            exposure = None
+        else:
+            billing_status, money = "UNKNOWN", None
+            exposure = claim.get("reserved_usd")
+        event_identity = operation_id or request_id
+        observation = {
+            "event_id": f"durable:{event_identity}", "request_id": request_id,
+            "episode_id": episode_id, "worker": worker, "experiment": bool(claim.get("experiment", False)),
+            "billing_status": billing_status, "money_usd": money,
+            "pending_exposure_usd": exposure, "latency_s": stage_latency,
+            "queue_wait_s": queue_wait, "quota_units": quota,
+            **counts,
+        }
+        if isinstance(receipt.get("observed_at"), datetime):
+            observation["observed_at"] = receipt["observed_at"]
+        observation["missing_metrics"] = all(
+            observation.get(key) is None for key in (*counts, "quota_units", "latency_s", "queue_wait_s")
+        )
+        return self.reconcile(observation)
+
     def _report_from_rows(self, rows, conflicts):
         tokens = {"input": 0, "cached": 0, "output": 0, "reasoning": 0}
         buckets = {
             name: {}
             for name in ("by_episode", "by_month_utc", "by_experiment", "by_worker")
         }
-        money, latency, money_seen, latency_seen, models = (
+        money, latency, queue_wait, exposure, money_seen, latency_seen, queue_seen, exposure_seen, models = (
             Decimal(0),
             0.0,
+            0.0,
+            Decimal(0),
+            False,
+            False,
             False,
             False,
             set(),
@@ -710,6 +816,10 @@ class OperationalMetricsLedger:
                 pass
             if row["latency_s"] is not None:
                 latency, latency_seen = latency + row["latency_s"], True
+            if row["queue_wait_s"] is not None:
+                queue_wait, queue_seen = queue_wait + row["queue_wait_s"], True
+            if row["pending_exposure_usd"] is not None:
+                exposure, exposure_seen = exposure + Decimal(row["pending_exposure_usd"]), True
             if row["money_usd"] is not None:
                 money, money_seen = money + Decimal(row["money_usd"]), True
             if row["model"]:
@@ -727,6 +837,9 @@ class OperationalMetricsLedger:
             "tokens": tokens,
             "quota_units": sum(row["quota_units"] or 0 for row in rows),
             "latency_s": latency if latency_seen else None,
+            "stage_latency_s": latency if latency_seen else None,
+            "queue_wait_s": queue_wait if queue_seen else None,
+            "pending_exposure_usd": str(exposure) if exposure_seen else None,
             "unknown_timestamp_requests": sum(
                 row["observed_at_utc"] is None for row in rows
             ),
@@ -813,6 +926,10 @@ class AutonomousTwoGateRunner:
         policy: AutonomousPolicy,
         executor: Executor,
         ledger: StandingBudgetLedger | None = None,
+        *,
+        provider_concurrency: int = 1,
+        cpu_concurrency: int = 1,
+        ownership_assertion: Callable[[RunnerOwnership], object] | None = None,
     ):
         if ledger is None:
             raise PolicyError("a compatible TEST standing budget ledger is required")
@@ -829,6 +946,17 @@ class AutonomousTwoGateRunner:
             raise PolicyError("standing budget ledger is incompatible with TEST policy")
         if not episode_id.startswith("TEST-"):
             raise PolicyError("TEST runner requires a TEST episode namespace")
+        if (
+            type(provider_concurrency) is not int
+            or type(cpu_concurrency) is not int
+            or not 1 <= provider_concurrency <= 32
+            or not 1 <= cpu_concurrency <= 32
+        ):
+            raise ValueError(
+                "scheduler limits must be bounded positive integers (1..32)"
+            )
+        if ownership_assertion is not None and not callable(ownership_assertion):
+            raise TypeError("runner ownership assertion must be callable")
         executor._attach_standing_ledger(ledger)
         self.root = Path(root)
         self.episode_id = episode_id
@@ -841,6 +969,43 @@ class AutonomousTwoGateRunner:
             self.root / "operational-metrics.sqlite3"
         )
         self._jobs: dict[str, Job] = {}
+        self.scheduler = {
+            "provider_concurrency": provider_concurrency,
+            "cpu_concurrency": cpu_concurrency,
+        }
+        # Runtime wiring may assert an active queue lease. It is deliberately
+        # not policy or LIVE authority; this runner remains TEST-only.
+        self._ownership_assertion = ownership_assertion
+
+    def _record_receipt_metrics(self, receipt: dict) -> None:
+        """Project the canonical claim when present; retain legacy TEST telemetry."""
+        try:
+            claim = self.ledger.claim(receipt["request_id"])
+        except (BudgetDenied, KeyError, TypeError):
+            self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
+            return
+        self.metrics.reconcile_durable_receipt(receipt, claim=claim)
+
+    def _assert_ownership(self, ownership: RunnerOwnership | None) -> None:
+        if ownership is None:
+            if self._ownership_assertion is not None:
+                raise PermissionError("configured runner requires fenced ownership")
+            return
+        if (
+            not isinstance(ownership, RunnerOwnership)
+            or ownership.episode_id != self.episode_id
+            or not isinstance(ownership.worker_id, str)
+            or not ownership.worker_id
+            or type(ownership.fencing_token) is not int
+            or ownership.fencing_token < 1
+        ):
+            raise PermissionError(
+                "runner ownership is malformed or for another episode"
+            )
+        if self._ownership_assertion is None:
+            raise PermissionError("owned resume requires a runtime lease assertion")
+        if self._ownership_assertion(ownership) is False:
+            raise PermissionError("runtime lease assertion rejected runner ownership")
 
     def _load(self) -> dict[str, Any]:
         if not self.path.is_file():
@@ -853,6 +1018,11 @@ class AutonomousTwoGateRunner:
         return data
 
     def _save(self, document: dict[str, Any]) -> dict[str, Any]:
+        # A task spawned by resume_owned inherits this context, so every runner
+        # JSON replacement rechecks the same live runtime fence.
+        ownership = _ACTIVE_RUNNER_OWNERSHIP.get()
+        if ownership is not None:
+            self._assert_ownership(ownership)
         _atomic_json(self.path, document)
         return document
 
@@ -889,61 +1059,6 @@ class AutonomousTwoGateRunner:
             spec.get("predecessor", ""),
         )
 
-    @staticmethod
-    def _validate_job_dag(jobs: list[Job]) -> None:
-        """Reject invalid dependencies before runner state or paid intent exists."""
-        by_id = {job.request_id: job for job in jobs}
-        if len(by_id) != len(jobs):
-            raise ValueError("jobs must have unique request ids")
-        for request_id, job in by_id.items():
-            if job.predecessor and job.predecessor not in by_id:
-                raise ValueError(
-                    f"job predecessor is not in the runner DAG: {request_id}"
-                )
-            predecessor = by_id.get(job.predecessor)
-            valid_topology = False
-            if job.category in {"first", "thumbnail"}:
-                valid_topology = predecessor is None
-            elif job.category == "hero":
-                valid_topology = (
-                    predecessor is not None
-                    and predecessor.scene == job.scene
-                    and predecessor.category == "first"
-                )
-            elif job.category in {"alternative", "correction"}:
-                valid_topology = (
-                    predecessor is not None
-                    and predecessor.scene == job.scene
-                    and predecessor.category
-                    in {"first", "alternative", "correction", "thumbnail"}
-                )
-            elif job.category == "hero_retry":
-                valid_topology = (
-                    predecessor is not None
-                    and predecessor.scene == job.scene
-                    and predecessor.category in {"hero", "hero_retry"}
-                )
-            if not valid_topology:
-                raise ValueError(f"invalid runner job topology: {request_id}")
-
-        visiting = set()
-        visited = set()
-
-        def visit(request_id):
-            if request_id in visited:
-                return
-            if request_id in visiting:
-                raise ValueError("runner job dependency cycle")
-            visiting.add(request_id)
-            predecessor = by_id[request_id].predecessor
-            if predecessor:
-                visit(predecessor)
-            visiting.remove(request_id)
-            visited.add(request_id)
-
-        for request_id in by_id:
-            visit(request_id)
-
     def _rebuild_jobs(self, document: dict[str, Any]) -> None:
         jobs = [self._job_from_spec(item) for item in document.get("job_specs", [])]
         self.validate_resume_jobs(jobs)
@@ -953,9 +1068,6 @@ class AutonomousTwoGateRunner:
             raise ValueError("packet bytes do not bind the started runner")
 
     def validate_resume_jobs(self, jobs: list[Job]) -> dict[str, dict[str, str]]:
-        self._validate_job_dag(jobs)
-        if any(job.mode != "TEST" for job in jobs):
-            raise PolicyError("persisted runner DAG contains a non-TEST job")
         expected = {
             item["request_id"]: {
                 "request_id": item["request_id"],
@@ -968,44 +1080,6 @@ class AutonomousTwoGateRunner:
             raise ValueError("resume jobs do not match hash-bound started jobs")
         self._jobs = {job.request_id: job for job in jobs}
         return actual
-
-    def _validate_persisted_qa(self, document: dict[str, Any]) -> None:
-        """Rebind runner QA to current bytes and the Executor's write-once receipt."""
-        known = {item["request_id"] for item in document.get("jobs", [])}
-        for request_id, verdict in document.get("qa", {}).items():
-            receipt = self.executor.inspect(request_id)
-            identity = (
-                verdict.get("reviewer_identity") if isinstance(verdict, dict) else None
-            )
-            result = (
-                Path(receipt.get("result", "")) if isinstance(receipt, dict) else Path()
-            )
-            if (
-                request_id not in known
-                or not isinstance(verdict, dict)
-                or type(verdict.get("approved")) is not bool
-                or not isinstance(verdict.get("reviewer"), str)
-                or not verdict["reviewer"].strip()
-                or not isinstance(identity, dict)
-                or set(identity) != {"subject", "issuer"}
-                or not all(
-                    isinstance(identity.get(key), str) and identity[key].strip()
-                    for key in ("subject", "issuer")
-                )
-                or identity["subject"] == "generator"
-                or not isinstance(receipt, dict)
-                or receipt.get("status") != "COMPLETE"
-                or receipt.get("qa") != verdict["approved"]
-                or receipt.get("qa_reviewer") != verdict["reviewer"]
-                or receipt.get("qa_reviewer_identity") != identity
-                or receipt.get("result_sha256") != verdict.get("result_sha256")
-                or not result.is_file()
-                or sha256(result.read_bytes()).hexdigest()
-                != receipt.get("result_sha256")
-            ):
-                raise ValueError(
-                    "persisted runner QA does not bind current executor evidence"
-                )
 
     def start(self, packet: dict[str, Any], jobs: list[Job]) -> dict[str, Any]:
         with file_lock(self.lock_path):
@@ -1025,7 +1099,6 @@ class AutonomousTwoGateRunner:
             return existing
         if not self.episode_id or not isinstance(packet, dict) or not jobs:
             raise ValueError("episode, packet and at least one job are required")
-        self._validate_job_dag(jobs)
         seen = set()
         serialized = []
         total = Decimal(0)
@@ -1033,6 +1106,11 @@ class AutonomousTwoGateRunner:
             if job.request_id in seen:
                 raise ValueError("jobs must have unique request ids")
             seen.add(job.request_id)
+        # Validate the entire graph before policy checks or a runner-state write.
+        # request IDs bind the dependency declarations, so this is also the
+        # durable graph that later resume must execute.
+        self._topological_order(jobs)
+        for job in jobs:
             if job.mode != "TEST":
                 raise PolicyError(
                     "LIVE is not qualified by this runner; use existing production path"
@@ -1058,6 +1136,7 @@ class AutonomousTwoGateRunner:
                 "packet_sha256": _digest_json(packet),
                 "jobs": serialized,
                 "job_specs": [self._job_spec(job) for job in jobs],
+                "scheduler": self.scheduler,
                 "qa": {},
                 "media": {},
                 "delivery": {},
@@ -1071,7 +1150,6 @@ class AutonomousTwoGateRunner:
         """Append immutable TEST successors and invalidate dependent media gates."""
         with file_lock(self.lock_path):
             document = self._load()
-            self._validate_persisted_qa(document)
             if document["state"] in {"PUBLISHED", "PUBLISH_INTENT"}:
                 raise PolicyError(
                     "published or ambiguous delivery cannot accept successors"
@@ -1098,29 +1176,19 @@ class AutonomousTwoGateRunner:
                         "successor predecessor is not bound to this runner"
                     )
                 predecessor_spec = next(
-                    spec
-                    for spec in candidate["job_specs"]
+                    spec for spec in candidate["job_specs"]
                     if self._job_from_spec(spec).request_id == job.predecessor
                 )
                 predecessor = self._job_from_spec(predecessor_spec)
-                predecessor_qa = document["qa"].get(job.predecessor)
+                predecessor_qa = candidate["qa"].get(job.predecessor)
                 if job.scene != predecessor.scene:
                     raise ValueError("successor must bind the predecessor scene")
                 if job.category == "hero":
-                    if (
-                        not predecessor_qa
-                        or predecessor_qa.get("approved") is not True
-                        or predecessor.category != "first"
-                    ):
+                    if not predecessor_qa or predecessor_qa.get("approved") is not True or predecessor.category != "first":
                         raise ValueError("hero requires an exact approved predecessor")
                 elif job.category in {"alternative", "correction", "hero_retry"}:
-                    if (
-                        not predecessor_qa
-                        or predecessor_qa.get("approved") is not False
-                    ):
-                        raise ValueError(
-                            "remediation requires an exact rejected predecessor"
-                        )
+                    if not predecessor_qa or predecessor_qa.get("approved") is not False:
+                        raise ValueError("remediation requires an exact rejected predecessor")
                 else:
                     raise ValueError("unsupported successor category")
                 self.policy.authorize_paid(
@@ -1142,24 +1210,12 @@ class AutonomousTwoGateRunner:
                 added = True
             if not added:
                 return document
-            candidate_jobs = [
-                self._job_from_spec(spec) for spec in candidate["job_specs"]
-            ]
-            self._validate_job_dag(candidate_jobs)
-            remediation_predecessors = [
-                job.predecessor
-                for job in candidate_jobs
-                if job.category in {"alternative", "correction", "hero_retry"}
-            ]
-            if len(remediation_predecessors) != len(set(remediation_predecessors)):
-                raise ValueError("one remediation successor is allowed per predecessor")
-            document = candidate
-            document["media"] = {}
-            document["delivery"] = {}
-            document.pop("technical_qa", None)
-            document["gates"] = {}
-            document["state"] = "RUNNING"
-            return self._save(document)
+            candidate["media"] = {}
+            candidate["delivery"] = {}
+            candidate.pop("technical_qa", None)
+            candidate["gates"] = {}
+            candidate["state"] = "RUNNING"
+            return self._save(candidate)
 
     async def resume(
         self,
@@ -1167,8 +1223,379 @@ class AutonomousTwoGateRunner:
         independent_qa: Callable[[dict], dict],
         jobs: list[Job] | None = None,
     ) -> dict[str, Any]:
-        async with file_slot([self.lock_path]):
-            return await self._resume(provider, independent_qa, jobs)
+        return await self._resume_with_ownership(provider, independent_qa, None, jobs)
+
+    async def resume_owned(
+        self,
+        provider,
+        independent_qa: Callable[[dict], dict],
+        ownership: RunnerOwnership,
+        jobs: list[Job] | None = None,
+    ) -> dict[str, Any]:
+        """Resume under a runtime-asserted worker lease and fencing token."""
+        return await self._resume_with_ownership(
+            provider, independent_qa, ownership, jobs
+        )
+
+    async def _resume_with_ownership(self, provider, independent_qa, ownership, jobs):
+        self._assert_ownership(ownership)
+        token = _ACTIVE_RUNNER_OWNERSHIP.set(ownership)
+        try:
+            # Stable runner ownership is acquired before executor request ownership.
+            # It remains held through task cancellation/unwind, preventing a second
+            # process from overwriting QA while the first still owns this episode.
+            async with file_slot([self.lock_path]):
+                self._assert_ownership(ownership)
+                return await self._resume_parallel(
+                    provider, independent_qa, jobs, ownership
+                )
+        finally:
+            _ACTIVE_RUNNER_OWNERSHIP.reset(token)
+
+    @staticmethod
+    def _dependencies(job: Job, known: set[str]) -> tuple[str, ...]:
+        dependencies = job.payload.get("depends_on", [])
+        if not isinstance(dependencies, list) or not all(
+            isinstance(item, str) and item in known for item in dependencies
+        ):
+            raise ValueError("job dependencies must be bound request IDs")
+        if job.request_id in dependencies or len(set(dependencies)) != len(
+            dependencies
+        ):
+            raise ValueError("job dependencies must be unique non-self request IDs")
+        return tuple(dependencies)
+
+    @classmethod
+    def _topological_order(cls, jobs: list[Job]) -> tuple[str, ...]:
+        """Return the bound DAG order or reject it before execution state exists."""
+        known = {job.request_id for job in jobs}
+        if len(known) != len(jobs):
+            raise ValueError("jobs must have unique request ids")
+        dependencies = {job.request_id: cls._dependencies(job, known) for job in jobs}
+        remaining = {
+            request_id: set(edges) for request_id, edges in dependencies.items()
+        }
+        ordered: list[str] = []
+        while remaining:
+            ready = sorted(
+                request_id for request_id, edges in remaining.items() if not edges
+            )
+            if not ready:
+                raise ValueError("job dependency graph contains a cycle")
+            ordered.extend(ready)
+            for request_id in ready:
+                del remaining[request_id]
+            completed = set(ready)
+            for edges in remaining.values():
+                edges.difference_update(completed)
+        return tuple(ordered)
+
+    def _validate_persisted_qa(self, request_id: str, qa: dict[str, Any]) -> None:
+        """Re-open the exact executor artifact before trusting persisted QA."""
+        receipt = self.executor.inspect(request_id)
+        path = Path((receipt or {}).get("result", ""))
+        identity = qa.get("reviewer_identity") if isinstance(qa, dict) else None
+        valid = (
+            isinstance(qa, dict)
+            and qa.get("approved") is True
+            and isinstance(receipt, dict)
+            and receipt.get("status") == "COMPLETE"
+            and receipt.get("request_id") == request_id
+            and isinstance(receipt.get("result_sha256"), str)
+            and path.is_file()
+            and sha256(path.read_bytes()).hexdigest() == receipt["result_sha256"]
+            and qa.get("result_sha256") == receipt["result_sha256"]
+            and receipt.get("qa") is True
+            and isinstance(qa.get("reviewer"), str)
+            and bool(qa["reviewer"].strip())
+            and isinstance(identity, dict)
+            and all(
+                isinstance(identity.get(key), str) and identity[key].strip()
+                for key in ("subject", "issuer")
+            )
+            and identity["subject"] != "generator"
+        )
+        if not valid:
+            raise ValueError("persisted QA does not bind the exact completed artifact")
+
+    async def _resume_parallel(
+        self, provider, independent_qa, jobs=None, ownership=None
+    ) -> dict[str, Any]:
+        """Run ready work concurrently under one durable runner owner."""
+        document = self._load()
+        if document.get("scheduler") != self.scheduler:
+            raise PolicyError("scheduler limits differ from hash-bound runner state")
+        if jobs is not None:
+            self.validate_resume_jobs(jobs)
+        else:
+            self._rebuild_jobs(document)
+        if document["state"] not in {"READY", "RUNNING"}:
+            # Even an apparently terminal resume is a promotion boundary:
+            # never return a stale QA PASS whose artifact was replaced later.
+            try:
+                for request_id, verdict in document["qa"].items():
+                    if verdict.get("approved") is True:
+                        self._validate_persisted_qa(request_id, verdict)
+            except ValueError:
+                document["state"] = "REJECTED"
+                self._save(document)
+                raise
+            return document
+        document["state"] = "RUNNING"
+        self._save(document)
+        ordered = self._topological_order(list(self._jobs.values()))
+        known = set(ordered)
+        dependencies = {
+            request_id: self._dependencies(job, known)
+            for request_id, job in self._jobs.items()
+        }
+        provider_slots = asyncio.Semaphore(self.scheduler["provider_concurrency"])
+        cpu_slots = asyncio.Semaphore(self.scheduler["cpu_concurrency"])
+
+        class FencedProvider:
+            """Assert the live runner fence at the provider boundary itself."""
+
+            mode = getattr(provider, "mode", None)
+
+            async def submit(_, *args, **kwargs):
+                self._assert_ownership(ownership)
+                return await provider.submit(*args, **kwargs)
+
+            async def recover(_, *args, **kwargs):
+                self._assert_ownership(ownership)
+                return await provider.recover(*args, **kwargs)
+
+        fenced_provider = FencedProvider()
+
+        def checkpoint_provider_binding(local_id: str, remote_id: str) -> None:
+            self._assert_ownership(ownership)
+            self.ledger.bind_provider_request_id(local_id, remote_id)
+
+        def mark_unknown_if_reserved(request_id: str) -> None:
+            try:
+                self.ledger.claim(request_id)
+            except BudgetDenied:
+                return
+            self.ledger.mark_unknown(request_id)
+
+        async def complete_one(request_id: str) -> tuple[str, dict, dict | None]:
+            job = self._jobs[request_id]
+            receipt = self.executor.inspect(request_id)
+            try:
+                if receipt is None:
+                    self._assert_ownership(ownership)
+                    prepared = self.executor.prepare_intent(
+                        job, auth_scope="TEST_LOCAL_ONLY"
+                    )
+                    self._assert_ownership(ownership)
+                    self.ledger.reserve(
+                        request_id,
+                        self.episode_id,
+                        job.endpoint,
+                        job.cost,
+                        settlement_mode="FAL_READBACK_V2",
+                        auth_scope=prepared["settlement_binding"]["auth_scope"],
+                        provider_request_id=prepared["settlement_binding"][
+                            "provider_request_id"
+                        ],
+                        authority_mode=prepared["settlement_binding"]["authority_mode"],
+                    )
+                    async with provider_slots:
+                        self._assert_ownership(ownership)
+                        await self.executor.run(
+                            job,
+                            fenced_provider,
+                            settlement_checkpoint=checkpoint_provider_binding,
+                            submit_prepared=True,
+                        )
+                elif receipt.get("status") == "PREPARED" and not receipt.get(
+                    "provider_id"
+                ):
+                    async with provider_slots:
+                        self._assert_ownership(ownership)
+                        await self.executor.run(
+                            job,
+                            fenced_provider,
+                            settlement_checkpoint=checkpoint_provider_binding,
+                            submit_prepared=True,
+                        )
+                elif receipt.get("provider_id"):
+                    self._assert_ownership(ownership)
+                    self.ledger.bind_provider_request_id(
+                        request_id, receipt["provider_id"]
+                    )
+                    async with provider_slots:
+                        self._assert_ownership(ownership)
+                        await self.executor.run(
+                            job,
+                            fenced_provider,
+                            settlement_checkpoint=checkpoint_provider_binding,
+                        )
+            except asyncio.CancelledError:
+                mark_unknown_if_reserved(request_id)
+                raise
+            except Exception:
+                mark_unknown_if_reserved(request_id)
+                raise
+            receipt = self.executor.inspect(request_id)
+            if receipt is None or receipt.get("status") != "COMPLETE":
+                self.ledger.mark_unknown(request_id)
+                raise RuntimeError(
+                    "incomplete job requires reconciliation; no ambiguous resubmit"
+                )
+            result_path = Path(receipt.get("result", ""))
+            if not result_path.is_file() or sha256(
+                result_path.read_bytes()
+            ).hexdigest() != receipt.get("result_sha256"):
+                self.ledger.mark_unknown(request_id)
+                raise ValueError("completed receipt output hash mismatch")
+            self.ledger.mark_unknown(request_id)
+            self._record_receipt_metrics(receipt)
+            if request_id in document["qa"]:
+                return request_id, receipt, None
+            async with cpu_slots:
+                verdict = independent_qa(receipt)
+                if asyncio.iscoroutine(verdict):
+                    verdict = await verdict
+            return request_id, receipt, verdict
+
+        # At most this many coroutine objects exist at once.  Provider and QA
+        # semaphores remain independent; the window only prevents a huge ready
+        # DAG from allocating one task per node.
+        window = (
+            self.scheduler["provider_concurrency"] + self.scheduler["cpu_concurrency"]
+        )
+        inflight: dict[asyncio.Task, str] = {}
+        try:
+            while True:
+                document = self._load()
+                qa = document["qa"]
+                active_request_ids = {
+                    binding["request_id"]
+                    for binding in document["jobs"]
+                    if "superseded_by" not in binding
+                }
+                try:
+                    for request_id, verdict in qa.items():
+                        if verdict.get("approved") is True:
+                            self._validate_persisted_qa(request_id, verdict)
+                except ValueError:
+                    document["state"] = "REJECTED"
+                    self._save(document)
+                    raise
+                if any(
+                    qa.get(request_id, {}).get("approved") is False
+                    for request_id in active_request_ids
+                ):
+                    document["state"] = "REJECTED"
+                    return self._save(document)
+                pending = [
+                    request_id
+                    for request_id in ordered
+                    if request_id not in qa and request_id not in inflight.values()
+                ]
+                if not pending and not inflight:
+                    if not all(
+                        qa.get(request_id, {}).get("approved") is True
+                        for request_id in active_request_ids
+                    ):
+                        raise RuntimeError("active jobs have no reusable QA verdict")
+                    document["state"] = "MEDIA_PENDING"
+                    return self._save(document)
+                blocked = [
+                    request_id
+                    for request_id in pending
+                    if any(
+                        qa.get(dep, {}).get("approved") is False
+                        for dep in dependencies[request_id]
+                    )
+                ]
+                if blocked:
+                    document["state"] = "REJECTED"
+                    return self._save(document)
+                ready = [
+                    request_id
+                    for request_id in pending
+                    if all(
+                        qa.get(dep, {}).get("approved") is True
+                        for dep in dependencies[request_id]
+                    )
+                ]
+                for request_id in ready[: max(0, window - len(inflight))]:
+                    task = asyncio.create_task(complete_one(request_id))
+                    inflight[task] = request_id
+                if not inflight:
+                    raise RuntimeError("unfinished jobs have unresolved dependency QA")
+                done, _ = await asyncio.wait(
+                    inflight, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    inflight.pop(task)
+                    request_id, receipt, verdict = await task
+                    if verdict is None:
+                        continue
+                    identity = (
+                        verdict.get("reviewer_identity")
+                        if isinstance(verdict, dict)
+                        else None
+                    )
+                    valid = (
+                        isinstance(verdict, dict)
+                        and verdict.get("request_id") == request_id
+                        and verdict.get("result_sha256") == receipt["result_sha256"]
+                        and isinstance(identity, dict)
+                        and all(
+                            isinstance(identity.get(key), str) and identity[key].strip()
+                            for key in ("subject", "issuer")
+                        )
+                        and identity["subject"] != "generator"
+                    )
+                    document = self._load()
+                    if not valid:
+                        document["qa"][request_id] = {
+                            "approved": False,
+                            "codes": ["QA_CONTRACT_INVALID"],
+                        }
+                    elif (
+                        verdict.get("approved") is not True
+                        or not isinstance(verdict.get("reviewer"), str)
+                        or not verdict["reviewer"].strip()
+                    ):
+                        document["qa"][request_id] = {
+                            "approved": False,
+                            "codes": verdict.get("codes", ["QA_FAIL"]),
+                            "request_id": request_id,
+                            "result_sha256": receipt["result_sha256"],
+                            "reviewer": verdict.get("reviewer", ""),
+                            "reviewer_identity": identity,
+                        }
+                    else:
+                        self._assert_ownership(ownership)
+                        self.executor.qa(
+                            request_id,
+                            receipt["result_sha256"],
+                            True,
+                            verdict["reviewer"],
+                            reviewer_identity=identity,
+                        )
+                        document["qa"][request_id] = {
+                            "approved": True,
+                            "result_sha256": receipt["result_sha256"],
+                            "reviewer": verdict["reviewer"],
+                            "reviewer_identity": identity,
+                            "codes": verdict.get("codes", []),
+                        }
+                    self._save(document)
+                # Let task completion callbacks drain before expanding the next
+                # bounded ready window; external observers then see the same
+                # in-flight ceiling as the scheduler's durable map.
+                await asyncio.sleep(0)
+        except BaseException:
+            for task in inflight:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*inflight, return_exceptions=True)
+            raise
 
     async def _resume(
         self,
@@ -1181,13 +1608,11 @@ class AutonomousTwoGateRunner:
             self.validate_resume_jobs(jobs)
         else:
             self._rebuild_jobs(document)
-        self._validate_persisted_qa(document)
         if document["state"] not in {"READY", "RUNNING"}:
             return document
         document["state"] = "RUNNING"
         self._save(document)
-
-        async def process_binding(binding):
+        for binding in document["jobs"]:
             request_id = binding["request_id"]
             receipt = self.executor.inspect(request_id)
             if receipt is None or (
@@ -1279,9 +1704,7 @@ class AutonomousTwoGateRunner:
             if receipt.get("status") != "COMPLETE":
                 if self.ledger is not None:
                     self.ledger.mark_unknown(request_id)
-                self.metrics.reconcile_executor_receipt(
-                    receipt, episode_id=self.episode_id
-                )
+                self._record_receipt_metrics(receipt)
                 raise RuntimeError(
                     "incomplete job requires resume_with_jobs; no ambiguous resubmit"
                 )
@@ -1296,148 +1719,63 @@ class AutonomousTwoGateRunner:
                 # A local executor receipt is not authenticated provider billing.
                 # Preserve the reservation until explicit FAL billing reconciliation.
                 self.ledger.mark_unknown(request_id)
-            self.metrics.reconcile_executor_receipt(receipt, episode_id=self.episode_id)
-            if request_id in document["qa"]:
-                return request_id, None, None
-            if receipt.get("qa") is not None:
-                identity = receipt.get("qa_reviewer_identity")
+            self._record_receipt_metrics(receipt)
+            if request_id not in document["qa"]:
+                verdict = independent_qa(receipt)
+                if asyncio.iscoroutine(verdict):
+                    verdict = await verdict
+                identity = (
+                    verdict.get("reviewer_identity")
+                    if isinstance(verdict, dict)
+                    else None
+                )
                 if (
-                    not isinstance(receipt.get("qa"), bool)
-                    or not isinstance(receipt.get("qa_reviewer"), str)
-                    or not receipt["qa_reviewer"].strip()
+                    not isinstance(verdict, dict)
+                    or verdict.get("request_id") != request_id
+                    or verdict.get("result_sha256") != receipt["result_sha256"]
                     or not isinstance(identity, dict)
-                    or set(identity) != {"subject", "issuer"}
                     or not all(
-                        isinstance(identity.get(key), str) and identity[key].strip()
-                        for key in ("subject", "issuer")
+                        isinstance(identity.get(k), str) and identity[k].strip()
+                        for k in ("subject", "issuer")
                     )
                     or identity["subject"] == "generator"
                 ):
-                    raise RuntimeError(
-                        "durable executor QA lacks identity evidence; reconciliation required"
-                    )
-                return (
-                    request_id,
-                    {
-                        "approved": receipt["qa"],
-                        "result_sha256": receipt["result_sha256"],
-                        "reviewer": receipt["qa_reviewer"],
-                        "reviewer_identity": identity,
-                        "codes": [],
-                    },
-                    None,
-                )
-            verdict = independent_qa(receipt)
-            if asyncio.iscoroutine(verdict):
-                verdict = await verdict
-            identity = (
-                verdict.get("reviewer_identity") if isinstance(verdict, dict) else None
-            )
-            if (
-                not isinstance(verdict, dict)
-                or verdict.get("request_id") != request_id
-                or verdict.get("result_sha256") != receipt["result_sha256"]
-                or not isinstance(identity, dict)
-                or not all(
-                    isinstance(identity.get(k), str) and identity[k].strip()
-                    for k in ("subject", "issuer")
-                )
-                or identity["subject"] == "generator"
-                or type(verdict.get("approved")) is not bool
-                or not isinstance(verdict.get("reviewer"), str)
-                or not verdict["reviewer"].strip()
-            ):
-                return (
-                    request_id,
-                    {
+                    document["qa"][request_id] = {
                         "approved": False,
                         "codes": ["QA_CONTRACT_INVALID"],
-                    },
-                    ValueError(
+                    }
+                    document["state"] = "REJECTED"
+                    self._save(document)
+                    raise ValueError(
                         "independent QA must bind request_id, result_sha256, and non-generator identity"
-                    ),
-                )
-            self.executor.qa(
-                request_id,
-                receipt["result_sha256"],
-                verdict["approved"],
-                verdict["reviewer"],
-                reviewer_identity=identity,
-            )
-            if verdict["approved"] is not True:
-                return (
-                    request_id,
-                    {
+                    )
+                if (
+                    verdict.get("approved") is not True
+                    or not isinstance(verdict.get("reviewer"), str)
+                    or not verdict["reviewer"].strip()
+                ):
+                    document["qa"][request_id] = {
                         "approved": False,
                         "codes": verdict.get("codes", ["QA_FAIL"]),
                         "request_id": request_id,
                         "result_sha256": receipt["result_sha256"],
                         "reviewer": verdict.get("reviewer", ""),
                         "reviewer_identity": identity,
-                    },
-                    None,
+                    }
+                    document["state"] = "REJECTED"
+                    return self._save(document)
+                self.executor.qa(
+                    request_id, receipt["result_sha256"], True, verdict["reviewer"]
+                    , reviewer_identity=identity
                 )
-            return (
-                request_id,
-                {
+                document["qa"][request_id] = {
                     "approved": True,
                     "result_sha256": receipt["result_sha256"],
                     "reviewer": verdict["reviewer"],
                     "reviewer_identity": identity,
                     "codes": verdict.get("codes", []),
-                },
-                None,
-            )
-
-        pending_bindings = list(document["jobs"])
-        active = set()
-        verified = set()
-        concurrency = self.executor.config.concurrency
-
-        def admit():
-            admitted = True
-            while len(active) < concurrency and admitted:
-                admitted = False
-                for binding in tuple(pending_bindings):
-                    predecessor = self._jobs[binding["request_id"]].predecessor
-                    if predecessor and predecessor not in verified:
-                        continue
-                    pending_bindings.remove(binding)
-                    active.add(asyncio.create_task(process_binding(binding)))
-                    admitted = True
-                    if len(active) >= concurrency:
-                        break
-
-        admit()
-        try:
-            while active:
-                done, active = await asyncio.wait(
-                    active, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in done:
-                    request_id, qa_record, contract_error = task.result()
-                    if qa_record is None:
-                        verified.add(request_id)
-                        continue
-                    document["qa"][request_id] = qa_record
-                    if qa_record.get("approved") is not True:
-                        document["state"] = "REJECTED"
-                    self._save(document)
-                    if contract_error is not None:
-                        raise contract_error
-                    if document["state"] == "REJECTED":
-                        for pending in active:
-                            pending.cancel()
-                        await asyncio.gather(*active, return_exceptions=True)
-                        return document
-                    verified.add(request_id)
-                admit()
-                if not active and pending_bindings:
-                    raise RuntimeError("runner DAG has no dependency-ready job")
-        finally:
-            for pending in active:
-                pending.cancel()
-            await asyncio.gather(*active, return_exceptions=True)
+                }
+                self._save(document)
         document["state"] = "MEDIA_PENDING"
         return self._save(document)
 
@@ -1447,10 +1785,6 @@ class AutonomousTwoGateRunner:
         return await self.resume(provider, independent_qa, jobs)
 
     def record_qa(self, request_id: str, receipt: dict, verdict: dict) -> None:
-        with file_lock(self.lock_path):
-            self._record_qa(request_id, receipt, verdict)
-
-    def _record_qa(self, request_id: str, receipt: dict, verdict: dict) -> None:
         """Record only a PASS with identity evidence; FAIL is a terminal remediation signal."""
         if verdict.get("approved") is not True:
             raise ValueError(
@@ -1461,9 +1795,6 @@ class AutonomousTwoGateRunner:
             not isinstance(identity, dict)
             or not identity.get("subject")
             or not identity.get("issuer")
-            or identity.get("subject") == "generator"
-            or not isinstance(verdict.get("reviewer"), str)
-            or not verdict["reviewer"].strip()
         ):
             raise ValueError("independent QA requires verifier identity evidence")
         if request_id not in {item["request_id"] for item in self._load()["jobs"]}:
@@ -1476,17 +1807,31 @@ class AutonomousTwoGateRunner:
         ):
             raise ValueError("QA receipt hash mismatch")
         self.executor.qa(
-            request_id,
-            receipt["result_sha256"],
-            True,
-            verdict["reviewer"],
-            reviewer_identity=identity,
+            request_id, receipt["result_sha256"], True, verdict["reviewer"]
+            , reviewer_identity=identity
         )
 
     def stage_delivery(
         self, thumbnail: Path, video: Path, *, qa: dict[str, Any]
     ) -> dict[str, Any]:
+        # A runner wired to a worker lease never permits the public bypass.
+        # Standalone TEST runners legitimately retain their own OS lock.
+        self._assert_ownership(None)
         with file_lock(self.lock_path):
+            return self._stage_delivery(thumbnail, video, qa=qa)
+
+    def stage_delivery_owned(
+        self,
+        thumbnail: Path,
+        video: Path,
+        *,
+        qa: dict[str, Any],
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Stage only while the injected runtime fence still owns this episode."""
+        self._assert_ownership(ownership)
+        with file_lock(self.lock_path):
+            self._assert_ownership(ownership)
             return self._stage_delivery(thumbnail, video, qa=qa)
 
     def _stage_delivery(
@@ -1494,7 +1839,6 @@ class AutonomousTwoGateRunner:
     ) -> dict[str, Any]:
         """Open a gate only for QA'd, hash-bound, decodable TEST media."""
         document = self._load()
-        self._validate_persisted_qa(document)
         active = [
             item["request_id"]
             for item in document["jobs"]
@@ -1567,7 +1911,26 @@ class AutonomousTwoGateRunner:
     def record_human_gate(
         self, kind: str, artifact: Path, *, approved: bool, reviewer: str
     ) -> dict[str, Any]:
+        """Record a standalone gate; lease-wired runners must use the owned API."""
+        self._assert_ownership(None)
         with file_lock(self.lock_path):
+            return self._record_human_gate(
+                kind, artifact, approved=approved, reviewer=reviewer
+            )
+
+    def record_human_gate_owned(
+        self,
+        kind: str,
+        artifact: Path,
+        *,
+        approved: bool,
+        reviewer: str,
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Record one gate under an existing lease while retaining the OS lock."""
+        self._assert_ownership(ownership)
+        with file_lock(self.lock_path):
+            self._assert_ownership(ownership)
             return self._record_human_gate(
                 kind, artifact, approved=approved, reviewer=reviewer
             )
@@ -1704,9 +2067,20 @@ class AutonomousCompiledTestAdapter:
     LIVE work.
     """
 
-    def __init__(self, runner: AutonomousTwoGateRunner, pipeline):
+    def __init__(
+        self,
+        runner: AutonomousTwoGateRunner,
+        pipeline,
+        *,
+        canonical_episode_root: Path | None = None,
+    ):
         self.runner = runner
         self.pipeline = pipeline
+        self._canonical_episode_root = (
+            reject_reparse_path(Path(canonical_episode_root))
+            if canonical_episode_root is not None
+            else None
+        )
         if runner.episode_id != pipeline.episode.episode_id:
             raise ValueError("runner and compiled pipeline episode IDs must match")
         if pipeline.episode.audio.mode != "TEST":
@@ -1756,6 +2130,18 @@ class AutonomousCompiledTestAdapter:
         self, provider, independent_qa: Callable[[dict], dict]
     ) -> dict[str, Any]:
         """Resume runner dispatch, then promote only its exact completed QA PASSes."""
+        return await self._resume(provider, independent_qa, None)
+
+    async def resume_owned(
+        self,
+        provider,
+        independent_qa: Callable[[dict], dict],
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Resume only through the exact worker lease wired into this runner."""
+        return await self._resume(provider, independent_qa, ownership)
+
+    async def _resume(self, provider, independent_qa, ownership):
 
         async def qa_after_technical_check(receipt: dict) -> dict:
             scene_id = receipt.get("request", {}).get("scene")
@@ -1783,13 +2169,56 @@ class AutonomousCompiledTestAdapter:
                 verdict = await verdict
             return verdict
 
-        document = await self.runner.resume(provider, qa_after_technical_check)
-        self._synchronize_runner_qa(document)
+        if ownership is None:
+            document = await self.runner.resume(provider, qa_after_technical_check)
+        else:
+            document = await self.runner.resume_owned(
+                provider, qa_after_technical_check, ownership
+            )
+        self._synchronize_runner_qa(document, ownership)
         if document["state"] == "MEDIA_PENDING":
-            self._promote_runner_passes(document)
+            self._promote_runner_passes(document, ownership)
         return document
 
-    def _synchronize_runner_qa(self, document: dict[str, Any]) -> None:
+    def _fenced_mutation(self, ownership: RunnerOwnership | None) -> None:
+        """Recheck the exact queue lease immediately before a compiled write."""
+        if ownership is not None:
+            self.runner._assert_ownership(ownership)
+
+    def record_human_gate(
+        self, kind: str, artifact: Path, *, approved: bool, reviewer: str
+    ) -> dict[str, Any]:
+        """Record a gate only for a standalone compiled TEST runner.
+
+        A compiled adapter constructed with a queue ownership assertion has no
+        unowned approval bypass; its worker must retain that lease and call the
+        owned companion below.
+        """
+        if self.runner._ownership_assertion is not None:
+            raise PermissionError(
+                "lease-wired compiled runner requires owned human gate"
+            )
+        return self.runner.record_human_gate(
+            kind, artifact, approved=approved, reviewer=reviewer
+        )
+
+    def record_human_gate_owned(
+        self,
+        kind: str,
+        artifact: Path,
+        *,
+        approved: bool,
+        reviewer: str,
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Record a compiled gate under the worker's existing fenced lease."""
+        return self.runner.record_human_gate_owned(
+            kind, artifact, approved=approved, reviewer=reviewer, ownership=ownership
+        )
+
+    def _synchronize_runner_qa(
+        self, document: dict[str, Any], ownership: RunnerOwnership | None = None
+    ) -> None:
         """Project durable runner verdicts into the compiled lineage exactly once."""
         for request_id, verdict in document.get("qa", {}).items():
             receipt = self.runner.executor.inspect(request_id)
@@ -1805,27 +2234,33 @@ class AutonomousCompiledTestAdapter:
             if job.request_id != request_id:
                 raise ValueError("runner QA receipt is not the active compiled lineage")
             reviewer = verdict.get("reviewer")
-            if not isinstance(reviewer, str) or not reviewer.strip():
-                raise ValueError("runner QA reviewer is missing")
+            reviewer_identity = verdict.get("reviewer_identity")
+            if (
+                not isinstance(reviewer, str)
+                or not reviewer.strip()
+                or not isinstance(reviewer_identity, dict)
+            ):
+                raise ValueError("runner QA reviewer identity is missing")
+            self._fenced_mutation(ownership)
             self.pipeline.record_visual_qa(
                 job.scene,
                 receipt["result_sha256"],
                 verdict.get("approved") is True,
                 reviewer,
-                reviewer_identity=verdict.get("reviewer_identity"),
+                reviewer_identity=reviewer_identity,
             )
 
     async def remediate(
         self,
-        corrections: dict[str, str],
+        corrections: dict[str, dict],
         provider,
         independent_qa: Callable[[dict], dict],
     ) -> dict[str, Any]:
         """Create only QA-rejected compiled successors, then resume the same runner."""
         self._synchronize_runner_qa(self.runner._load())
         jobs = [
-            self.pipeline.run.remediation_job(scene_id, prompt)
-            for scene_id, prompt in corrections.items()
+            self.pipeline.run.remediation_job(scene_id, finding)
+            for scene_id, finding in corrections.items()
         ]
         self.runner.add_successors(jobs)
         return await self.resume(provider, independent_qa)
@@ -1844,7 +2279,9 @@ class AutonomousCompiledTestAdapter:
         self.runner.add_successors(list(jobs))
         return await self.resume(provider, independent_qa)
 
-    def _promote_runner_passes(self, document: dict[str, Any]) -> None:
+    def _promote_runner_passes(
+        self, document: dict[str, Any], ownership: RunnerOwnership | None = None
+    ) -> None:
         for request_id, verdict in document.get("qa", {}).items():
             if verdict.get("approved") is not True:
                 continue
@@ -1855,6 +2292,7 @@ class AutonomousCompiledTestAdapter:
                 or verdict.get("result_sha256") != receipt.get("result_sha256")
                 or not isinstance(verdict.get("reviewer"), str)
                 or not verdict["reviewer"].strip()
+                or not isinstance(verdict.get("reviewer_identity"), dict)
             ):
                 raise ValueError(
                     "runner PASS is incomplete or does not bind compiled receipt"
@@ -1864,17 +2302,34 @@ class AutonomousCompiledTestAdapter:
             )
             if job.request_id != request_id:
                 raise ValueError("runner PASS is not the active compiled receipt")
+            self._fenced_mutation(ownership)
             self.pipeline.record_visual_qa(
                 job.scene,
                 receipt["result_sha256"],
                 True,
                 verdict["reviewer"],
-                reviewer_identity=verdict.get("reviewer_identity"),
+                reviewer_identity=verdict["reviewer_identity"],
             )
 
     @staticmethod
-    def _file_digest(path: Path) -> str:
-        return sha256(Path(path).read_bytes()).hexdigest()
+    def _file_digest(
+        path: Path, *, root: Path | None = None, label: str = "delivery"
+    ) -> str:
+        candidate = Path(path)
+        if root is not None:
+            if not candidate.is_absolute():
+                raise ValueError(f"{label} path must be absolute")
+            try:
+                root = reject_reparse_path(Path(root))
+                candidate = reject_reparse_path(candidate)
+                candidate.relative_to(root)
+                if not stat.S_ISREG(os.lstat(candidate).st_mode):
+                    raise ValueError("not regular")
+            except (OSError, ValueError) as error:
+                raise ValueError(
+                    f"{label} path is outside delivery root or unsafe"
+                ) from error
+        return sha256(candidate.read_bytes()).hexdigest()
 
     def _sidecars(self, directory: Path) -> dict[str, dict[str, str]]:
         """Create TEST-labelled, separate caption sidecars from compiled timing."""
@@ -1920,25 +2375,153 @@ class AutonomousCompiledTestAdapter:
         }
 
     def _verify_existing_delivery(self, evidence: dict[str, Any], manifest) -> None:
+        root = self.pipeline.workspace / "delivery"
+        media, sidecars, receipt = (
+            evidence.get("media"),
+            evidence.get("sidecars"),
+            evidence.get("render_receipt"),
+        )
         if (
-            evidence.get("mode") != "TEST"
+            evidence.get("schema") != "compiled-test-local-delivery-v1"
+            or evidence.get("mode") != "TEST"
             or evidence.get("manifest_sha256") != manifest.checksum
+            or not isinstance(media, dict)
+            or set(media) != {"thumbnail", "video"}
+            or not isinstance(sidecars, dict)
+            or set(sidecars) != {"transcript", "srt", "vtt"}
+            or not isinstance(receipt, dict)
         ):
             raise ValueError(
                 "existing delivery evidence does not bind this compiled manifest"
             )
-        for kind, item in {
-            **evidence.get("media", {}),
-            **evidence.get("sidecars", {}),
-        }.items():
-            path = Path(item.get("path", ""))
-            if not path.is_file() or self._file_digest(path) != item.get("sha256"):
+        for kind, item in {**media, **sidecars}.items():
+            if not isinstance(item, dict) or not isinstance(item.get("sha256"), str):
+                raise TypeError(f"existing {kind} evidence is malformed")
+            if (
+                self._file_digest(Path(item.get("path", "")), root=root, label=kind)
+                != item["sha256"]
+            ):
                 raise ValueError(
                     f"existing {kind} bytes do not match delivery evidence"
                 )
+        renderer_receipt = receipt.get("renderer_receipt", receipt)
+        if (
+            evidence.get("thumbnail_sha256") != media["thumbnail"]["sha256"]
+            or evidence.get("video_sha256") != media["video"]["sha256"]
+            or not isinstance(renderer_receipt, dict)
+            or renderer_receipt.get("manifest_sha256") != manifest.checksum
+            or renderer_receipt.get("output_sha256") != media["video"]["sha256"]
+            or (
+                receipt.get("schema") == "compiled-director-render-receipt-v1"
+                and (
+                    receipt.get("render_contract", {}).get("manifest_sha256")
+                    != manifest.checksum
+                    or set(receipt)
+                    != {
+                        "schema",
+                        "intent_sha256",
+                        "completion_sha256",
+                        "render_contract",
+                        "render_contract_sha256",
+                        "renderer_receipt",
+                    }
+                )
+            )
+            or (
+                receipt.get("schema") != "compiled-director-render-receipt-v1"
+                and renderer_receipt.get("output") != media["video"]["path"]
+            )
+        ):
+            raise ValueError(
+                "existing delivery evidence does not cross-bind render receipt"
+            )
 
     def stage_local_delivery(
         self, renderer, independent_media_qa: Callable[[dict], dict], *, hold: int = 4
+    ) -> dict[str, Any]:
+        return self._stage_local_delivery(renderer, independent_media_qa, hold, None)
+
+    def stage_local_delivery_owned(
+        self,
+        renderer,
+        independent_media_qa: Callable[[dict], dict],
+        *,
+        hold: int = 4,
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Render and stage TEST media only while the worker fence is current."""
+        self.runner._assert_ownership(ownership)
+        return self._stage_local_delivery(
+            renderer, independent_media_qa, hold, ownership
+        )
+
+    def stage_director_delivery_owned(
+        self,
+        independent_media_qa: Callable[[dict], dict],
+        *,
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Copy only the configured EpisodeFS master after fresh local recovery.
+
+        The stage API has no receipt, media path, callback, class, token, or
+        capability input.  It reopens the canonical immutable lineage from the
+        root selected when this TEST adapter was built.
+        """
+        from src.hybrid.compiled_render_recovery import reopen_compiled_director_receipt
+
+        if self._canonical_episode_root is None:
+            raise PolicyError(
+                "Director delivery requires configured canonical episode storage"
+            )
+        try:
+            director_receipt, canonical_video = reopen_compiled_director_receipt(
+                self._canonical_episode_root,
+                self.runner.episode_id,
+                self.pipeline,
+            )
+        except (OSError, TypeError, ValueError, KeyError) as error:
+            raise PolicyError(
+                "Director delivery canonical recovery is unavailable"
+            ) from error
+        contract = director_receipt["render_contract"]
+        return self._stage_local_delivery(
+            None,
+            independent_media_qa,
+            int(contract.get("hold_seconds", 0)),
+            ownership,
+            canonical_video=canonical_video,
+            renderer_receipt=director_receipt,
+        )
+
+    async def stage_local_delivery_owned_async(
+        self,
+        renderer,
+        independent_media_qa: Callable[[dict], dict],
+        *,
+        hold: int = 4,
+        ownership: RunnerOwnership,
+    ) -> dict[str, Any]:
+        """Keep the worker event loop responsive while the existing renderer encodes."""
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.stage_local_delivery_owned,
+                renderer,
+                independent_media_qa,
+                hold=hold,
+                ownership=ownership,
+            )
+        )
+        return await asyncio.shield(task)
+
+    def _stage_local_delivery(
+        self,
+        renderer,
+        independent_media_qa,
+        hold,
+        ownership,
+        *,
+        canonical_video: Path | None = None,
+        renderer_receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Render approved TEST pixels locally, preserve sidecars, then open gate one.
 
@@ -1962,35 +2545,63 @@ class AutonomousCompiledTestAdapter:
                 }
                 and evidence_path.is_file()
             ):
-                evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                evidence = json.loads(
+                    self._file_digest(
+                        evidence_path.absolute(), root=delivery, label="evidence"
+                    )
+                    and evidence_path.read_text(encoding="utf-8")
+                )
                 self._verify_existing_delivery(evidence, manifest)
                 return document
             raise ValueError("local delivery requires completed compiled image QA")
         if evidence_path.is_file():
+            self._file_digest(evidence_path.absolute(), root=delivery, label="evidence")
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             self._verify_existing_delivery(evidence, manifest)
             media = evidence["media"]
         else:
+            self._fenced_mutation(ownership)
             delivery.mkdir(parents=True, exist_ok=True)
             thumbnail = delivery / "thumbnail.TEST.png"
             video = delivery / "master.mp4"
             if thumbnail.exists() or video.exists():
                 raise ValueError("partial delivery exists without hash-bound evidence")
             source = manifest.assets[0].path
+            self._fenced_mutation(ownership)
             shutil.copyfile(source, thumbnail)
             if self._file_digest(thumbnail) != manifest.assets[0].sha256:
                 raise ValueError("local thumbnail copy hash mismatch")
-            receipt = renderer.render_compiled(
-                self.pipeline,
-                self.pipeline.render_scenes(manifest),
-                manifest,
-                self.pipeline.episode.audio,
-                None,
-                video,
-                hold=hold,
+            self._fenced_mutation(ownership)
+            if canonical_video is None:
+                receipt = renderer.render_compiled(
+                    self.pipeline,
+                    self.pipeline.render_scenes(manifest),
+                    manifest,
+                    self.pipeline.episode.audio,
+                    None,
+                    video,
+                    hold=hold,
+                )
+            else:
+                if renderer is not None or not canonical_video.is_file():
+                    raise ValueError(
+                        "Director delivery requires one canonical completed video"
+                    )
+                self._fenced_mutation(ownership)
+                shutil.copyfile(canonical_video, video)
+                receipt = renderer_receipt
+            output_receipt = (
+                receipt.get("renderer_receipt", receipt)
+                if isinstance(receipt, dict)
+                else None
             )
-            if self._file_digest(video) != receipt.get("output_sha256"):
+            if not isinstance(output_receipt, dict) or self._file_digest(
+                video
+            ) != output_receipt.get("output_sha256"):
                 raise ValueError("renderer receipt does not bind local master bytes")
+            # The Director receipt originates from strict JSON and may use
+            # Decimal during validation; delivery evidence remains JSON bytes.
+            receipt = json.loads(json.dumps(receipt, default=float, allow_nan=False))
             media = {
                 "thumbnail": {
                     "path": str(thumbnail.resolve()),
@@ -2040,15 +2651,23 @@ class AutonomousCompiledTestAdapter:
             )
         evidence["independent_technical_qa"] = verdict
         _atomic_json(evidence_path, evidence)
-        return self.runner.stage_delivery(
-            Path(media["thumbnail"]["path"]),
-            Path(media["video"]["path"]),
-            qa={
+        kwargs = {
+            "qa": {
                 "approved": True,
                 "mode": "TEST",
                 "subject": identity["subject"],
                 "issuer": identity["issuer"],
                 "reviewer": verdict["reviewer"],
                 "evidence_sha256": self._file_digest(evidence_path),
-            },
+            }
+        }
+        if ownership is None:
+            return self.runner.stage_delivery(
+                Path(media["thumbnail"]["path"]), Path(media["video"]["path"]), **kwargs
+            )
+        return self.runner.stage_delivery_owned(
+            Path(media["thumbnail"]["path"]),
+            Path(media["video"]["path"]),
+            ownership=ownership,
+            **kwargs,
         )

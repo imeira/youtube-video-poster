@@ -30,7 +30,7 @@ from src.hybrid._billing_coordinator_guard import (
 )
 from src.hybrid.artifacts import Manifest, digest, sha256
 from src.hybrid.cas import ContentAddressedStore, job_content_key
-from src.hybrid.locks import file_lock, file_slot
+from src.hybrid.locks import file_lock, file_slot, reject_reparse_path
 from src.hybrid.observability import StructuredEventLog
 from src.hybrid.planner import Config, money
 
@@ -115,6 +115,8 @@ class Executor:
         cas: ContentAddressedStore | None = None,
         events: StructuredEventLog | None = None,
         standing_ledger=None,
+        _authenticated_budget_composition: dict | None = None,
+        _authenticated_budget_bridge=None,
     ):
         self.database = Path(database)
         self.database.parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +124,20 @@ class Executor:
         self.prior_spend = money(prior_spend)
         self.cas = cas
         self.events = events
+        self._authenticated_budget_composition = _authenticated_budget_composition
+        self._authenticated_budget_bridge = _authenticated_budget_bridge
+        if (_authenticated_budget_composition is None) != (
+            _authenticated_budget_bridge is None
+        ) or (
+            _authenticated_budget_composition is not None
+            and self._authenticated_budget_composition_for_bridge(
+                _authenticated_budget_bridge
+            )
+            != _authenticated_budget_composition
+        ):
+            raise ValueError(
+                "authenticated budget composition must come from its configured bridge factory"
+            )
         self._standing_ledger = None
         self._billing_snapshot_coordinator = None
         self._billing_snapshot_owner_binding = None
@@ -150,6 +166,7 @@ class Executor:
                 {
                     "limit": str(self.config.limit),
                     "prior_spend": str(self.prior_spend),
+                    "authenticated_budget_composition": self._authenticated_budget_composition,
                     "concurrency": self.config.concurrency,
                 }
             )
@@ -214,7 +231,93 @@ class Executor:
             raise ValueError("executor standing ledger is immutable")
         self._standing_ledger = ledger
 
-    def _verify_prepared_fal_admission(self, job: Job, row: dict) -> None:
+    def _configured_authenticated_budget_binding(self, job: Job) -> dict | None:
+        """Re-read the factory-pinned bridge receipt for this exact TEST job."""
+        composition = self._authenticated_budget_composition
+        if composition is None:
+            return None
+        if not isinstance(job, Job) or job.mode != "TEST":
+            raise PermissionError("authenticated budget admission is TEST-only")
+        bridge = self._authenticated_budget_bridge
+        if (
+            bridge is None
+            or self._authenticated_budget_composition_for_bridge(bridge) != composition
+        ):
+            raise PermissionError(
+                "configured authenticated budget trust source changed"
+            )
+        policy = bridge.service.policy_loader().load(bridge.receipt_path)
+        if policy.mode != "TEST" or job.endpoint not in policy.allowed_providers:
+            raise PermissionError(
+                "configured authenticated budget receipt does not authorize executor job"
+            )
+        return {
+            "schema": 1,
+            "kind": "AUTHENTICATED_TEST_BUDGET_ADMISSION",
+            "composition_trust_digest": composition["trust_digest"],
+            "request_id": policy.request_id,
+            "episode_id": policy.episode_id,
+            "policy_sha256": policy.policy_sha256,
+            "provider": job.endpoint,
+            "operation_id": job.request_id,
+            "mode": "TEST",
+        }
+
+    @staticmethod
+    def _authenticated_budget_composition_for_bridge(bridge) -> dict:
+        from src.hybrid.budget_authorization import AuthenticatedBudgetBridge
+
+        if not isinstance(bridge, AuthenticatedBudgetBridge):
+            raise TypeError("configured authenticated budget bridge is required")
+        service_root = reject_reparse_path(Path(bridge.service.root)).resolve()
+        receipt_path = reject_reparse_path(Path(bridge.receipt_path)).resolve()
+        bridge.service.policy_loader().load(receipt_path)
+        source = {
+            "schema": 1,
+            "kind": "AUTHENTICATED_TEST_BUDGET_COMPOSITION",
+            "config_root": str(service_root),
+            "service_root": str(service_root),
+            "receipt_path": str(receipt_path),
+            "receipt_sha256": sha256(receipt_path),
+        }
+        return {**source, "trust_digest": digest(source)}
+
+    @classmethod
+    def _from_authenticated_budget_bridge(
+        cls, database: Path, config: Config, *, bridge, **kwargs
+    ):
+        composition = cls._authenticated_budget_composition_for_bridge(bridge)
+        return cls(
+            database,
+            config,
+            standing_ledger=bridge._ledger,
+            _authenticated_budget_composition=composition,
+            _authenticated_budget_bridge=bridge,
+            **kwargs,
+        )
+
+    def _matches_authenticated_budget_bridge(self, bridge) -> bool:
+        return (
+            self._authenticated_budget_bridge is bridge
+            and self._authenticated_budget_composition is not None
+            and self._authenticated_budget_composition_for_bridge(bridge)
+            == self._authenticated_budget_composition
+        )
+
+    def _fresh_authenticated_budget_admission(self, job: Job, row: dict) -> dict | None:
+        binding = row.get("authenticated_budget_admission")
+        if binding is None:
+            return None
+        configured = self._configured_authenticated_budget_binding(job)
+        if configured != binding:
+            raise PermissionError(
+                "authenticated budget admission no longer authorizes executor job"
+            )
+        return configured
+
+    def _verify_prepared_fal_admission(
+        self, job: Job, row: dict, *, require_admitted_marker=True
+    ) -> None:
         """Require the configured ledger's exact durable reservation before POST."""
         ledger = self._standing_ledger
         if ledger is None:
@@ -268,6 +371,78 @@ class Executor:
             raise PermissionError(
                 "prepared FAL submit ledger reservation value mismatch"
             )
+        authenticated = self._fresh_authenticated_budget_admission(job, row)
+        if authenticated is None:
+            # Legacy TEST ledger paths remain mechanically useful, but their
+            # fixed local scope cannot be relabeled as bridge authority or LIVE.
+            if job.mode != "TEST" or binding["auth_scope"] != "TEST_LOCAL_ONLY":
+                raise PermissionError(
+                    "prepared ledger admission requires authenticated TEST authority"
+                )
+            return
+        admission = row.get("standing_ledger_admission")
+        if require_admitted_marker and admission != {
+            "schema": 1,
+            "kind": "AUTHENTICATED_TEST_LEDGER_ADMISSION",
+            "local_request_id": job.request_id,
+            "endpoint_id": job.endpoint,
+            "auth_scope": binding["auth_scope"],
+            "authority_mode": job.mode,
+            "reserved_usd": str(job.cost),
+            "authenticated_budget_admission": authenticated,
+        }:
+            raise PermissionError("prepared FAL submit lacks durable admitted marker")
+
+    def bind_prepared_standing_ledger_admission(self, job: Job) -> dict:
+        """Durably acknowledge a separately committed canonical reservation.
+
+        The executor and standing ledger are separate SQLite databases, so this
+        is deliberately a saga step rather than a fictitious cross-DB atomic
+        transaction. Replays first verify the canonical reservation, then write
+        this idempotent executor marker. ``run`` accepts no PREPARED row until
+        both the marker and a fresh claim read verify.
+        """
+        job = deepcopy(job)
+        row = self.inspect(job.request_id)
+        if row is None or row.get("status") != "PREPARED":
+            raise RuntimeError("only a prepared executor intent can be admitted")
+        if type(row.get("billing_snapshot_generation")) is int:
+            _require_coordinator_write(row["billing_snapshot_generation"])
+        self._verify_prepared_fal_admission(job, row, require_admitted_marker=False)
+        binding = row["settlement_binding"]
+        authenticated = self._fresh_authenticated_budget_admission(job, row)
+        if authenticated is None:
+            raise PermissionError(
+                "only bridge-bound authenticated intent can persist admission marker"
+            )
+        admission = {
+            "schema": 1,
+            "kind": "AUTHENTICATED_TEST_LEDGER_ADMISSION",
+            "local_request_id": job.request_id,
+            "endpoint_id": job.endpoint,
+            "auth_scope": binding["auth_scope"],
+            "authority_mode": job.mode,
+            "reserved_usd": str(job.cost),
+            "authenticated_budget_admission": authenticated,
+        }
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            found = db.execute(
+                "SELECT data FROM jobs WHERE id=?", (job.request_id,)
+            ).fetchone()
+            persisted = json.loads(found[0]) if found else None
+            if persisted is None or persisted.get("status") != "PREPARED":
+                raise RuntimeError("prepared executor intent changed during admission")
+            if persisted.get("settlement_binding") != binding:
+                raise PermissionError(
+                    "prepared executor intent binding changed during admission"
+                )
+            prior = persisted.get("standing_ledger_admission")
+            if prior is not None and prior != admission:
+                raise PermissionError("prepared executor admission marker is immutable")
+            persisted["standing_ledger_admission"] = admission
+            self._put(db, persisted)
+        return self.inspect(job.request_id)
 
     def sync_cost_ledger(
         self, ledger_path: Path, *, episode_id: str, budget: BudgetConfig
@@ -440,6 +615,7 @@ class Executor:
         reservation_cost=None,
         cache_key="",
         auth_scope=None,
+        authenticated_budget_admission=None,
         billing_snapshot_generation=None,
         billing_snapshot_owner=None,
     ):
@@ -566,6 +742,7 @@ class Executor:
                     "billing_snapshot_owner": dict(billing_snapshot_owner)
                     if billing_snapshot_owner
                     else None,
+                    "authenticated_budget_admission": authenticated_budget_admission,
                     "settlement_binding": {
                         "schema": 2,
                         "local_request_id": job.request_id,
@@ -615,11 +792,28 @@ class Executor:
                 "explicit scene, endpoint and positive maximum cost required"
             )
         job.manifest.verify(job.mode)
-        if auth_scope is None:
-            auth_scope = "TEST_LOCAL_ONLY" if job.mode == "TEST" else None
+        authenticated_binding = self._configured_authenticated_budget_binding(job)
+        if authenticated_binding is None:
+            if job.mode != "TEST":
+                raise PermissionError(
+                    "raw prepared intent cannot authorize LIVE admission"
+                )
+            if auth_scope not in {None, "TEST_LOCAL_ONLY"}:
+                raise PermissionError(
+                    "raw prepared intent cannot forge bridge authorization scope"
+                )
+            auth_scope = "TEST_LOCAL_ONLY"
+        else:
+            required_scope = (
+                f"AUTHENTICATED_TEST_REQUEST:{authenticated_binding['request_id']}"
+            )
+            if auth_scope not in {None, required_scope}:
+                raise PermissionError("authenticated intent scope is internally bound")
+            auth_scope = required_scope
         fresh = self._reserve(
             job,
             auth_scope=auth_scope,
+            authenticated_budget_admission=authenticated_binding,
             billing_snapshot_generation=billing_snapshot_generation,
             billing_snapshot_owner=billing_snapshot_owner,
         )
@@ -636,64 +830,22 @@ class Executor:
         if sha256(row["result"]) != row["result_sha256"]:
             raise ValueError("receipt result hash mismatch")
 
-    def qa(
-        self,
-        request_id,
-        result_sha256,
-        approved,
-        reviewer,
-        *,
-        reviewer_identity=None,
-    ):
-        if (
-            reviewer_identity is None
-            and approved is False
-            and reviewer == "mock rejection"
-        ):
+    def qa(self, request_id, result_sha256, approved, reviewer, *, failure_code=None, reviewer_identity=None):
+        if reviewer_identity is None and approved is False and reviewer == "mock rejection":
             reviewer_identity = {"subject": reviewer, "issuer": "TEST"}
         if (
             not isinstance(reviewer_identity, dict)
             or set(reviewer_identity) != {"subject", "issuer"}
-            or not all(
-                isinstance(reviewer_identity.get(key), str)
-                and reviewer_identity[key].strip()
-                for key in ("subject", "issuer")
-            )
-            or "generator"
-            in {
-                str(reviewer).strip().casefold(),
-                reviewer_identity["subject"].strip().casefold(),
-                reviewer_identity["issuer"].strip().casefold(),
-            }
+            or not all(isinstance(reviewer_identity.get(key), str) and reviewer_identity[key].strip() for key in ("subject", "issuer"))
+            or "generator" in {str(reviewer).strip().casefold(), reviewer_identity["subject"].strip().casefold(), reviewer_identity["issuer"].strip().casefold()}
         ):
-            raise ValueError(
-                "QA reviewer identity must bind an independent subject and issuer"
-            )
+            raise ValueError("QA reviewer identity must bind an independent subject and issuer")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             found = db.execute(
                 "SELECT data FROM jobs WHERE id=?", (request_id,)
             ).fetchone()
             row = json.loads(found[0]) if found else None
-            request = row.get("request", {}) if row else {}
-            payload = request.get("payload", {}) if isinstance(request, dict) else {}
-            producer_identities = {
-                str(value).strip().casefold()
-                for value in (
-                    row.get("endpoint") if row else "",
-                    request.get("endpoint") if isinstance(request, dict) else "",
-                    payload.get("model") if isinstance(payload, dict) else "",
-                )
-                if value
-            }
-            if producer_identities & {
-                str(reviewer).strip().casefold(),
-                reviewer_identity["subject"].strip().casefold(),
-                reviewer_identity["issuer"].strip().casefold(),
-            }:
-                raise ValueError(
-                    "QA reviewer identity must be independent from the generator"
-                )
             if row and type(row.get("billing_snapshot_generation")) is int:
                 _require_coordinator_write(row["billing_snapshot_generation"])
             if (
@@ -702,6 +854,10 @@ class Executor:
                 or type(approved) is not bool
                 or not reviewer
                 or result_sha256 != row["result_sha256"]
+                or approved
+                and failure_code is not None
+                or failure_code is not None
+                and (type(failure_code) is not str or not failure_code)
             ):
                 raise ValueError("QA must bind a completed receipt hash and reviewer")
             self._verify_receipt(row)
@@ -709,20 +865,16 @@ class Executor:
                 if (
                     row["qa"] == approved
                     and row.get("qa_reviewer") == reviewer
-                    and (
-                        reviewer_identity is None
-                        or row.get("qa_reviewer_identity") == reviewer_identity
-                    )
+                    and row.get("failure_code") == failure_code
+                    and row.get("qa_reviewer_identity") == reviewer_identity
                 ):
                     return
                 raise ValueError(
                     "QA receipt is immutable; create a remediation successor"
                 )
-            row.update(
-                qa=approved,
-                qa_reviewer=reviewer,
-                qa_reviewer_identity=reviewer_identity,
-            )
+            row.update(qa=approved, qa_reviewer=reviewer, qa_reviewer_identity=reviewer_identity)
+            if failure_code is not None:
+                row["failure_code"] = failure_code
             self._put(db, row)
 
     async def run(

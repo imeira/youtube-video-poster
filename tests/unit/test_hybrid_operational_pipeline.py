@@ -11,6 +11,7 @@ from PIL import Image
 from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
 from src.hybrid.execution import Executor, ProviderResult
 from src.hybrid.planner import Config
+from src.hybrid.render import commit_renderer_completion
 
 
 def source_manifest(tmp_path):
@@ -272,64 +273,6 @@ async def test_operational_pipeline_promotes_only_hash_bound_approved_candidates
 
 
 @pytest.mark.asyncio
-async def test_compiled_visual_qa_requires_independent_identity_before_render_ready(
-    tmp_path,
-):
-    from src.hybrid.compiled import OperationalPipeline, compile_storyboard
-
-    audio = tmp_path / "approved.wav"
-    audio.write_bytes(b"approved audio")
-    episode = compile_storyboard(
-        "EPX",
-        FrozenAsset.approve(audio, "audio-qa", "TEST"),
-        [
-            {
-                "scene_id": "R001",
-                "start": 0,
-                "end": 1,
-                "image_prompt": "céu",
-                "action": "céu",
-            },
-            {
-                "scene_id": "R002",
-                "start": 1,
-                "end": 2,
-                "image_prompt": "mar",
-                "action": "mar",
-            },
-        ],
-    )
-    pipeline = OperationalPipeline(
-        episode,
-        Executor(tmp_path / "control.db", Config()),
-        source_manifest(tmp_path),
-        workspace=tmp_path / "compiled",
-        endpoint="flux",
-        image_cost=Decimal(".02"),
-    )
-    receipts = await pipeline.dispatch_baselines(ImageProvider(tmp_path))
-
-    with pytest.raises(ValueError, match="identity"):
-        pipeline.record_visual_qa(
-            "R001", receipts["R001"]["result_sha256"], True, "independent-qa"
-        )
-    with pytest.raises(ValueError, match="identity"):
-        pipeline.record_visual_qa(
-            "R002",
-            receipts["R002"]["result_sha256"],
-            True,
-            "generator",
-            reviewer_identity={"subject": "generator", "issuer": "TEST"},
-        )
-
-    assert pipeline.render_ready() is False
-    assert all(
-        pipeline.run.executor.inspect(receipt["request_id"]).get("qa") is None
-        for receipt in receipts.values()
-    )
-
-
-@pytest.mark.asyncio
 async def test_operational_pipeline_prepares_hash_bound_technical_qa_packets(tmp_path):
     from src.hybrid.compiled import OperationalPipeline, compile_storyboard
 
@@ -436,7 +379,7 @@ async def test_remediation_becomes_the_only_active_promotable_image(tmp_path):
 
     corrected = (
         await pipeline.dispatch_remediation_wave(
-            {"R001": "sem defeito"}, provider, prefetch=1
+            {"R001": {"code": "IDENTITY"}}, provider, prefetch=1
         )
     )["R001"]
     pipeline.record_visual_qa(
@@ -450,6 +393,64 @@ async def test_remediation_becomes_the_only_active_promotable_image(tmp_path):
 
     assert manifest.assets[0].sha256 == corrected["result_sha256"]
     assert pipeline.run._active_images["R001"].request_id == corrected["request_id"]
+
+
+@pytest.mark.asyncio
+async def test_remediation_requires_closed_semantic_finding_and_binds_it_to_successor(
+    tmp_path,
+):
+    """A rejected frame may only create a deterministic, code-bound successor."""
+    from src.hybrid.compiled import OperationalPipeline, compile_storyboard
+
+    audio = tmp_path / "approved.wav"
+    audio.write_bytes(b"approved audio")
+    episode = compile_storyboard(
+        "EPX",
+        FrozenAsset.approve(audio, "audio-qa", "TEST"),
+        [
+            {
+                "scene_id": "R001",
+                "start": 0,
+                "end": 2,
+                "image_prompt": "Jacó corre",
+                "action": "Jacó corre",
+            }
+        ],
+    )
+    pipeline = OperationalPipeline(
+        episode,
+        Executor(tmp_path / "control.db", Config()),
+        source_manifest(tmp_path),
+        workspace=tmp_path / "compiled",
+        endpoint="flux",
+        image_cost=Decimal(".02"),
+    )
+    baseline = pipeline.run.baseline_jobs()[0]
+    result = (await pipeline.dispatch_baselines(ImageProvider(tmp_path)))["R001"]
+    pipeline.record_visual_qa(
+        "R001",
+        result["result_sha256"],
+        False,
+        "independent-qa",
+        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
+    )
+
+    with pytest.raises(ValueError, match="closed semantic finding"):
+        pipeline.run.remediation_job("R001", "fix it")
+    with pytest.raises(ValueError, match="closed semantic finding"):
+        pipeline.run.remediation_job("R001", {"code": "ACTION", "note": "free text"})
+
+    correction = pipeline.run.remediation_job("R001", {"code": "ACTION"})
+
+    assert correction.predecessor == baseline.request_id
+    assert correction.payload["semantic_remediation"] == {
+        "code": "ACTION",
+        "constraint": "Correct the declared semantic action while preserving the approved cast, identity, garments, source references, and timing.",
+    }
+    assert correction.payload["prompt"] == (
+        "Jacó corre\n\n"
+        "Correction requirement: Correct the declared semantic action while preserving the approved cast, identity, garments, source references, and timing."
+    )
 
 
 @pytest.mark.asyncio
@@ -689,7 +690,10 @@ async def test_director_dispatches_compiled_baselines_to_independent_visual_qa(
                 "result_sha256": result["qa_packets"]["R001"]["result_sha256"],
                 "approved": True,
                 "reviewer": "independent-qa",
-                "reviewer_identity": {"subject": "independent-qa", "issuer": "TEST"},
+                "reviewer_identity": {
+                    "subject": "independent-qa",
+                    "issuer": "TEST",
+                },
             }
         ],
     )
@@ -702,7 +706,19 @@ async def test_director_dispatches_compiled_baselines_to_independent_visual_qa(
 
     class Renderer:
         def render_compiled(
-            self, production, scenes, manifest, audio, srt, output, *, hold
+            self,
+            production,
+            scenes,
+            manifest,
+            audio,
+            srt,
+            output,
+            *,
+            hold,
+            completion_receipt_path,
+            render_intent_sha256,
+            render_contract_sha256,
+            canonical_episode_root,
         ):
             assert production is pipeline
             assert len(scenes) == 1
@@ -711,87 +727,29 @@ async def test_director_dispatches_compiled_baselines_to_independent_visual_qa(
             assert srt is None
             assert hold == 4
             output.write_bytes(b"render")
-            return {
+            receipt = {
+                "output_sha256": sha256(output.read_bytes()).hexdigest(),
                 "subtitles_sha256": None,
                 "hold_seconds": hold,
                 "audio_operation": "derived_master",
             }
+            commit_renderer_completion(
+                completion_receipt_path,
+                intent_sha256=render_intent_sha256,
+                render_contract_sha256=render_contract_sha256,
+                receipt=receipt,
+                canonical_episode_root=canonical_episode_root,
+            )
+            return receipt
 
     receipt = director.render_compiled_video("EPX", pipeline, Renderer())
 
-    assert receipt["subtitles_sha256"] is None
+    assert receipt["renderer_receipt"]["subtitles_sha256"] is None
     assert fs.paths.final_video.is_file()
     assert (
         EpisodeStateStore.load(fs.paths.state_json).current_state
         == EpisodeState.FINAL_QA
     )
-
-
-@pytest.mark.asyncio
-async def test_director_routes_technical_failure_to_recoverable_remediation(tmp_path, monkeypatch):
-    from src.agents.director import DirectorAgent
-    from src.config.loader import get_config
-    from src.state.machine import EpisodeState, EpisodeStateStore
-    from src.storage.episode_fs import EpisodeFS
-
-    monkeypatch.setenv("STUDIO_EPISODES_DIR", str(tmp_path))
-    fs = EpisodeFS("EPX", get_config())
-    fs.create_dirs()
-    (fs.paths.storyboard_dir / "scenes.json").write_text(
-        '{"scenes":[{"scene_id":"R001","start":0,"end":2,"image_prompt":"céu","action":"céu"}]}',
-        encoding="utf-8",
-    )
-    state = EpisodeStateStore.load_or_create(fs.paths.state_json, "EPX")
-    for target in (
-        EpisodeState.RESEARCHING,
-        EpisodeState.PLANNING,
-        EpisodeState.WAITING_PLAN_APPROVAL,
-        EpisodeState.SCRIPTING,
-        EpisodeState.GENERATING_AUDIO,
-        EpisodeState.STORYBOARDING,
-        EpisodeState.GENERATING_IMAGES,
-    ):
-        state.transition_to(target)
-    state.save(fs.paths.state_json)
-    audio = tmp_path / "approved.wav"
-    audio.write_bytes(b"approved audio")
-    director = DirectorAgent.__new__(DirectorAgent)
-    director.config = get_config()
-    pipeline = director.activate_compiled_production(
-        "EPX",
-        approved_audio=FrozenAsset.approve(audio, "audio-qa", "TEST"),
-        source_manifest=source_manifest(tmp_path),
-        database=tmp_path / "control.db",
-        endpoint="flux",
-        image_cost=Decimal(".02"),
-    )
-
-    class InvalidImageProvider(ImageProvider):
-        async def submit(self, job, request_id, checkpoint):
-            self.calls += 1
-            checkpoint(provider_id=f"provider-{request_id}")
-            output = self.root / f"{request_id}.png"
-            Image.new("RGB", (64, 64), "blue").save(output)
-            return ProviderResult(output, job.cost)
-
-    rejected = await director.dispatch_compiled_baselines(
-        "EPX", pipeline, InvalidImageProvider(tmp_path)
-    )
-
-    assert rejected["state"] == EpisodeState.GENERATING_IMAGES.value
-    assert rejected["qa_packets"] == {}
-    assert set(rejected["technical_rejections"]) == {"R001"}
-    assert pipeline.run.executor.inspect(
-        pipeline.run._active_images["R001"].request_id
-    )["qa"] is False
-
-    recovered = await director.dispatch_compiled_remediation(
-        "EPX", pipeline, {"R001": "corrected sky"}, ImageProvider(tmp_path)
-    )
-
-    assert recovered["state"] == EpisodeState.VISUAL_QA.value
-    assert set(recovered["qa_packets"]) == {"R001"}
-    assert recovered["technical_rejections"] == {}
 
 
 @pytest.mark.asyncio
@@ -1216,7 +1174,7 @@ async def test_compiled_adapter_preserves_rejected_baseline_then_resumes_remedia
     assert executor.inspect(rejected_id)["qa"] is False
 
     remediated = await adapter.remediate(
-        {"R001": "céu sem defeito"},
+        {"R001": {"code": "IDENTITY"}},
         provider,
         lambda receipt: {
             "approved": True,

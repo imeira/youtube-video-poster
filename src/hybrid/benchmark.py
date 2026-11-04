@@ -118,8 +118,8 @@ async def _run(root: Path, *, workers: int, prefetch: int, image_count: int) -> 
         queue=cold_queue,
     )
 
-    # Reconstruct the production control plane over the same durable queue and
-    # executor database. Completed receipts must survive restart without POST.
+    # Reconstruct the control plane over the same queue and executor database.
+    # Durable completion must survive restart without a second provider submit.
     restarted_run = _production(
         root / "cold", workers=workers, image_count=image_count, cas=store
     )
@@ -148,10 +148,7 @@ async def _run(root: Path, *, workers: int, prefetch: int, image_count: int) -> 
     before_corrections = provider.submissions
     provider.maximum = 0
     correction_receipts = await cold_run.dispatch_remediation_wave(
-        {
-            f"S{index:03}": f"deterministic corrected prompt {index}"
-            for index in range(image_count)
-        },
+        {f"S{index:03}": {"code": "IDENTITY"} for index in range(image_count)},
         provider,
         prefetch=prefetch,
     )

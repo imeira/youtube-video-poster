@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import sqlite3
 import subprocess
 import sys
 import time
@@ -159,6 +157,7 @@ async def test_runner_resumes_executor_and_reaches_two_hash_bound_human_gates(tm
     assert provider.calls == 1
     assert runner.ledger.claim(candidate.request_id)["state"] == "UNKNOWN"
 
+
     resumed = await runner.resume(
         provider,
         lambda receipt: (_ for _ in ()).throw(AssertionError("QA must not rerun")),
@@ -201,693 +200,20 @@ async def test_runner_resumes_executor_and_reaches_two_hash_bound_human_gates(tm
 
 
 @pytest.mark.asyncio
-async def test_runner_resume_uses_rolling_bounded_concurrency_and_persists_each_qa(
-    tmp_path,
-):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    shared_manifest = manifest(tmp_path)
-    jobs = [
-        Job(
-            f"S{index:03}",
-            "first",
-            "TEST",
-            "test-image",
-            {"prompt": f"test {index}"},
-            shared_manifest,
-            Decimal("0.10"),
-        )
-        for index in range(1, 4)
-    ]
-    runner = AutonomousTwoGateRunner(
-        tmp_path / "run",
-        "TEST-EP",
-        parsed,
-        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)),
-        ledger(tmp_path, parsed),
-    )
-    runner.start({"packet": "rolling"}, jobs)
-
-    class ConcurrentProvider(FixtureProvider):
-        def __init__(self, root):
-            super().__init__(root)
-            self.active = 0
-            self.maximum = 0
-
-        async def submit(self, job, request_id, checkpoint):
-            self.calls += 1
-            checkpoint(provider_id="TEST-" + request_id)
-            self.active += 1
-            self.maximum = max(self.maximum, self.active)
-            try:
-                await asyncio.sleep(0.02)
-                result = self.root / f"{request_id}.bin"
-                result.write_bytes(request_id.encode())
-                return ProviderResult(result, job.cost)
-            finally:
-                self.active -= 1
-
-    provider = ConcurrentProvider(tmp_path)
-
-    async def approve(receipt):
-        return {
-            "approved": True,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-            "request_id": receipt["request_id"],
-            "result_sha256": receipt["result_sha256"],
-            "codes": [],
-        }
-
-    completed = await runner.resume(provider, approve)
-
-    assert completed["state"] == "MEDIA_PENDING"
-    assert provider.calls == 3
-    assert provider.maximum == 2
-    assert set(completed["qa"]) == {job.request_id for job in jobs}
-    assert all(entry["approved"] is True for entry in completed["qa"].values())
-
-
-def test_runner_rejects_unknown_predecessor_before_state_or_executor_intent(tmp_path):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    database = tmp_path / "jobs.db"
-    runner = AutonomousTwoGateRunner(
-        tmp_path / "run",
-        "TEST-EP",
-        parsed,
-        Executor(database, Config(limit=Decimal("1.00"), concurrency=2)),
-        ledger(tmp_path, parsed),
-    )
-    successor = Job(
-        "S002",
-        "correction",
-        "TEST",
-        "test-image",
-        {"prompt": "repair"},
-        manifest(tmp_path),
-        Decimal("0.10"),
-        predecessor="f" * 64,
-    )
-
-    with pytest.raises(ValueError, match="predecessor"):
-        runner.start({"packet": "invalid-dag"}, [successor])
-
-    assert not runner.path.exists()
-    assert runner.executor.inspect(successor.request_id) is None
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "hero_without_predecessor",
-        "hero_wrong_scene",
-        "hero_after_correction",
-        "correction_without_predecessor",
-    ],
-)
-def test_runner_rejects_invalid_initial_successor_topology_before_mutation(
-    tmp_path, case
-):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    runner = AutonomousTwoGateRunner(
-        tmp_path / "run",
-        "TEST-EP",
-        parsed,
-        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)),
-        ledger(tmp_path, parsed),
-    )
-    shared = manifest(tmp_path)
-    first = Job(
-        "S001",
-        "first",
-        "TEST",
-        "test-image",
-        {"prompt": "first"},
-        shared,
-        Decimal("0.10"),
-    )
-    if case == "hero_without_predecessor":
-        jobs = [
-            Job(
-                "S001",
-                "hero",
-                "TEST",
-                "test-image",
-                {"prompt": "hero"},
-                shared,
-                Decimal("0.10"),
-            )
-        ]
-    elif case == "hero_wrong_scene":
-        jobs = [
-            first,
-            Job(
-                "S002",
-                "hero",
-                "TEST",
-                "test-image",
-                {"prompt": "hero"},
-                shared,
-                Decimal("0.10"),
-                first.request_id,
-            ),
-        ]
-    elif case == "hero_after_correction":
-        correction = Job(
-            "S001",
-            "correction",
-            "TEST",
-            "test-image",
-            {"prompt": "repair"},
-            shared,
-            Decimal("0.10"),
-            first.request_id,
-        )
-        jobs = [
-            first,
-            correction,
-            Job(
-                "S001",
-                "hero",
-                "TEST",
-                "test-image",
-                {"prompt": "hero"},
-                shared,
-                Decimal("0.10"),
-                correction.request_id,
-            ),
-        ]
-    else:
-        jobs = [
-            Job(
-                "S001",
-                "correction",
-                "TEST",
-                "test-image",
-                {"prompt": "repair"},
-                shared,
-                Decimal("0.10"),
-            )
-        ]
-
-    with pytest.raises(ValueError, match="topology"):
-        runner.start({"packet": case}, jobs)
-
-    assert not runner.path.exists()
-    assert all(runner.executor.inspect(item.request_id) is None for item in jobs)
-
-
-@pytest.mark.asyncio
-async def test_runner_revalidates_persisted_dag_before_resume_state_mutation(tmp_path):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    runner = AutonomousTwoGateRunner(
-        tmp_path / "run",
-        "TEST-EP",
-        parsed,
-        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)),
-        ledger(tmp_path, parsed),
-    )
-    runner.start({"packet": "persisted-dag"}, [job(tmp_path)])
-    document = json.loads(runner.path.read_text(encoding="utf-8"))
-    document["job_specs"][0]["predecessor"] = "f" * 64
-    tampered_job = runner._job_from_spec(document["job_specs"][0])
-    document["jobs"][0] = runner._job_binding(tampered_job)
-    runner.path.write_text(json.dumps(document), encoding="utf-8")
-    provider = FixtureProvider(tmp_path)
-
-    fresh = AutonomousTwoGateRunner(
-        tmp_path / "run", "TEST-EP", parsed, runner.executor, runner.ledger
-    )
-    with pytest.raises(ValueError, match="predecessor"):
-        await fresh.resume(provider, lambda _: pytest.fail("invalid DAG reached QA"))
-
-    assert json.loads(runner.path.read_text(encoding="utf-8"))["state"] == "READY"
-    assert provider.calls == 0
-
-
-@pytest.mark.asyncio
-async def test_runner_dispatches_successor_only_after_predecessor_qa_completion(
-    tmp_path,
-):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    shared_manifest = manifest(tmp_path)
-    baseline = Job(
-        "S001",
-        "first",
-        "TEST",
-        "test-image",
-        {"prompt": "base"},
-        shared_manifest,
-        Decimal("0.10"),
-    )
-    successor = Job(
-        "S001",
-        "hero",
-        "TEST",
-        "test-image",
-        {"prompt": "animate"},
-        shared_manifest,
-        Decimal("0.10"),
-        predecessor=baseline.request_id,
-    )
-    runner = AutonomousTwoGateRunner(
-        tmp_path / "run",
-        "TEST-EP",
-        parsed,
-        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)),
-        ledger(tmp_path, parsed),
-    )
-    runner.start({"packet": "dependency-order"}, [baseline, successor])
-    events = []
-
-    class OrderedProvider(FixtureProvider):
-        async def submit(self, job, request_id, checkpoint):
-            events.append(f"submit:{job.category}")
-            return await super().submit(job, request_id, checkpoint)
-
-    async def approve(receipt):
-        events.append(f"qa:{receipt['request']['category']}")
-        await asyncio.sleep(0)
-        return {
-            "approved": True,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-            "request_id": receipt["request_id"],
-            "result_sha256": receipt["result_sha256"],
-            "codes": [],
-        }
-
-    completed = await runner.resume(OrderedProvider(tmp_path), approve)
-
-    assert completed["state"] == "MEDIA_PENDING"
-    assert events.index("qa:first") < events.index("submit:hero")
-
-
-@pytest.mark.asyncio
-async def test_runner_recovers_executor_qa_after_crash_before_runner_state_publish(
-    tmp_path,
-):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    executor = Executor(
-        tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=1)
-    )
-    budget = ledger(tmp_path, parsed)
-    root = tmp_path / "run"
-    item = job(tmp_path)
-    runner = AutonomousTwoGateRunner(root, "TEST-EP", parsed, executor, budget)
-    runner.start({"packet": "qa-crash"}, [item])
-    provider = FixtureProvider(tmp_path)
-    save = runner._save
-    crashed = False
-
-    def crash_before_qa_publish(document):
-        nonlocal crashed
-        if document.get("qa") and not crashed:
-            crashed = True
-            raise RuntimeError("injected crash before runner QA publish")
-        return save(document)
-
-    runner._save = crash_before_qa_publish
-
-    async def approve(receipt):
-        return {
-            "approved": True,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-            "request_id": receipt["request_id"],
-            "result_sha256": receipt["result_sha256"],
-            "codes": [],
-        }
-
-    with pytest.raises(RuntimeError, match="injected crash"):
-        await runner.resume(provider, approve)
-    assert executor.inspect(item.request_id)["qa"] is True
-
-    fresh = AutonomousTwoGateRunner(root, "TEST-EP", parsed, executor, budget)
-    recovered = await fresh.resume(
-        provider, lambda _: pytest.fail("durable executor QA reran after restart")
-    )
-
-    assert recovered["state"] == "MEDIA_PENDING"
-    assert recovered["qa"][item.request_id]["reviewer_identity"] == {
-        "subject": "qa-test",
-        "issuer": "TEST",
-    }
-    assert provider.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_runner_persists_rejected_qa_before_admitting_correction_successor(
-    tmp_path,
-):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    executor = Executor(
-        tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)
-    )
-    runner = AutonomousTwoGateRunner(
-        tmp_path / "run", "TEST-EP", parsed, executor, ledger(tmp_path, parsed)
-    )
-    baseline = job(tmp_path)
-    runner.start({"packet": "correction"}, [baseline])
-    provider = FixtureProvider(tmp_path)
-
-    async def verdict(receipt, approved):
-        return {
-            "approved": approved,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-            "request_id": receipt["request_id"],
-            "result_sha256": receipt["result_sha256"],
-            "codes": [] if approved else ["SEMANTIC_FAIL"],
-        }
-
-    rejected = await runner.resume(provider, lambda receipt: verdict(receipt, False))
-
-    assert rejected["state"] == "REJECTED"
-    assert executor.inspect(baseline.request_id)["qa"] is False
-    correction = Job(
-        baseline.scene,
-        "correction",
-        "TEST",
-        baseline.endpoint,
-        {"prompt": "corrected"},
-        baseline.manifest,
-        baseline.cost,
-        predecessor=baseline.request_id,
-    )
-    runner.add_successors([correction])
-    completed = await runner.resume(provider, lambda receipt: verdict(receipt, True))
-
-    assert completed["state"] == "MEDIA_PENDING"
-    assert executor.inspect(correction.request_id)["qa"] is True
-    assert provider.calls == 2
-
-
-@pytest.mark.asyncio
-async def test_runner_rejects_hero_successor_for_rejected_predecessor_before_mutation(
-    tmp_path,
-):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    runner = AutonomousTwoGateRunner(
-        tmp_path / "run",
-        "TEST-EP",
-        parsed,
-        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)),
-        ledger(tmp_path, parsed),
-    )
-    baseline = job(tmp_path)
-    runner.start({"packet": "reject-hero"}, [baseline])
-
-    async def reject(receipt):
-        return {
-            "approved": False,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-            "request_id": receipt["request_id"],
-            "result_sha256": receipt["result_sha256"],
-            "codes": ["SEMANTIC_FAIL"],
-        }
-
-    await runner.resume(FixtureProvider(tmp_path), reject)
-    hero = Job(
-        baseline.scene,
-        "hero",
-        "TEST",
-        baseline.endpoint,
-        {"prompt": "animate rejected frame"},
-        baseline.manifest,
-        baseline.cost,
-        predecessor=baseline.request_id,
-    )
-
-    with pytest.raises(ValueError, match="approved predecessor"):
-        runner.add_successors([hero])
-
-    persisted = runner._load()
-    assert persisted["state"] == "REJECTED"
-    assert len(persisted["jobs"]) == 1
-
-
-@pytest.mark.asyncio
-async def test_runner_rejects_hero_retry_after_rejected_first_atomically(tmp_path):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    executor = Executor(
-        tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)
-    )
-    runner = AutonomousTwoGateRunner(
-        tmp_path / "run", "TEST-EP", parsed, executor, ledger(tmp_path, parsed)
-    )
-    baseline = job(tmp_path)
-    runner.start({"packet": "reject-invalid-hero-retry"}, [baseline])
-
-    async def reject(receipt):
-        return {
-            "approved": False,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-            "request_id": receipt["request_id"],
-            "result_sha256": receipt["result_sha256"],
-            "codes": ["SEMANTIC_FAIL"],
-        }
-
-    await runner.resume(FixtureProvider(tmp_path), reject)
-    before = runner.path.read_bytes()
-    invalid = Job(
-        baseline.scene,
-        "hero_retry",
-        "TEST",
-        baseline.endpoint,
-        {"prompt": "invalid hero retry"},
-        baseline.manifest,
-        baseline.cost,
-        predecessor=baseline.request_id,
-    )
-
-    with pytest.raises(ValueError, match="topology"):
-        runner.add_successors([invalid])
-
-    assert runner.path.read_bytes() == before
-    assert executor.inspect(invalid.request_id) is None
-
-
-@pytest.mark.asyncio
-async def test_runner_rejects_two_remediations_for_one_predecessor_atomically(tmp_path):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    executor = Executor(
-        tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)
-    )
-    runner = AutonomousTwoGateRunner(
-        tmp_path / "run", "TEST-EP", parsed, executor, ledger(tmp_path, parsed)
-    )
-    baseline = job(tmp_path)
-    runner.start({"packet": "reject-duplicate-remediation"}, [baseline])
-
-    async def reject(receipt):
-        return {
-            "approved": False,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-            "request_id": receipt["request_id"],
-            "result_sha256": receipt["result_sha256"],
-            "codes": ["SEMANTIC_FAIL"],
-        }
-
-    await runner.resume(FixtureProvider(tmp_path), reject)
-    before = runner.path.read_bytes()
-    successors = [
-        Job(
-            baseline.scene,
-            category,
-            "TEST",
-            baseline.endpoint,
-            {"prompt": category},
-            baseline.manifest,
-            baseline.cost,
-            predecessor=baseline.request_id,
-        )
-        for category in ("correction", "alternative")
-    ]
-
-    with pytest.raises(ValueError, match="one remediation successor"):
-        runner.add_successors(successors)
-
-    assert runner.path.read_bytes() == before
-    assert all(executor.inspect(item.request_id) is None for item in successors)
-
-
-@pytest.mark.asyncio
-async def test_runner_rejects_tampered_persisted_qa_before_resume_release(tmp_path):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    executor = Executor(
-        tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=1)
-    )
-    budget = ledger(tmp_path, parsed)
-    root = tmp_path / "run"
-    item = job(tmp_path)
-    runner = AutonomousTwoGateRunner(root, "TEST-EP", parsed, executor, budget)
-    runner.start({"packet": "tampered-qa"}, [item])
-    provider = FixtureProvider(tmp_path)
-
-    async def approve(receipt):
-        return {
-            "approved": True,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-            "request_id": receipt["request_id"],
-            "result_sha256": receipt["result_sha256"],
-            "codes": [],
-        }
-
-    await runner.resume(provider, approve)
-    document = json.loads(runner.path.read_text(encoding="utf-8"))
-    document["state"] = "RUNNING"
-    document["qa"][item.request_id]["result_sha256"] = "0" * 64
-    runner.path.write_text(json.dumps(document), encoding="utf-8")
-    calls = provider.calls
-
-    fresh = AutonomousTwoGateRunner(root, "TEST-EP", parsed, executor, budget)
-    with pytest.raises(ValueError, match="persisted runner QA"):
-        await fresh.resume(
-            provider, lambda _: pytest.fail("tampered QA reached callback")
-        )
-
-    assert provider.calls == calls
-
-
-@pytest.mark.asyncio
-async def test_record_qa_persists_identity_for_restart_without_callback_replay(
-    tmp_path,
-):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    executor = Executor(
-        tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=1)
-    )
-    budget = ledger(tmp_path, parsed)
-    root = tmp_path / "run"
-    item = job(tmp_path)
-    runner = AutonomousTwoGateRunner(root, "TEST-EP", parsed, executor, budget)
-    runner.start({"packet": "record-qa"}, [item])
-    provider = FixtureProvider(tmp_path)
-
-    async def interrupt_after_complete(_receipt):
-        raise RuntimeError("injected stop before runner QA")
-
-    with pytest.raises(RuntimeError, match="injected stop"):
-        await runner.resume(provider, interrupt_after_complete)
-    receipt = executor.inspect(item.request_id)
-    assert receipt["status"] == "COMPLETE"
-    runner.record_qa(
-        item.request_id,
-        receipt,
-        {
-            "approved": True,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-        },
-    )
-
-    fresh = AutonomousTwoGateRunner(root, "TEST-EP", parsed, executor, budget)
-    resumed = await fresh.resume(
-        provider, lambda _: pytest.fail("recorded QA callback replayed")
-    )
-
-    assert resumed["state"] == "MEDIA_PENDING"
-    assert resumed["qa"][item.request_id]["reviewer_identity"]["subject"] == "qa-test"
-    assert provider.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_runner_rejects_persisted_generator_identity_before_qa_recovery(tmp_path):
-    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
-
-    parsed = AutonomousPolicy.from_dict(policy())
-    executor = Executor(
-        tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=1)
-    )
-    budget = ledger(tmp_path, parsed)
-    root = tmp_path / "run"
-    item = job(tmp_path)
-    runner = AutonomousTwoGateRunner(root, "TEST-EP", parsed, executor, budget)
-    runner.start({"packet": "generator-qa"}, [item])
-    provider = FixtureProvider(tmp_path)
-
-    async def interrupt_after_complete(_receipt):
-        raise RuntimeError("injected stop before runner QA")
-
-    with pytest.raises(RuntimeError, match="injected stop"):
-        await runner.resume(provider, interrupt_after_complete)
-    receipt = executor.inspect(item.request_id)
-    executor.qa(
-        item.request_id,
-        receipt["result_sha256"],
-        True,
-        "self-review",
-        reviewer_identity={"subject": "independent-reviewer", "issuer": "TEST"},
-    )
-    with sqlite3.connect(executor.database) as db:
-        row = json.loads(
-            db.execute("SELECT data FROM jobs WHERE id=?", (item.request_id,)).fetchone()[0]
-        )
-        row["qa_reviewer_identity"] = {"subject": "generator", "issuer": "TEST"}
-        db.execute(
-            "UPDATE jobs SET data=? WHERE id=?",
-            (json.dumps(row, sort_keys=True), item.request_id),
-        )
-
-    fresh = AutonomousTwoGateRunner(root, "TEST-EP", parsed, executor, budget)
-    with pytest.raises(RuntimeError, match="identity evidence"):
-        await fresh.resume(
-            provider, lambda _: pytest.fail("generator QA reached callback")
-        )
-
-    assert provider.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_runner_prepares_fal_bound_claim_before_submit_and_failed_admission_posts_zero(
-    tmp_path,
-):
+async def test_runner_prepares_fal_bound_claim_before_submit_and_failed_admission_posts_zero(tmp_path):
     """The runner, not a later readback helper, owns paid admission ordering."""
     from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
 
     class TrapProvider(FixtureProvider):
         async def submit(self, *args):
             self.calls += 1
-            raise AssertionError(
-                "provider POST must not happen when ledger admission fails"
-            )
+            raise AssertionError("provider POST must not happen when ledger admission fails")
 
     parsed = AutonomousPolicy.from_dict(policy())
     shared = ledger(tmp_path, parsed)
     runner = AutonomousTwoGateRunner(
-        tmp_path / "run",
-        "TEST-EP",
-        parsed,
-        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"))),
-        shared,
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"))), shared,
     )
     candidate = job(tmp_path)
     runner.start({"packet": "test"}, [candidate])
@@ -905,9 +231,7 @@ async def test_runner_prepares_fal_bound_claim_before_submit_and_failed_admissio
 
 
 @pytest.mark.asyncio
-async def test_fresh_runner_recovers_checkpointed_receipt_without_second_submit(
-    tmp_path,
-):
+async def test_fresh_runner_recovers_checkpointed_receipt_without_second_submit(tmp_path):
     """Crash after executor checkpoint but before ledger attach is recovery-only."""
     from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
 
@@ -946,11 +270,8 @@ async def test_fresh_runner_recovers_checkpointed_receipt_without_second_submit(
     shared = ledger(tmp_path, parsed)
     candidate = job(tmp_path)
     first = AutonomousTwoGateRunner(
-        tmp_path / "run",
-        "TEST-EP",
-        parsed,
-        Executor(db, Config(limit=Decimal("1.00"))),
-        CrashBeforeLedgerAttach(shared),
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(db, Config(limit=Decimal("1.00"))), CrashBeforeLedgerAttach(shared),
     )
     first.start({"packet": "test"}, [candidate])
     provider = CrashAfterCheckpointProvider(tmp_path)
@@ -960,19 +281,13 @@ async def test_fresh_runner_recovers_checkpointed_receipt_without_second_submit(
     checkpointed = first.executor.inspect(candidate.request_id)
     assert checkpointed["status"] == "SUBMITTED"
     assert checkpointed["provider_id"] == "TEST-" + candidate.request_id
-    assert (
-        checkpointed["settlement_binding"]["provider_request_id"]
-        == checkpointed["provider_id"]
-    )
+    assert checkpointed["settlement_binding"]["provider_request_id"] == checkpointed["provider_id"]
     assert provider.calls == 1
     assert shared.claim(candidate.request_id)["provider_request_id"] == "UNASSIGNED"
 
     fresh = AutonomousTwoGateRunner(
-        tmp_path / "run",
-        "TEST-EP",
-        parsed,
-        Executor(db, Config(limit=Decimal("1.00"))),
-        shared,
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(db, Config(limit=Decimal("1.00"))), shared,
     )
     resumed = await fresh.resume(
         provider,
@@ -1038,9 +353,7 @@ def test_metrics_separate_quota_tokens_and_money_and_cache_is_hash_compatible(tm
     assert cache.get("tts", [source], {"voice": "other", "rate": "+0%"}) is None
 
 
-def test_operational_metrics_reconciles_once_by_request_or_event_and_keeps_unknown_billing_unspent(
-    tmp_path,
-):
+def test_operational_metrics_reconciles_once_by_request_or_event_and_keeps_unknown_billing_unspent(tmp_path):
     from datetime import UTC, datetime
 
     from src.hybrid.autonomous import OperationalMetricsLedger
@@ -1080,41 +393,52 @@ def test_operational_metrics_reconciles_once_by_request_or_event_and_keeps_unkno
     assert report["models"] == []
 
 
-def test_operational_metrics_rejects_missing_measurements_and_unauthenticated_money(
-    tmp_path,
-):
+def test_operational_metrics_adapts_durable_receipt_usage_without_turning_local_cost_into_billing(tmp_path):
+    """A completion/QA flag is not provider billing, while real usage remains measurable."""
+    from src.hybrid.autonomous import OperationalMetricsLedger
+
+    ledger = OperationalMetricsLedger(tmp_path / "operational-metrics.sqlite3")
+    receipt = {
+        "request_id": "receipt-request", "status": "COMPLETE", "endpoint": "fal-ai/test",
+        "provider_id": "provider-operation", "actual_cost": "0.04", "qa": True,
+        "usage": {"input_tokens": 12, "cached_tokens": 4, "output_tokens": 5, "reasoning_tokens": 3},
+        "stage_latency_s": 2.5, "queue_wait_s": 1.0,
+    }
+    claim = {
+        "request_id": "receipt-request", "episode_id": "TEST-EP", "reserved_usd": "0.05",
+        "actual_usd": None, "state": "UNKNOWN", "provider": "fal-ai/test",
+    }
+
+    assert ledger.reconcile_durable_receipt(receipt, claim=claim, worker="executor") is True
+    assert ledger.reconcile_durable_receipt(receipt, claim=claim, worker="other-worker") is False
+    report = ledger.report()
+    assert report["money_usd"] is None
+    assert report["unknown_billing_requests"] == 1
+    assert report["pending_exposure_usd"] == "0.05"
+    assert report["tokens"] == {"input": 12, "cached": 4, "output": 5, "reasoning": 3}
+    assert report["stage_latency_s"] == 2.5
+    assert report["queue_wait_s"] == 1.0
+
+
+def test_operational_metrics_rejects_missing_measurements_and_unauthenticated_money(tmp_path):
     from src.hybrid.autonomous import OperationalMetricsLedger
 
     ledger = OperationalMetricsLedger(tmp_path / "operational-metrics.sqlite3")
     with pytest.raises(ValueError, match="missing metric"):
-        ledger.reconcile(
-            {
-                "event_id": "e1",
-                "request_id": "r1",
-                "episode_id": "TEST-EP",
-                "worker": "worker",
-                "experiment": False,
-                "billing_status": "UNKNOWN",
-            }
-        )
+        ledger.reconcile({
+            "event_id": "e1", "request_id": "r1", "episode_id": "TEST-EP",
+            "worker": "worker", "experiment": False, "billing_status": "UNKNOWN",
+        })
     with pytest.raises(ValueError, match="unauthenticated"):
-        ledger.reconcile(
-            {
-                "event_id": "e2",
-                "request_id": "r2",
-                "episode_id": "TEST-EP",
-                "worker": "worker",
-                "experiment": False,
-                "billing_status": "UNAUTHENTICATED",
-                "money_usd": "0.10",
-            }
-        )
+        ledger.reconcile({
+            "event_id": "e2", "request_id": "r2", "episode_id": "TEST-EP",
+            "worker": "worker", "experiment": False, "billing_status": "UNAUTHENTICATED",
+            "money_usd": "0.10",
+        })
 
 
 @pytest.mark.parametrize("latency_s", [float("nan"), float("inf"), float("-inf")])
-def test_operational_metrics_rejects_nonfinite_latency_before_any_metrics_write(
-    tmp_path, latency_s
-):
+def test_operational_metrics_rejects_nonfinite_latency_before_any_metrics_write(tmp_path, latency_s):
     import sqlite3
 
     from src.hybrid.autonomous import OperationalMetricsLedger
@@ -1123,14 +447,9 @@ def test_operational_metrics_rejects_nonfinite_latency_before_any_metrics_write(
     ledger = OperationalMetricsLedger(path)
     snapshot_before = path.with_suffix(".snapshot.json").read_bytes()
     observation = {
-        "event_id": "nonfinite-latency-event",
-        "request_id": "nonfinite-latency-request",
-        "episode_id": "TEST-EP",
-        "worker": "writer",
-        "experiment": False,
-        "tokens_input": 1,
-        "latency_s": latency_s,
-        "billing_status": "UNKNOWN",
+        "event_id": "nonfinite-latency-event", "request_id": "nonfinite-latency-request",
+        "episode_id": "TEST-EP", "worker": "writer", "experiment": False,
+        "tokens_input": 1, "latency_s": latency_s, "billing_status": "UNKNOWN",
     }
 
     with pytest.raises(ValueError, match="latency_s must be nonnegative"):
@@ -1138,42 +457,25 @@ def test_operational_metrics_rejects_nonfinite_latency_before_any_metrics_write(
 
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (0,)
-        assert db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone() == (
-            0,
-        )
+        assert db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone() == (0,)
     assert path.with_suffix(".snapshot.json").read_bytes() == snapshot_before
 
 
 def test_operational_metrics_keeps_finite_or_absent_latency_rules(tmp_path):
     from src.hybrid.autonomous import OperationalMetricsLedger
 
-    for index, (latency_s, expected_latency) in enumerate(
-        ((0, 0.0), (1.5, 1.5), (None, None))
-    ):
-        ledger = OperationalMetricsLedger(
-            tmp_path / f"operational-metrics-{index}.sqlite3"
-        )
-        assert (
-            ledger.reconcile(
-                {
-                    "event_id": f"finite-latency-event-{index}",
-                    "request_id": f"finite-latency-request-{index}",
-                    "episode_id": "TEST-EP",
-                    "worker": "writer",
-                    "experiment": False,
-                    "tokens_input": 1,
-                    "latency_s": latency_s,
-                    "billing_status": "UNKNOWN",
-                }
-            )
-            is True
-        )
+    for index, (latency_s, expected_latency) in enumerate(((0, 0.0), (1.5, 1.5), (None, None))):
+        ledger = OperationalMetricsLedger(tmp_path / f"operational-metrics-{index}.sqlite3")
+        assert ledger.reconcile({
+            "event_id": f"finite-latency-event-{index}",
+            "request_id": f"finite-latency-request-{index}",
+            "episode_id": "TEST-EP", "worker": "writer", "experiment": False,
+            "tokens_input": 1, "latency_s": latency_s, "billing_status": "UNKNOWN",
+        }) is True
         assert ledger.report()["latency_s"] == expected_latency
 
 
-def test_operational_metrics_only_persists_catalog_models_and_preserves_event_time_across_restart(
-    tmp_path,
-):
+def test_operational_metrics_only_persists_catalog_models_and_preserves_event_time_across_restart(tmp_path):
     import sqlite3
     from datetime import UTC, datetime
 
@@ -1182,26 +484,16 @@ def test_operational_metrics_only_persists_catalog_models_and_preserves_event_ti
     path = tmp_path / "operational-metrics.sqlite3"
     ledger = OperationalMetricsLedger(path, model_catalog={"gpt-5.6-terra"})
     known = {
-        "event_id": "known-model",
-        "request_id": "known-request",
-        "episode_id": "TEST-EP",
-        "worker": "first-worker",
-        "experiment": False,
+        "event_id": "known-model", "request_id": "known-request", "episode_id": "TEST-EP",
+        "worker": "first-worker", "experiment": False,
         "observed_at": datetime(2026, 10, 31, 23, 59, tzinfo=UTC),
-        "model": "gpt-5.6-terra",
-        "tokens_input": 1,
-        "billing_status": "UNKNOWN",
+        "model": "gpt-5.6-terra", "tokens_input": 1, "billing_status": "UNKNOWN",
     }
     unknown = {
-        "event_id": "unknown-model",
-        "request_id": "unknown-request",
-        "episode_id": "TEST-EP",
-        "worker": "first-worker",
-        "experiment": False,
+        "event_id": "unknown-model", "request_id": "unknown-request", "episode_id": "TEST-EP",
+        "worker": "first-worker", "experiment": False,
         "observed_at": datetime(2026, 11, 1, 0, 1, tzinfo=UTC),
-        "model": "arbitrary-secret-value",
-        "tokens_input": 1,
-        "billing_status": "UNKNOWN",
+        "model": "arbitrary-secret-value", "tokens_input": 1, "billing_status": "UNKNOWN",
     }
     assert ledger.reconcile(known) is True
     assert ledger.reconcile(unknown) is True
@@ -1214,33 +506,23 @@ def test_operational_metrics_only_persists_catalog_models_and_preserves_event_ti
     assert report["by_month_utc"]["2026-10"]["requests"] == 1
     assert report["by_month_utc"]["2026-11"]["requests"] == 1
     with sqlite3.connect(path) as db:
-        assert db.execute(
-            "SELECT model FROM observations WHERE request_id='unknown-request'"
-        ).fetchone() == (None,)
-        assert db.execute(
-            "SELECT observed_at_utc FROM observations WHERE request_id='known-request'"
-        ).fetchone() == ("2026-10-31T23:59:00+00:00",)
+        assert db.execute("SELECT model FROM observations WHERE request_id='unknown-request'").fetchone() == (None,)
+        assert db.execute("SELECT observed_at_utc FROM observations WHERE request_id='known-request'").fetchone() == ("2026-10-31T23:59:00+00:00",)
 
 
 def test_operational_metrics_unknown_receipt_time_is_not_assigned_a_month(tmp_path):
     from src.hybrid.autonomous import OperationalMetricsLedger
 
     ledger = OperationalMetricsLedger(tmp_path / "operational-metrics.sqlite3")
-    assert (
-        ledger.reconcile_executor_receipt(
-            {"request_id": "receipt-without-time", "status": "COMPLETE"},
-            episode_id="TEST-EP",
-        )
-        is True
-    )
+    assert ledger.reconcile_executor_receipt(
+        {"request_id": "receipt-without-time", "status": "COMPLETE"}, episode_id="TEST-EP"
+    ) is True
     report = ledger.report()
     assert report["unknown_timestamp_requests"] == 1
     assert report["by_month_utc"] == {}
 
 
-def test_operational_metrics_rejects_secret_bearing_identity_urls_before_observation_write(
-    tmp_path,
-):
+def test_operational_metrics_rejects_secret_bearing_identity_urls_before_observation_write(tmp_path):
     import sqlite3
 
     from src.hybrid.autonomous import (
@@ -1251,12 +533,8 @@ def test_operational_metrics_rejects_secret_bearing_identity_urls_before_observa
     path = tmp_path / "operational-metrics.sqlite3"
     ledger = OperationalMetricsLedger(path)
     base = {
-        "event_id": "evt:literal-1",
-        "request_id": "req:literal-1",
-        "episode_id": "TEST-EP",
-        "worker": "worker:one",
-        "experiment": False,
-        "tokens_input": 1,
+        "event_id": "evt:literal-1", "request_id": "req:literal-1", "episode_id": "TEST-EP",
+        "worker": "worker:one", "experiment": False, "tokens_input": 1,
         "billing_status": "UNKNOWN",
     }
     for request_id, event_id in (
@@ -1270,35 +548,21 @@ def test_operational_metrics_rejects_secret_bearing_identity_urls_before_observa
             ledger.reconcile({**base, field: "https://example/a?token=one"})
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (0,)
-        assert db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone() == (
-            0,
-        )
+        assert db.execute("SELECT COUNT(*) FROM observation_conflicts").fetchone() == (0,)
 
     assert ledger.reconcile(base) is True
     assert ledger.reconcile(dict(base)) is False
-    assert (
-        ledger.reconcile(
-            {**base, "event_id": "evt:worker-replay", "worker": "worker:two"}
-        )
-        is False
-    )
+    assert ledger.reconcile({**base, "event_id": "evt:worker-replay", "worker": "worker:two"}) is False
     with pytest.raises(OperationalMetricsConflict):
         ledger.reconcile({**base, "event_id": "evt:divergent", "tokens_input": 2})
     with sqlite3.connect(path) as db:
-        assert db.execute(
-            "SELECT request_id, event_id, episode_id, worker FROM observations"
-        ).fetchone() == (
-            "req:literal-1",
-            "evt:literal-1",
-            "TEST-EP",
-            "worker:one",
+        assert db.execute("SELECT request_id, event_id, episode_id, worker FROM observations").fetchone() == (
+            "req:literal-1", "evt:literal-1", "TEST-EP", "worker:one",
         )
     assert ledger.report()["conflicts"] == 1
 
 
-def test_operational_metrics_rejects_persistent_divergent_identity_but_dedupes_worker_replay(
-    tmp_path,
-):
+def test_operational_metrics_rejects_persistent_divergent_identity_but_dedupes_worker_replay(tmp_path):
     from datetime import UTC, datetime
 
     from src.hybrid.autonomous import (
@@ -1308,31 +572,20 @@ def test_operational_metrics_rejects_persistent_divergent_identity_but_dedupes_w
 
     ledger = OperationalMetricsLedger(tmp_path / "operational-metrics.sqlite3")
     observation = {
-        "event_id": "event-1",
-        "request_id": "request-1",
-        "episode_id": "TEST-EP",
-        "worker": "worker-a",
-        "experiment": True,
+        "event_id": "event-1", "request_id": "request-1", "episode_id": "TEST-EP",
+        "worker": "worker-a", "experiment": True,
         "observed_at": datetime(2026, 10, 31, 23, 59, tzinfo=UTC),
-        "tokens_input": 10,
-        "billing_status": "UNKNOWN",
+        "tokens_input": 10, "billing_status": "UNKNOWN",
     }
     assert ledger.reconcile(observation) is True
-    assert (
-        ledger.reconcile(
-            {**observation, "event_id": "worker-replay", "worker": "worker-b"}
-        )
-        is False
-    )
+    assert ledger.reconcile({**observation, "event_id": "worker-replay", "worker": "worker-b"}) is False
     with pytest.raises(OperationalMetricsConflict):
         ledger.reconcile({**observation, "tokens_input": 11})
     assert ledger.report()["requests"] == 1
     assert ledger.report()["conflicts"] == 1
 
 
-def test_cli_status_reads_only_atomic_metrics_snapshot_with_existing_wal_and_writer(
-    tmp_path,
-):
+def test_cli_status_reads_only_atomic_metrics_snapshot_with_existing_wal_and_writer(tmp_path):
     import json
 
     from src.hybrid.autonomous import OperationalMetricsLedger
@@ -1341,38 +594,17 @@ def test_cli_status_reads_only_atomic_metrics_snapshot_with_existing_wal_and_wri
     root = tmp_path / "TEST" / rid
     root.mkdir(parents=True)
     (root / "prompt.txt").write_text("fixture", encoding="utf-8")
-    (root / "harness.json").write_text(
-        '{"prompt_sha256":"'
-        + __import__("hashlib").sha256(b"fixture").hexdigest()
-        + '","request":{}}',
-        encoding="utf-8",
-    )
+    (root / "harness.json").write_text('{"prompt_sha256":"' + __import__("hashlib").sha256(b"fixture").hexdigest() + '","request":{}}', encoding="utf-8")
     (root / "runner.json").write_text('{"state":"NEW","media":{}}', encoding="utf-8")
     db_path = root / "operational-metrics.sqlite3"
     ledger = OperationalMetricsLedger(db_path)
-    assert (
-        ledger.reconcile(
-            {
-                "event_id": "snapshot-event",
-                "request_id": "snapshot-request",
-                "episode_id": "TEST-EP",
-                "worker": "writer",
-                "experiment": False,
-                "tokens_input": 1,
-                "billing_status": "UNKNOWN",
-            }
-        )
-        is True
-    )
+    assert ledger.reconcile({
+        "event_id": "snapshot-event", "request_id": "snapshot-request", "episode_id": "TEST-EP",
+        "worker": "writer", "experiment": False, "tokens_input": 1, "billing_status": "UNKNOWN",
+    }) is True
     ready = tmp_path / "writer-ready"
     child = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "from pathlib import Path; import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); db.execute('PRAGMA journal_mode=WAL'); db.execute('BEGIN IMMEDIATE'); db.execute('PRAGMA user_version=7'); Path(sys.argv[2]).write_text('ready'); time.sleep(2); db.rollback(); db.close()",
-            str(db_path),
-            str(ready),
-        ],
+        [sys.executable, "-c", "from pathlib import Path; import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); db.execute('PRAGMA journal_mode=WAL'); db.execute('BEGIN IMMEDIATE'); db.execute('PRAGMA user_version=7'); Path(sys.argv[2]).write_text('ready'); time.sleep(2); db.rollback(); db.close()", str(db_path), str(ready)],
         cwd=Path(__file__).parents[2],
     )
     try:
@@ -1382,34 +614,14 @@ def test_cli_status_reads_only_atomic_metrics_snapshot_with_existing_wal_and_wri
             time.sleep(0.05)
         assert ready.exists()
         assert db_path.with_name(db_path.name + "-wal").exists()
-        before = {
-            path.name: path.read_bytes()
-            for path in root.iterdir()
-            if path.is_file() and not path.name.endswith("-shm")
-        }
+        before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file() and not path.name.endswith("-shm")}
         completed = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "from src.hybrid.autonomous_cli import main; import sys; raise SystemExit(main(sys.argv[1:]))",
-                "status",
-                "--workspace",
-                str(tmp_path),
-                "--request-id",
-                rid,
-            ],
-            cwd=Path(__file__).parents[2],
-            text=True,
-            capture_output=True,
-            check=False,
+            [sys.executable, "-c", "from src.hybrid.autonomous_cli import main; import sys; raise SystemExit(main(sys.argv[1:]))", "status", "--workspace", str(tmp_path), "--request-id", rid],
+            cwd=Path(__file__).parents[2], text=True, capture_output=True, check=False,
         )
         assert completed.returncode == 0, completed.stderr
         result = json.loads(completed.stdout)
-        after = {
-            path.name: path.read_bytes()
-            for path in root.iterdir()
-            if path.is_file() and not path.name.endswith("-shm")
-        }
+        after = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file() and not path.name.endswith("-shm")}
     finally:
         child.wait(timeout=10)
     assert after == before
@@ -1426,17 +638,10 @@ def test_metrics_snapshot_missing_and_stale_are_never_current(tmp_path):
     path = tmp_path / "operational-metrics.sqlite3"
     assert OperationalMetricsLedger.read_snapshot(path) == {"status": "MISSING"}
     ledger = OperationalMetricsLedger(path)
-    ledger.reconcile(
-        {
-            "event_id": "stale-event",
-            "request_id": "stale-request",
-            "episode_id": "TEST-EP",
-            "worker": "writer",
-            "experiment": False,
-            "tokens_input": 1,
-            "billing_status": "UNKNOWN",
-        }
-    )
+    ledger.reconcile({
+        "event_id": "stale-event", "request_id": "stale-request", "episode_id": "TEST-EP",
+        "worker": "writer", "experiment": False, "tokens_input": 1, "billing_status": "UNKNOWN",
+    })
     stale = OperationalMetricsLedger.read_snapshot(
         path, now=datetime.now(UTC) + timedelta(seconds=301)
     )
@@ -1444,9 +649,7 @@ def test_metrics_snapshot_missing_and_stale_are_never_current(tmp_path):
     assert "report" not in stale
 
 
-def test_metrics_snapshot_rejects_future_timestamp_under_explicit_clock_policy(
-    tmp_path,
-):
+def test_metrics_snapshot_rejects_future_timestamp_under_explicit_clock_policy(tmp_path):
     import json
     from datetime import UTC, datetime, timedelta
 
@@ -1454,40 +657,26 @@ def test_metrics_snapshot_rejects_future_timestamp_under_explicit_clock_policy(
 
     path = tmp_path / "operational-metrics.sqlite3"
     ledger = OperationalMetricsLedger(path)
-    ledger.reconcile(
-        {
-            "event_id": "future-event",
-            "request_id": "future-request",
-            "episode_id": "TEST-EP",
-            "worker": "writer",
-            "experiment": False,
-            "tokens_input": 1,
-            "billing_status": "UNKNOWN",
-        }
-    )
+    ledger.reconcile({
+        "event_id": "future-event", "request_id": "future-request", "episode_id": "TEST-EP",
+        "worker": "writer", "experiment": False, "tokens_input": 1, "billing_status": "UNKNOWN",
+    })
     snapshot_path = path.with_suffix(".snapshot.json")
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    snapshot["generated_at_utc"] = (
-        datetime.now(UTC) + timedelta(seconds=1)
-    ).isoformat()
-    snapshot["snapshot_sha256"] = _digest_json(
-        {key: value for key, value in snapshot.items() if key != "snapshot_sha256"}
-    )
+    snapshot["generated_at_utc"] = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
+    snapshot["snapshot_sha256"] = _digest_json({key: value for key, value in snapshot.items() if key != "snapshot_sha256"})
     snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
 
     result = OperationalMetricsLedger.read_snapshot(path)
     assert result == {"status": "STALE", "reason": "SNAPSHOT_CLOCK_POLICY"}
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda report: report.update({"requests": False}),
-        lambda report: report["tokens"].update({"input": float("nan")}),
-        lambda report: report["by_worker"].update({"writer": {"requests": 0}}),
-        lambda report: report.update({"unexpected": 1}),
-    ],
-)
+@pytest.mark.parametrize("mutate", [
+    lambda report: report.update({"requests": False}),
+    lambda report: report["tokens"].update({"input": float("nan")}),
+    lambda report: report["by_worker"].update({"writer": {"requests": 0}}),
+    lambda report: report.update({"unexpected": 1}),
+])
 def test_metrics_snapshot_requires_closed_typed_report_schema(tmp_path, mutate):
     import json
 
@@ -1495,34 +684,20 @@ def test_metrics_snapshot_requires_closed_typed_report_schema(tmp_path, mutate):
 
     path = tmp_path / "operational-metrics.sqlite3"
     ledger = OperationalMetricsLedger(path)
-    ledger.reconcile(
-        {
-            "event_id": "schema-event",
-            "request_id": "schema-request",
-            "episode_id": "TEST-EP",
-            "worker": "writer",
-            "experiment": False,
-            "tokens_input": 1,
-            "billing_status": "UNKNOWN",
-        }
-    )
+    ledger.reconcile({
+        "event_id": "schema-event", "request_id": "schema-request", "episode_id": "TEST-EP",
+        "worker": "writer", "experiment": False, "tokens_input": 1, "billing_status": "UNKNOWN",
+    })
     snapshot_path = path.with_suffix(".snapshot.json")
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     mutate(snapshot["report"])
-    snapshot["snapshot_sha256"] = _digest_json(
-        {key: value for key, value in snapshot.items() if key != "snapshot_sha256"}
-    )
+    snapshot["snapshot_sha256"] = _digest_json({key: value for key, value in snapshot.items() if key != "snapshot_sha256"})
     snapshot_path.write_text(json.dumps(snapshot, allow_nan=True), encoding="utf-8")
 
-    assert OperationalMetricsLedger.read_snapshot(path) == {
-        "status": "STALE",
-        "reason": "SNAPSHOT_INVALID",
-    }
+    assert OperationalMetricsLedger.read_snapshot(path) == {"status": "STALE", "reason": "SNAPSHOT_INVALID"}
 
 
-def test_metrics_constructor_crash_leaves_durable_writer_marker_not_prior_current(
-    tmp_path, monkeypatch
-):
+def test_metrics_constructor_crash_leaves_durable_writer_marker_not_prior_current(tmp_path, monkeypatch):
     import json
     from datetime import UTC, datetime
 
@@ -1537,18 +712,11 @@ def test_metrics_constructor_crash_leaves_durable_writer_marker_not_prior_curren
     }
     prior["snapshot_sha256"] = _digest_json(prior)
     path.with_suffix(".snapshot.json").write_text(json.dumps(prior), encoding="utf-8")
-    monkeypatch.setattr(
-        OperationalMetricsLedger,
-        "_db",
-        lambda self: (_ for _ in ()).throw(OSError("ctor crash")),
-    )
+    monkeypatch.setattr(OperationalMetricsLedger, "_db", lambda self: (_ for _ in ()).throw(OSError("ctor crash")))
 
     with pytest.raises(OSError, match="ctor crash"):
         OperationalMetricsLedger(path)
-    assert OperationalMetricsLedger.read_snapshot(path) == {
-        "status": "STALE",
-        "reason": "WRITER_IN_PROGRESS",
-    }
+    assert OperationalMetricsLedger.read_snapshot(path) == {"status": "STALE", "reason": "WRITER_IN_PROGRESS"}
 
 
 def test_cli_status_missing_metrics_database_creates_nothing(tmp_path):
@@ -1558,35 +726,16 @@ def test_cli_status_missing_metrics_database_creates_nothing(tmp_path):
     root = tmp_path / "TEST" / rid
     root.mkdir(parents=True)
     (root / "prompt.txt").write_text("fixture", encoding="utf-8")
-    (root / "harness.json").write_text(
-        '{"prompt_sha256":"'
-        + __import__("hashlib").sha256(b"fixture").hexdigest()
-        + '","request":{}}',
-        encoding="utf-8",
-    )
+    (root / "harness.json").write_text('{"prompt_sha256":"' + __import__("hashlib").sha256(b"fixture").hexdigest() + '","request":{}}', encoding="utf-8")
     (root / "runner.json").write_text('{"state":"NEW","media":{}}', encoding="utf-8")
     before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
     completed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from src.hybrid.autonomous_cli import main; import sys; raise SystemExit(main(sys.argv[1:]))",
-            "status",
-            "--workspace",
-            str(tmp_path),
-            "--request-id",
-            rid,
-        ],
-        cwd=Path(__file__).parents[2],
-        text=True,
-        capture_output=True,
-        check=False,
+        [sys.executable, "-c", "from src.hybrid.autonomous_cli import main; import sys; raise SystemExit(main(sys.argv[1:]))", "status", "--workspace", str(tmp_path), "--request-id", rid],
+        cwd=Path(__file__).parents[2], text=True, capture_output=True, check=False,
     )
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout)["operational_metrics"] == {"status": "MISSING"}
-    assert {
-        path.name: path.read_bytes() for path in root.iterdir() if path.is_file()
-    } == before
+    assert {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()} == before
     assert not (root / "operational-metrics.sqlite3").exists()
     assert not (root / "operational-metrics.sqlite3-wal").exists()
 
@@ -1767,8 +916,7 @@ def test_start_binds_packet_and_resume_jobs_across_a_fresh_process(tmp_path):
     )
 
 
-@pytest.mark.asyncio
-async def test_gate_refuses_artifact_replaced_after_approval_and_publish_intent_is_durable(
+def test_gate_refuses_artifact_replaced_after_approval_and_publish_intent_is_durable(
     tmp_path,
 ):
     from src.hybrid.autonomous import (
@@ -1785,18 +933,14 @@ async def test_gate_refuses_artifact_replaced_after_approval_and_publish_intent_
         Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"))),
         ledger(tmp_path, parsed),
     )
-    candidate = job(tmp_path)
-    runner.start({"packet": "test"}, [candidate])
-    await runner.resume(
-        FixtureProvider(tmp_path),
-        lambda receipt: {
-            "approved": True,
-            "reviewer": "independent-test-qa",
-            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
-            "request_id": receipt["request_id"],
-            "result_sha256": receipt["result_sha256"],
-            "codes": [],
-        },
+    runner.start({"packet": "test"}, [job(tmp_path)])
+    request_id = runner._load()["jobs"][0]["request_id"]
+    runner._save(
+        {
+            **runner._load(),
+            "state": "MEDIA_PENDING",
+            "qa": {request_id: {"result_sha256": "test"}},
+        }
     )
     thumbnail, video = final_media(tmp_path)
     runner.stage_delivery(
@@ -1845,9 +989,7 @@ def test_qa_fail_is_hash_bound_and_does_not_open_human_gate(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cancelled_executor_run_marks_reservation_unknown_and_propagates(
-    tmp_path,
-):
+async def test_cancelled_executor_run_marks_reservation_unknown_and_propagates(tmp_path):
     from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
 
     parsed = AutonomousPolicy.from_dict(policy())
@@ -1882,3 +1024,319 @@ async def test_cancelled_executor_run_marks_reservation_unknown_and_propagates(
     assert provider.submits == 1
     assert budget.claim(candidate.request_id)["state"] == "UNKNOWN"
     assert budget.claim(candidate.request_id)["settlement_mode"] == "FAL_READBACK_V2"
+
+
+@pytest.mark.asyncio
+async def test_bounded_async_runner_qa_starts_before_slow_independent_job_and_fresh_resume_repeats_nothing(tmp_path, monkeypatch):
+    """The runner dispatches only independent ready work, not a serial batch barrier."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    monkeypatch.setattr(Job, "request_id", property(lambda candidate: {"slow": "a", "fast": "b"}[candidate.scene]))
+
+    class DelayedProvider(FixtureProvider):
+        def __init__(self, root):
+            super().__init__(root)
+            self.active = 0
+            self.peak = 0
+            self.started = []
+
+        async def submit(self, candidate, request_id, checkpoint):
+            self.calls += 1
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            self.started.append(request_id)
+            try:
+                checkpoint(provider_id="TEST-" + request_id)
+                if candidate.scene == "slow":
+                    await slow_release.wait()
+                else:
+                    fast_submitted.set()
+                result = self.root / f"{request_id}.bin"
+                result.write_bytes(candidate.scene.encode())
+                return ProviderResult(result, candidate.cost)
+            finally:
+                self.active -= 1
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    database = tmp_path / "jobs.db"
+    slow = Job("slow", "first", "TEST", "test-image", {"prompt": "slow"}, manifest(tmp_path), Decimal("0.10"))
+    fast = Job("fast", "first", "TEST", "test-image", {"prompt": "fast"}, manifest(tmp_path), Decimal("0.10"))
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(database, Config(limit=Decimal("1.00"), concurrency=2)), ledger(tmp_path, parsed),
+        provider_concurrency=2, cpu_concurrency=1,
+    )
+    runner.start({"packet": "parallel"}, [slow, fast])
+    provider = DelayedProvider(tmp_path)
+    slow_release = asyncio.Event()
+    fast_submitted = asyncio.Event()
+    fast_qa_started = asyncio.Event()
+    qa_order = []
+    qa_active = {"now": 0, "peak": 0}
+
+    async def qa(receipt):
+        qa_order.append((receipt["scene"], provider.active))
+        qa_active["now"] += 1
+        qa_active["peak"] = max(qa_active["peak"], qa_active["now"])
+        try:
+            if receipt["scene"] == "fast":
+                fast_qa_started.set()
+            return {
+            "approved": True, "reviewer": "independent-test-qa",
+            "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
+                "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+            }
+        finally:
+            qa_active["now"] -= 1
+
+    task = asyncio.create_task(runner.resume(provider, qa))
+    try:
+        await asyncio.wait_for(fast_submitted.wait(), timeout=2)
+        await asyncio.wait_for(fast_qa_started.wait(), timeout=2)
+        assert provider.active == 1
+        slow_release.set()
+        completed = await asyncio.wait_for(task, timeout=2)
+    finally:
+        slow_release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert completed["state"] == "MEDIA_PENDING"
+    assert provider.peak == 2
+    assert qa_order[0] == ("fast", 1)
+    assert qa_order[-1][0] == "slow"
+    assert qa_active["peak"] == 1
+    assert provider.calls == 2
+
+    fresh = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(database, Config(limit=Decimal("1.00"), concurrency=2)), ledger(tmp_path, parsed),
+        provider_concurrency=2, cpu_concurrency=1,
+    )
+    resumed = await fresh.resume(provider, lambda _: (_ for _ in ()).throw(AssertionError("QA repeated")))
+    assert resumed["state"] == "MEDIA_PENDING"
+    assert provider.calls == 2
+
+    thumbnail, video = final_media(tmp_path)
+    fresh.stage_delivery(thumbnail, video, qa={"approved": True, "mode": "TEST", "subject": "technical-test", "issuer": "TEST"})
+    assert fresh.record_human_gate("thumbnail", thumbnail, approved=True, reviewer="human")["state"] == "WAITING_VIDEO_APPROVAL"
+    assert fresh.record_human_gate("video", video, approved=True, reviewer="human")["state"] == "READY_TO_PUBLISH"
+
+
+@pytest.mark.asyncio
+async def test_async_runner_blocks_dependent_render_path_after_qa_failure_and_persists_default_limits(tmp_path):
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    parent = Job("parent", "first", "TEST", "test-image", {"prompt": "parent"}, manifest(tmp_path), Decimal("0.10"))
+    child = Job("child", "first", "TEST", "test-image", {"prompt": "child", "depends_on": [parent.request_id]}, manifest(tmp_path), Decimal("0.10"))
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)), ledger(tmp_path, parsed),
+    )
+    started = runner.start({"packet": "dependency"}, [parent, child])
+    assert started["scheduler"] == {"provider_concurrency": 1, "cpu_concurrency": 1}
+    provider = FixtureProvider(tmp_path)
+    rejected = await runner.resume(provider, lambda receipt: {
+        "approved": False, "reviewer": "independent-test-qa",
+        "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
+        "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": ["IDENTITY_DRIFT"],
+    })
+    assert rejected["state"] == "REJECTED"
+    assert provider.calls == 1
+    assert runner.executor.inspect(child.request_id) is None
+    with pytest.raises(ValueError, match="media staging"):
+        runner.stage_delivery(tmp_path / "none.png", tmp_path / "none.mp4", qa={})
+
+
+@pytest.mark.asyncio
+async def test_deterministic_fixture_benchmark_reports_bounded_parallel_latency(tmp_path):
+    """Fixture-only timing comparison; it makes no provider or production claim."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    class TimedProvider(FixtureProvider):
+        async def submit(self, candidate, request_id, checkpoint):
+            self.calls += 1
+            checkpoint(provider_id="TEST-" + request_id)
+            await asyncio.sleep(0.25)
+            result = self.root / f"{request_id}.bin"
+            result.write_bytes(candidate.scene.encode())
+            return ProviderResult(result, candidate.cost)
+
+    async def measure(name, limit):
+        parsed = AutonomousPolicy.from_dict(policy())
+        root = tmp_path / name
+        root.mkdir()
+        first = Job("one", "first", "TEST", "test-image", {"prompt": name + "-one"}, manifest(root), Decimal("0.10"))
+        second = Job("two", "first", "TEST", "test-image", {"prompt": name + "-two"}, manifest(root), Decimal("0.10"))
+        runner = AutonomousTwoGateRunner(
+            root / "run", "TEST-EP", parsed,
+            Executor(root / "jobs.db", Config(limit=Decimal("1.00"), concurrency=2)), ledger(root, parsed),
+            provider_concurrency=limit, cpu_concurrency=limit,
+        )
+        runner.start({"packet": name}, [first, second])
+        started = time.monotonic()
+        await runner.resume(TimedProvider(root), lambda receipt: {
+            "approved": True, "reviewer": "benchmark-qa",
+            "reviewer_identity": {"subject": "benchmark-qa", "issuer": "TEST"},
+            "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+        })
+        return time.monotonic() - started
+
+    serial_s = await measure("serial", 1)
+    parallel_s = await measure("parallel", 2)
+    print({"fixture_serial_s": round(serial_s, 3), "fixture_parallel_s": round(parallel_s, 3), "provider_cpu_limits": [1, 2]})
+    assert parallel_s < serial_s * 0.8, {"fixture_serial_s": serial_s, "fixture_parallel_s": parallel_s, "limits": [1, 2]}
+
+
+
+@pytest.mark.asyncio
+async def test_large_ready_dag_keeps_scheduler_task_window_bounded(tmp_path, monkeypatch):
+    """The scheduler bounds created work tasks, not merely provider submissions."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    jobs = [
+        Job(f"S{index:03}", "first", "TEST", "test-image", {"prompt": str(index)}, manifest(tmp_path), Decimal("0.01"))
+        for index in range(20)
+    ]
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"), concurrency=1)), ledger(tmp_path, parsed),
+        provider_concurrency=1, cpu_concurrency=2,
+    )
+    runner.start({"packet": "large-dag"}, jobs)
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class BlockingProvider(FixtureProvider):
+        async def submit(self, candidate, request_id, checkpoint):
+            self.calls += 1
+            checkpoint(provider_id="TEST-" + request_id)
+            entered.set()
+            await release.wait()
+            result = self.root / f"{request_id}.bin"
+            result.write_bytes(candidate.scene.encode())
+            return ProviderResult(result, candidate.cost)
+
+    inflight_tasks = 0
+    peak_inflight_tasks = 0
+    original_create_task = asyncio.create_task
+
+    def observe(coro, *args, **kwargs):
+        nonlocal inflight_tasks, peak_inflight_tasks
+        task = original_create_task(coro, *args, **kwargs)
+        inflight_tasks += 1
+        peak_inflight_tasks = max(peak_inflight_tasks, inflight_tasks)
+
+        def completed(_):
+            nonlocal inflight_tasks
+            inflight_tasks -= 1
+
+        task.add_done_callback(completed)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", observe)
+    task = original_create_task(runner.resume(BlockingProvider(tmp_path), lambda receipt: {
+        "approved": True, "reviewer": "window-qa",
+        "reviewer_identity": {"subject": "window-qa", "issuer": "TEST"},
+        "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+    }))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.sleep(0)
+        assert inflight_tasks <= 3
+        release.set()
+        completed = await asyncio.wait_for(task, timeout=20)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert completed["state"] == "MEDIA_PENDING"
+    assert peak_inflight_tasks <= 3
+
+
+def test_start_rejects_two_node_dependency_cycle_without_persisting_running_state(tmp_path, monkeypatch):
+    """Invalid DAGs are rejected before they can create execution state."""
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    monkeypatch.setattr(Job, "request_id", property(lambda self: self.scene))
+    first = Job("one", "first", "TEST", "test-image", {"prompt": "one", "depends_on": ["two"]}, manifest(tmp_path), Decimal("0.10"))
+    second = Job(
+        "two", "first", "TEST", "test-image",
+        {"prompt": "two", "depends_on": ["one"]}, manifest(tmp_path), Decimal("0.10"),
+    )
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed),
+    )
+
+    with pytest.raises(ValueError, match="cycle"):
+        runner.start({"packet": "cycle"}, [first, second])
+    assert not runner.path.exists()
+    assert runner.executor.inspect(first.request_id) is None
+    assert runner.executor.inspect(second.request_id) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_artifact_tampered_after_persisted_qa_before_provider_or_render(tmp_path):
+    from src.hybrid.autonomous import AutonomousPolicy, AutonomousTwoGateRunner
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    database = tmp_path / "jobs.db"
+    candidate = job(tmp_path)
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(database, Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed),
+    )
+    runner.start({"packet": "qa"}, [candidate])
+    await runner.resume(FixtureProvider(tmp_path), lambda receipt: {
+        "approved": True, "reviewer": "independent-test-qa",
+        "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
+        "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+    })
+    receipt = runner.executor.inspect(candidate.request_id)
+    Path(receipt["result"]).write_bytes(b"tampered-after-qa")
+    fresh = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(database, Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed),
+    )
+    provider = FixtureProvider(tmp_path)
+
+    with pytest.raises(ValueError, match="persisted QA"):
+        await fresh.resume(provider, lambda _: (_ for _ in ()).throw(AssertionError("stale QA must not rerun")))
+    assert provider.calls == 0
+    assert fresh._load()["state"] == "REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_resume_owned_requires_runtime_fencing_not_a_caller_flag(tmp_path):
+    from src.hybrid.autonomous import (
+        AutonomousPolicy,
+        AutonomousTwoGateRunner,
+        RunnerOwnership,
+    )
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    asserted = []
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-EP", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed),
+        ownership_assertion=lambda ownership: asserted.append(ownership.fencing_token) or ownership.fencing_token == 7,
+    )
+    runner.start({"packet": "owned"}, [job(tmp_path)])
+    provider = FixtureProvider(tmp_path)
+    with pytest.raises(PermissionError, match="fenced ownership"):
+        runner.stage_delivery(tmp_path / "thumbnail.png", tmp_path / "video.mp4", qa={})
+    with pytest.raises(PermissionError, match="rejected"):
+        await runner.resume_owned(provider, lambda receipt: receipt, RunnerOwnership("TEST-EP", "worker", 6))
+    assert provider.calls == 0
+    completed = await runner.resume_owned(provider, lambda receipt: {
+        "approved": True, "reviewer": "independent-test-qa",
+        "reviewer_identity": {"subject": "qa-test", "issuer": "TEST"},
+        "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": [],
+    }, RunnerOwnership("TEST-EP", "worker", 7))
+    assert completed["state"] == "MEDIA_PENDING"
+    assert asserted.count(7) >= 2

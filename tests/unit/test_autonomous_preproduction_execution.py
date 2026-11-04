@@ -824,9 +824,15 @@ def test_compile_preproduction_creates_hash_bound_test_packet_for_existing_compi
     code, compiled = run_cli("compile-preproduction", "--workspace", str(tmp_path), "--request-id", created["request_id"], "--manifest-file", str(manifest_path))
     assert code == 0 and compiled["receipt_sha256"] == packet["receipt_sha256"]
     code, started = run_cli("start", "--workspace", str(tmp_path / "compiled-run"), "--compiled-input", str(packet_root))
-    assert code == 0 and started["state"] == "WAITING_THUMBNAIL_APPROVAL"
+    assert code == 0 and started["state"] == "READY"
+    code, queued = run_cli("enqueue", "--workspace", str(tmp_path / "compiled-run"), "--request-id", started["request_id"])
+    assert code == 0 and queued["status"] == "PENDING"
+    code, worker = run_cli("run", "--workspace", str(tmp_path / "compiled-run"), "--once")
+    assert code == 0 and worker["state"] == "WAITING_THUMBNAIL_APPROVAL"
     code, thumb = run_cli("approve", "--workspace", str(tmp_path / "compiled-run"), "--request-id", started["request_id"], "--kind", "thumbnail", "--test-approval")
     assert code == 0 and thumb["state"] == "WAITING_VIDEO_APPROVAL"
+    code, worker = run_cli("run", "--workspace", str(tmp_path / "compiled-run"), "--once")
+    assert code == 0 and worker["state"] == "WAITING_VIDEO_APPROVAL"
     code, video = run_cli("approve", "--workspace", str(tmp_path / "compiled-run"), "--request-id", started["request_id"], "--kind", "video", "--test-approval")
     assert code == 0 and video["state"] == "READY_TO_PUBLISH"
 

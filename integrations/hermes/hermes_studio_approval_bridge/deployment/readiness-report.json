@@ -1,0 +1,72 @@
+{
+  "activation": {
+    "enabled": false,
+    "financial_authority_minted": false,
+    "gateway_restart_attempted": false,
+    "hotload_attempted": false,
+    "messages_sent": 0,
+    "pollers_started": 0,
+    "provider_calls": 0
+  },
+  "activation_prerequisites": {
+    "controlled_restart_required_after_install": true,
+    "dedicated_bridge_secrets_present_exactly_once": true,
+    "financial_gate_valid": true,
+    "plugin_installation_pending": true,
+    "prepared_configuration_valid": true,
+    "request_binding_valid": true
+  },
+  "bridge_secret_key_counts": {
+    "STUDIO_BRIDGE_HMAC": 1,
+    "STUDIO_TELEGRAM_BOT_TOKEN": 1,
+    "STUDIO_TELEGRAM_WEBHOOK_SECRET": 1
+  },
+  "financial_gate": {
+    "additional_approval_required": false,
+    "approval_scope": "FINANCIAL_ONLY",
+    "authorizes_generation": false,
+    "historic_command_reference_excluded_from_media_gates": true,
+    "reason": null,
+    "status": "APPROVED_USD10",
+    "valid": true
+  },
+  "future_media_gates": {
+    "deployment_blocking": false,
+    "final_jaco_video_exists": false,
+    "provider_readback_required_when_a_future_media_delivery_exists": true,
+    "reason": "No final Jac\u00f3 video exists; future delivery readback is not an installation prerequisite."
+  },
+  "mode": "PREPARED_DISABLED",
+  "pending": [
+    "Install the committed immutable Git source with the documented --ref <40-character-commit> --no-enable action.",
+    "A single human-controlled gateway restart is required after installation because the loader has no hot-load readback contract."
+  ],
+  "prepared_configuration": {
+    "bridge_hmac_env": "STUDIO_BRIDGE_HMAC",
+    "config_key": "plugins.entries.hermes-studio-approval-bridge.settings.approval_bridge",
+    "enabled": false,
+    "registration_policy": "one pre-core handler on Hermes's existing Telegram application; no poller, webhook, or outbound sender",
+    "telegram_bot_token_env": "STUDIO_TELEGRAM_BOT_TOKEN",
+    "telegram_webhook_secret_env": "STUDIO_TELEGRAM_WEBHOOK_SECRET",
+    "valid": true
+  },
+  "profile": "default",
+  "request_binding": {
+    "mode": "PREPRODUCTION",
+    "request_root": "C:\\HermesStudio\\factory\\PREPRODUCTION\\72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9",
+    "source_sha256": "818556d97edb648f738ceea3b86fed933cecbb6a8ae7a53b3a1cff4a8474ff22",
+    "valid": true
+  },
+  "schema": "hermes-studio-approval-bridge-readiness/2",
+  "scope": {
+    "request_id": "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9",
+    "revision_id": "818556d97edb648f",
+    "story": "Jac\u00f3 \u2014 G\u00eanesis 28"
+  },
+  "single_inbound_owner": {
+    "bridge_plugin_enabled": false,
+    "bridge_plugin_installed": false,
+    "existing_hermes_gateway_running": true,
+    "second_poller_started": false
+  }
+}

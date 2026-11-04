@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from src.approval.inbound import AuthenticatedApprovalReply
+from src.hybrid.locks import file_lock
+from src.path_guard import reject_reparse_path
 
 _MAX_BODY_BYTES = 65_536
 _MAX_TEXT_CHARS = 4_096
@@ -61,7 +63,7 @@ class TelegramInboundAdapter:
         webhook_secret: str | None,
         instance_id: str,
     ) -> None:
-        self._journal_path = Path(journal_path)
+        self._journal_path = reject_reparse_path(Path(journal_path))
         self._expected_chat_id = self._canonical_config_id(expected_chat_id, "chat")
         self._trusted_sender_ids = frozenset(
             self._canonical_config_id(sender_id, "sender")
@@ -96,38 +98,56 @@ class TelegramInboundAdapter:
         return hmac.new(key, self._canonical_json(document), hashlib.sha256).hexdigest()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._journal_path, timeout=10, isolation_level=None)
-        connection.execute("PRAGMA journal_mode = WAL")
+        connection = sqlite3.connect(self._journal_path, timeout=30, isolation_level=None)
         connection.execute("PRAGMA synchronous = FULL")
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
     def _initialize_journal(self) -> None:
-        self._journal_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS journal_metadata ("
-                "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-            )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS replies ("
-                "update_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL UNIQUE, "
-                "chat_id TEXT NOT NULL, sender_id TEXT NOT NULL, "
-                "reply_to_message_id INTEGER NOT NULL, text TEXT NOT NULL, "
-                "update_hash TEXT NOT NULL, message_hash TEXT NOT NULL, mac TEXT NOT NULL, "
-                "consumed_at TEXT, UNIQUE(chat_id, reply_to_message_id))"
-            )
-            row = connection.execute(
-                "SELECT value FROM journal_metadata WHERE key = 'binding_digest'"
-            ).fetchone()
-            digest = self._binding_digest()
-            if row is None:
+        """Bootstrap one configuration-bound WAL journal under its OS lock."""
+        init_lock = self._journal_path.with_name(f".{self._journal_path.name}.init.lock")
+        digest = self._binding_digest()
+        with file_lock(init_lock, timeout=30):
+            connection = self._connect()
+            try:
+                journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+                if str(journal_mode).lower() != "wal":
+                    connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
-                    "INSERT INTO journal_metadata(key, value) VALUES ('binding_digest', ?)",
+                    "CREATE TABLE IF NOT EXISTS journal_metadata ("
+                    "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS replies ("
+                    "update_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL UNIQUE, "
+                    "chat_id TEXT NOT NULL, sender_id TEXT NOT NULL, "
+                    "reply_to_message_id INTEGER NOT NULL, text TEXT NOT NULL, "
+                    "update_hash TEXT NOT NULL, message_hash TEXT NOT NULL, mac TEXT NOT NULL, "
+                    "consumed_at TEXT, UNIQUE(chat_id, reply_to_message_id))"
+                )
+                connection.execute(
+                    "INSERT INTO journal_metadata(key, value) VALUES ('binding_digest', ?) "
+                    "ON CONFLICT(key) DO NOTHING",
                     (digest,),
                 )
-            elif not hmac.compare_digest(row[0], digest):
-                raise ValueError("Telegram inbound journal binding does not match trusted configuration")
+                row = connection.execute(
+                    "SELECT value FROM journal_metadata WHERE key = 'binding_digest'"
+                ).fetchone()
+                if (
+                    row is None
+                    or not isinstance(row[0], str)
+                    or not hmac.compare_digest(row[0], digest)
+                ):
+                    raise ValueError(
+                        "Telegram inbound journal binding does not match trusted configuration"
+                    )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
     @staticmethod
     def _canonical_json(document: dict[str, object]) -> bytes:

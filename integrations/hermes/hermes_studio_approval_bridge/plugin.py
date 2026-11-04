@@ -48,9 +48,7 @@ def register(ctx: object, *, bridge: HermesApprovalBridgeComposition | None = No
         if not isinstance(configured, dict) or configured.get("enabled") is not True:
             return False
         try:
-            from integrations.hermes.hermes_studio_approval_bridge.bootstrap import (
-                compose_from_context,
-            )
+            from .bootstrap import compose_from_context
 
             bridge = compose_from_context(ctx)
         except (ImportError, OSError, TypeError, ValueError):

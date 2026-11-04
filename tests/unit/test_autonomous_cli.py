@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
 import sys
-import time
 from hashlib import sha256
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON = Path(sys.executable)
@@ -117,7 +119,81 @@ def test_cli_refuses_live_and_non_test_approval(tmp_path):
     assert code == 1 and blocked["status"] == "BLOCKED"
 
 
-def test_cli_compiled_test_packet_rehydrates_successors_and_rejects_mutation(tmp_path):
+def test_cli_worker_runs_existing_fixture_once_through_explicit_two_gates(tmp_path):
+    """The durable worker resumes a real runner; gates require separate CLI approvals."""
+    from decimal import Decimal
+
+    from src.hybrid.autonomous_cli import manifest, packet, runner
+    from src.hybrid.execution import Job
+
+    workspace = tmp_path / "workspace"
+    raw = b"Poste um video no @test\nIdioma: pt-BR\nPlaylist: TEST\nTema: worker fixture\n"
+    request_id = sha256(b"worker-cli-fixture\0" + raw).hexdigest()
+    root = workspace / "TEST" / request_id
+    root.mkdir(parents=True)
+    (root / "prompt.txt").write_bytes(raw)
+    request = {"channel": "@test", "language": "pt-BR", "playlist": "TEST", "theme": "worker fixture"}
+    job = Job("TEST-WORKER-S001", "first", "TEST", "test-local-fixture", {"fixture": "local-only"}, manifest(root), Decimal("0.01"))
+    run = runner(root, request_id)
+    run.start(packet(raw, request), [job])
+    (root / "harness.json").write_text(json.dumps({"request_id": request_id, "prompt_sha256": sha256(raw).hexdigest(), "request": request}), encoding="utf-8")
+
+    code, queued = run_cli("enqueue", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, queued
+    code, first = run_cli("run", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, first
+    assert first["status"] == "WAITING"
+    assert first["next_action"] == "HUMAN_THUMBNAIL"
+    assert (root / "thumbnail.TEST.png").is_file()
+    assert (root / "video.TEST.mp4").is_file()
+
+    code, thumbnail = run_cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "thumbnail", "--test-approval")
+    assert code == 0, thumbnail
+    code, second = run_cli("run", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, second
+    assert second["status"] == "WAITING"
+    assert second["next_action"] == "HUMAN_VIDEO"
+    code, video = run_cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "video", "--test-approval")
+    assert code == 0, video
+    code, final = run_cli("run", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, final
+    assert final["status"] == "DONE"
+    assert final["state"] == "READY_TO_PUBLISH"
+
+
+def test_cli_worker_status_reads_writer_snapshot_without_touching_queue_files(tmp_path):
+    """Status is a JSON projection, not SQLite bootstrap or a live WAL read."""
+    from src.hybrid.worker import EpisodeTaskQueue
+
+    workspace = tmp_path / "workspace"
+    request_id = "a" * 64
+    root = workspace / "TEST" / request_id
+    root.mkdir(parents=True)
+    (root / "runner.json").write_text(json.dumps({"episode_id": "TEST-SNAPSHOT"}), encoding="utf-8")
+    queue = EpisodeTaskQueue(workspace / "TEST" / "worker.sqlite3")
+    queue.enqueue("TEST-SNAPSHOT", str(root), "fixture")
+    before = {
+        path.relative_to(workspace): path.read_bytes()
+        for path in workspace.rglob("*") if path.is_file()
+    }
+
+    code, result = run_cli(
+        "worker-status", "--workspace", str(workspace), "--request-id", request_id
+    )
+    after = {
+        path.relative_to(workspace): path.read_bytes()
+        for path in workspace.rglob("*") if path.is_file()
+    }
+
+    assert code == 0, result
+    assert result["episode_id"] == "TEST-SNAPSHOT"
+    assert result["status"] == "PENDING"
+    assert result["snapshot"] == "CURRENT"
+    assert "root" not in result
+    assert before == after
+
+
+def test_cli_compiled_test_packet_is_snapshot_only_and_rejects_mutation(tmp_path):
     """A fresh CLI process uses only a copied TEST packet and the durable executor."""
     from PIL import Image
 
@@ -149,7 +225,7 @@ def test_cli_compiled_test_packet_rehydrates_successors_and_rejects_mutation(tmp
     episode.save(packet / "compiled.json")
     manifest.save(packet / "manifest.json")
     (packet / "policy.json").write_text(json.dumps({
-        "schema": 1, "version": "compiled-cli-test-v1", "mode": "TEST", "episode_cap_usd": "1.00",
+        "schema": 1, "version": "compiled-test-internal-v1", "mode": "TEST", "episode_cap_usd": "1.00",
         "month_cap_usd": "1.00", "experiment_cap_usd": "1.00",
         "allowed_providers": ["test-local-fixture"], "publication": {"enabled": False},
     }), encoding="utf-8")
@@ -161,48 +237,23 @@ def test_cli_compiled_test_packet_rehydrates_successors_and_rejects_mutation(tmp
     )
     assert code == 0, rejected
     assert rejected["kind"] == "compiled-test"
-    assert rejected["state"] == "REJECTED"
     request_id = rejected["request_id"]
+    code, rejected = run_cli("resume", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 1 and rejected["status"] == "BLOCKED"
+    assert "owned queue worker" in rejected["error"]
     runner_root = workspace / "TC" / request_id[:16] / "runner"
-    metrics_db = runner_root / "operational-metrics.sqlite3"
-    ready = tmp_path / "compiled-wal-writer-ready"
-    writer = subprocess.Popen(
-        [str(PYTHON), "-c", "from pathlib import Path; import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); db.execute('PRAGMA journal_mode=WAL'); db.execute('BEGIN IMMEDIATE'); db.execute('PRAGMA user_version=9'); Path(sys.argv[2]).write_text('ready'); time.sleep(15); db.rollback(); db.close()", str(metrics_db), str(ready)],
-        cwd=ROOT,
-        env={**os.environ, "PYTHONPATH": ""},
-    )
-    try:
-        for _ in range(40):
-            if ready.exists():
-                break
-            time.sleep(0.05)
-        assert ready.exists()
-        assert metrics_db.with_name(metrics_db.name + "-wal").exists()
-        before = {path.relative_to(runner_root): path.read_bytes() for path in runner_root.rglob("*") if path.is_file() and not path.name.endswith("-shm")}
-        code, compiled_status = run_cli("status", "--workspace", str(workspace), "--request-id", request_id)
-        after = {path.relative_to(runner_root): path.read_bytes() for path in runner_root.rglob("*") if path.is_file() and not path.name.endswith("-shm")}
-    finally:
-        writer.terminate()
-        writer.wait(timeout=10)
+
+    before = {path.relative_to(runner_root): path.read_bytes() for path in runner_root.rglob("*") if path.is_file()}
+    code, compiled_status = run_cli("status", "--workspace", str(workspace), "--request-id", request_id)
+    after = {path.relative_to(runner_root): path.read_bytes() for path in runner_root.rglob("*") if path.is_file()}
     assert code == 0, compiled_status
     assert compiled_status["operational_metrics"]["status"] == "CURRENT"
     assert before == after
 
-    code, remediated = run_cli(
-        "remediate", "--workspace", str(workspace), "--request-id", request_id,
-        "--correction", "R001=clear sky",
-    )
-    assert code == 0, remediated
-    assert remediated["state"] == "MEDIA_PENDING"
-    code, heroed = run_cli("heroes", "--workspace", str(workspace), "--request-id", request_id)
-    assert code == 0, heroed
-    assert heroed["state"] == "WAITING_THUMBNAIL_APPROVAL"
-    video = Path(heroed["artifacts"]["video"]["path"])
-    video_mtime = video.stat().st_mtime_ns
-
-    code, resumed = run_cli("resume", "--workspace", str(workspace), "--request-id", request_id)
-    assert code == 0, resumed
-    assert video.stat().st_mtime_ns == video_mtime
+    for action, extra in (("remediate", ("--correction", "R001=clear sky")), ("heroes", ())):
+        code, blocked = run_cli(action, "--workspace", str(workspace), "--request-id", request_id, *extra)
+        assert code == 1 and blocked["status"] == "BLOCKED"
+        assert "owned queue worker" in blocked["error"]
     copied_input = workspace / "TC" / request_id[:16] / "inputs" / "compiled.json"
     copied_input.write_text("{}", encoding="utf-8")
     code, blocked = run_cli("status", "--workspace", str(workspace), "--request-id", request_id)
@@ -221,6 +272,101 @@ def test_cli_compiled_packet_rejects_live_policy_and_external_asset(tmp_path):
     }), encoding="utf-8")
     code, blocked = run_cli("start", "--workspace", str(tmp_path / "workspace"), "--compiled-input", str(packet))
     assert code == 1 and blocked["status"] == "BLOCKED"
+
+
+def test_cli_compiled_packet_worker_reaches_both_gates_without_repeat_post(tmp_path):
+    """The owned queue uses Director render once and resumes only from gates."""
+    from PIL import Image
+
+    from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
+    from src.hybrid.compiled import compile_storyboard
+
+    packet = tmp_path / "packet"
+    packet.mkdir()
+    audio = packet / "audio.wav"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i",
+         "sine=frequency=440:sample_rate=48000:duration=2", "-ac", "2", str(audio)],
+        check=True,
+    )
+    reference = packet / "reference.png"
+    Image.new("RGB", (64, 64), "navy").save(reference)
+    frozen = FrozenAsset.approve(reference, "TEST fixture", "TEST")
+    sheet = packet / "sheet.png"
+    contact_sheet((frozen,), sheet)
+    Manifest.freeze((frozen,), FrozenAsset.approve(sheet, "TEST fixture", "TEST"), "TEST fixture", "TEST").save(packet / "manifest.json")
+    compile_storyboard(
+        "TEST-COMPILED-WORKER", FrozenAsset.approve(audio, "TEST fixture", "TEST"),
+        [{"scene_id": "R001", "start": 0, "end": 2, "image_prompt": "céu", "action": "céu"}],
+    ).save(packet / "compiled.json")
+    (packet / "policy.json").write_text(json.dumps({
+        "schema": 1, "version": "compiled-test-internal-v1", "mode": "TEST",
+        "episode_cap_usd": "1.00", "month_cap_usd": "1.00", "experiment_cap_usd": "1.00",
+        "allowed_providers": ["test-local-fixture"], "publication": {"enabled": False},
+    }), encoding="utf-8")
+    workspace = tmp_path / "workspace"
+
+    code, started = run_cli("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, started
+    assert started["state"] == "READY"
+    assert started["artifacts"] == {}
+    request_id = started["request_id"]
+    root = workspace / "TC" / request_id[:16]
+    assert not list((root / "provider").glob("*.TEST.png"))
+
+    code, queued = run_cli("enqueue", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, queued
+    assert queued["status"] == "PENDING"
+    code, first = run_cli("run", "--once", "--workspace", str(workspace))
+    assert code == 0, first
+    assert first["state"] == "WAITING_THUMBNAIL_APPROVAL"
+    provider = list((root / "provider").glob("*.TEST.png"))
+    assert len(provider) == 1
+    assert (workspace / "episodes" / "TEST-COMPILED-WORKER" / "renders" / "final.mp4").is_file()
+
+    code, approved = run_cli("approve", "--workspace", str(workspace), "--request-id", request_id, "--kind", "thumbnail", "--test-approval")
+    assert code == 0, approved
+    code, second = run_cli("run", "--once", "--workspace", str(workspace))
+    assert code == 0, second
+    assert second["state"] == "WAITING_VIDEO_APPROVAL"
+    assert list((root / "provider").glob("*.TEST.png")) == provider
+    assert len(list((workspace / "episodes" / "TEST-COMPILED-WORKER" / "qa").glob("*render*json"))) == 3
+
+    for action, extra in (("resume", ()), ("remediate", ("--correction", "R001=clear sky")), ("heroes", ())):
+        code, blocked = run_cli(action, "--workspace", str(workspace), "--request-id", request_id, *extra)
+        assert code == 1 and "owned queue worker" in blocked["error"]
+
+
+def test_forged_compiled_queue_task_fails_closed_before_root_access():
+    """A legacy queue row is rejected before it can derive or read its root."""
+    from src.hybrid.autonomous_cli import _fixture_worker_handler
+
+    with pytest.raises(RuntimeError, match="configured workspace is invalid"):
+        asyncio.run(
+            _fixture_worker_handler(
+                {
+                    "kind": "compiled",
+                    "root": object(),
+                    "episode_id": "TEST-FORGED",
+                    "_worker_id": "worker-1",
+                    "fencing_token": 1,
+                }
+            )
+        )
+
+
+def test_director_delivery_adapter_rejects_nested_receipt_before_video_copy(tmp_path):
+    """A nested renderer receipt cannot authorize a copy from an external path."""
+    from src.hybrid.autonomous import AutonomousCompiledTestAdapter
+
+    external = tmp_path / "foreign.mp4"
+    external.write_bytes(b"foreign")
+    with pytest.raises(TypeError, match="unexpected keyword argument 'recovery_capability'"):
+        AutonomousCompiledTestAdapter.stage_director_delivery_owned(
+            object(), external, {"renderer_receipt": {"output_sha256": "forged"}},
+            lambda _evidence: {"approved": True}, ownership=object(), recovery_capability=None,
+        )
+    assert external.read_bytes() == b"foreign"
 
 
 def test_compiled_test_loader_uses_director_adapter_factory(tmp_path, monkeypatch):
@@ -256,7 +402,7 @@ def test_compiled_test_loader_uses_director_adapter_factory(tmp_path, monkeypatc
     ).save(packet / "compiled.json")
     manifest.save(packet / "manifest.json")
     policy_document = {
-        "schema": 1, "version": "compiled-cli-test-v1", "mode": "TEST",
+        "schema": 1, "version": "compiled-test-internal-v1", "mode": "TEST",
         "episode_cap_usd": "1.00", "month_cap_usd": "1.00", "experiment_cap_usd": "1.00",
         "allowed_providers": ["test-local-fixture"], "publication": {"enabled": False},
     }
@@ -271,7 +417,7 @@ def test_compiled_test_loader_uses_director_adapter_factory(tmp_path, monkeypatc
     monkeypatch.setattr(DirectorAgent, "create_autonomous_compiled_test_adapter", tracked)
     result = start_compiled(tmp_path / "workspace", packet, None)
 
-    assert result["state"] == "WAITING_THUMBNAIL_APPROVAL"
+    assert result["state"] == "READY"
     assert len(calls) == 1
     executor, workspace, policy = calls[0]
     assert executor.config.limit == Decimal("1.00")
