@@ -129,3 +129,97 @@ def prepare_execution_intent(receipt: dict[str, str | int], path: Path | str) ->
     if target.read_bytes() != encoded:
         raise FinalAdmissionError("execution intent readback mismatch")
     return intent
+
+
+class FinalAdmissionKernel:
+    """One TEST-only wiring of final admission to the durable FAL kernel."""
+
+    def __init__(self, *, executor: object, ledger: object, episode_id: str, provider: object) -> None:
+        if not isinstance(episode_id, str) or episode_id != "JACO_GENESIS28":
+            raise FinalAdmissionError("exact Jacó budget scope is required")
+        if getattr(provider, "mode", None) != "TEST":
+            raise FinalAdmissionError("TEST kernel refuses non-TEST provider")
+        for target, method in ((executor, "prepare_intent"), (executor, "inspect"), (executor, "run"),
+                               (ledger, "reserve"), (ledger, "claim"), (ledger, "bind_provider_request_id")):
+            if not callable(getattr(target, method, None)):
+                raise TypeError(f"configured kernel lacks {method}")
+        self.executor, self.ledger, self.episode_id, self.provider = executor, ledger, episode_id, provider
+
+    @staticmethod
+    def _verify_receipt(receipt: object) -> dict[str, str | int]:
+        required = {"schema", "kind", "request_id", "endpoint", "reserved_usd", "call_limit", "packet_sha256",
+                    "review_sha256", "authorization_sha256", "quote_sha256", "authorization_version",
+                    "validated_at_epoch", "receipt_sha256"}
+        if not isinstance(receipt, dict) or set(receipt) != required:
+            raise FinalAdmissionError("closed final admission receipt required")
+        body = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+        if (receipt.get("receipt_sha256") != sha256(_canonical(body)).hexdigest()
+                or receipt.get("kind") != "JACO_FLUX3_FINAL_ADMISSION"
+                or receipt.get("request_id") != REQUEST_ID or receipt.get("endpoint") != ENDPOINT
+                or receipt.get("reserved_usd") != MAX_USD or receipt.get("call_limit") != 1):
+            raise FinalAdmissionError("final admission receipt is invalid")
+        return dict(receipt)
+
+    async def execute(self, job: object, receipt: object) -> dict:
+        """Prepare → reserve → marker → exactly-one submit/recovery."""
+        approved = self._verify_receipt(receipt)
+        if (getattr(job, "mode", None) != "TEST" or getattr(job, "endpoint", None) != ENDPOINT
+                or str(getattr(job, "cost", "")) != MAX_USD):
+            raise FinalAdmissionError("TEST canary job must exactly bind endpoint and USD 0.048")
+        request_id = getattr(job, "request_id", None)
+        if not isinstance(request_id, str) or not request_id:
+            raise FinalAdmissionError("executor job identity is required")
+        row = self.executor.inspect(request_id)
+        if row is None:
+            row = self.executor.prepare_intent(job)
+        if row.get("status") in {"PREPARED", "INTENT"}:
+            claim = self.ledger.reserve(
+                request_id, self.episode_id, ENDPOINT, MAX_USD,
+                settlement_mode="FAL_READBACK_V2", auth_scope=row["settlement_binding"]["auth_scope"],
+                provider_request_id="UNASSIGNED", authority_mode="TEST",
+            )
+            if (claim.get("state") != "RESERVED" or claim.get("provider") != ENDPOINT
+                    or claim.get("reserved_usd") != "0.048000"):
+                raise FinalAdmissionError("standing budget claim does not bind canary")
+            marker = {"schema": 1, "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER",
+                      "receipt_sha256": approved["receipt_sha256"], "request_id": request_id,
+                      "endpoint": ENDPOINT, "reserved_usd": MAX_USD}
+            prior = row.get("final_admission_marker")
+            if prior is not None and prior != marker:
+                raise FinalAdmissionError("final admission marker is immutable")
+            if prior is None:
+                self.executor._change(request_id, final_admission_marker=marker)
+        elif row.get("status") not in {"SUBMITTED", "SUBMITTING", "COMPLETE"}:
+            raise FinalAdmissionError("executor intent cannot resume")
+        # Executor recovery is GET/download-only after its durable provider ID;
+        # this composition has no direct provider POST path.
+        return await self.executor.run(
+            job, self.provider,
+            settlement_checkpoint=lambda local_id, remote_id: self.ledger.bind_provider_request_id(local_id, remote_id),
+            submit_prepared=True,
+        )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """GET-only default CLI; --execute needs a configured external consent root."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Jacó FLUX 3 final-admission preflight")
+    parser.add_argument("--execute", action="store_true", help="attempt configured production execution")
+    parser.add_argument("--packet")
+    parser.add_argument("--review")
+    parser.add_argument("--authorization")
+    parser.add_argument("--quote")
+    args = parser.parse_args(argv)
+    if args.execute:
+        raise FinalAdmissionError("production execution requires configured external consent root")
+    if all((args.packet, args.review, args.authorization, args.quote)):
+        print(json.dumps(validate_final_admission(packet=args.packet, review=args.review,
+                                                  authorization=args.authorization, quote=args.quote), sort_keys=True))
+    else:
+        print(json.dumps({"mode": "GET_ONLY_PREFLIGHT", "execute": False, "post_count": 0}, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

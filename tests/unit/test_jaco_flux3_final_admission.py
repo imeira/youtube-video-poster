@@ -75,3 +75,63 @@ def test_final_admission_fails_closed_before_reservation_on_changed_price_or_pay
         _write(paths["packet"], packet)
     with pytest.raises(FinalAdmissionError):
         validate_final_admission(**paths)
+
+
+@pytest.mark.asyncio
+async def test_final_receipt_uses_existing_executor_ledger_kernel_and_recovers_without_second_submit(tmp_path):
+    """The admission receipt is consumed by prepare/reserve/run, not a side file."""
+    from decimal import Decimal
+
+    from PIL import Image
+
+    from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
+    from src.hybrid.execution import Executor, Job, ProviderResult
+    from src.hybrid.jaco_flux3_final_admission import (
+        FinalAdmissionKernel,
+        validate_final_admission,
+    )
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    paths = _evidence(tmp_path)
+    reference = tmp_path / "reference.png"
+    Image.new("RGB", (8, 8), "white").save(reference)
+    asset = FrozenAsset.approve(reference, "test", "TEST")
+    sheet = tmp_path / "sheet.png"
+    contact_sheet((asset,), sheet)
+    manifest = Manifest.freeze((asset,), FrozenAsset.approve(sheet, "test", "TEST"), "test", "TEST")
+    job = Job("JACO_GEN28_CANONICAL_001", "first", "TEST", "blackforestlabs/flux-3/text-to-image",
+              {"prompt": "A canonical Genesis image", "aspect_ratio": "4:3", "resolution": "1k",
+               "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2},
+              manifest, Decimal("0.048"))
+    ledger = StandingBudgetLedger(tmp_path / "ledger.sqlite3", policy_sha256="a" * 64,
+                                  episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
+    executor = Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal("10")), standing_ledger=ledger)
+
+    class Provider:
+        mode = "TEST"
+        submits = 0
+        recovers = 0
+
+        async def submit(self, submitted, request_id, checkpoint):
+            self.submits += 1
+            checkpoint(provider_id="fal-test-remote-1")
+            raise TimeoutError("interrupted after durable provider id")
+
+        async def recover(self, submitted, request_id, provider_id, partial, checkpoint):
+            self.recovers += 1
+            assert provider_id == "fal-test-remote-1"
+            output = tmp_path / "recovered.png"
+            Image.new("RGB", (8, 8), "white").save(output)
+            return ProviderResult(output, Decimal("0.048"))
+
+    kernel = FinalAdmissionKernel(executor=executor, ledger=ledger, episode_id="JACO_GENESIS28", provider=Provider())
+    receipt = validate_final_admission(**paths)
+    with pytest.raises(TimeoutError):
+        await kernel.execute(job, receipt)
+    completed = await kernel.execute(job, receipt)
+
+    assert completed["status"] == "COMPLETE"
+    assert kernel.provider.submits == 1
+    assert kernel.provider.recovers == 1
+    assert ledger.claim(job.request_id)["state"] == "RESERVED"

@@ -371,6 +371,24 @@ class Executor:
             raise PermissionError(
                 "prepared FAL submit ledger reservation value mismatch"
             )
+        if job.endpoint == "blackforestlabs/flux-3/text-to-image":
+            marker = row.get("final_admission_marker")
+            if (
+                not isinstance(marker, dict)
+                or marker != {
+                    "schema": 1,
+                    "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER",
+                    "receipt_sha256": marker.get("receipt_sha256"),
+                    "request_id": job.request_id,
+                    "endpoint": job.endpoint,
+                    "reserved_usd": "0.048",
+                }
+                or not isinstance(marker["receipt_sha256"], str)
+                or len(marker["receipt_sha256"]) != 64
+            ):
+                raise PermissionError(
+                    "FLUX 3 canary submit requires durable final-admission marker"
+                )
         authenticated = self._fresh_authenticated_budget_admission(job, row)
         if authenticated is None:
             # Legacy TEST ledger paths remain mechanically useful, but their
