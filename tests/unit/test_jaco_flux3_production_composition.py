@@ -233,6 +233,31 @@ def test_schema_valid_multi_image_result_is_quarantined_without_promotion(tmp_pa
     assert not (tmp_path / "receipt.png").exists()
 
 
+def test_recovery_status_get_uses_key_auth_on_persisted_queue_url(tmp_path, monkeypatch):
+    """Recovery retains the exact POST-returned URL and authenticates its sole GET."""
+    openapi = {"info": {"x-fal-metadata": {"endpointId": "blackforestlabs/flux-3/text-to-image"}}, "paths": {}}
+    provider = _FixedFalProvider(tmp_path / "receipt.json", openapi, credential="TEST_NONSECRET_KEY")
+    persisted_url = "https://queue.fal.run/blackforestlabs/flux-3/requests/remote/status"
+    recovery = tmp_path / "provider-receipt.recovery.json"
+    recovery.write_text(json.dumps({
+        "schema": 1, "provider_request_id": "remote", "status_url": persisted_url,
+        "response_url": "https://queue.fal.run/blackforestlabs/flux-3/requests/remote",
+    }), encoding="utf-8")
+    seen = []
+
+    def fake_open(request):
+        seen.append(request)
+        return b'{"status":"IN_PROGRESS","request_id":"remote"}'
+
+    monkeypatch.setattr(provider, "_open", fake_open)
+    with pytest.raises(ProductionCompositionError, match="request is pending"):
+        asyncio.run(provider.recover(None, "local", "remote", str(recovery), lambda **_: None))
+    assert len(seen) == 1
+    assert seen[0].get_method() == "GET"
+    assert seen[0].full_url == persisted_url
+    assert seen[0].get_header("Authorization") == "Key TEST_NONSECRET_KEY"
+
+
 def test_test_only_cli_composition_reviews_reserves_submits_and_fresh_process_recovers(tmp_path):
     """The explicit local TEST domain cannot activate or route the LIVE factory."""
     root = tmp_path / "protected-test-policy"

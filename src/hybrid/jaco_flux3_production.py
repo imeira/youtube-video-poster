@@ -53,6 +53,13 @@ _CANONICAL_STATE_DB = Path("C:/Users/meira/AppData/Local/hermes/state.db")
 
 class ProductionCompositionError(PermissionError): pass
 
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Recovery evidence must come from the exact checkpointed URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
 def _canon(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
                       default=lambda item: str(item) if isinstance(item, Decimal) else (_ for _ in ()).throw(TypeError())).encode()
@@ -248,7 +255,8 @@ class _FixedFalProvider:
 
     @staticmethod
     def _open(request):
-        with urllib.request.urlopen(request, timeout=30) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        with opener.open(request, timeout=30) as response:
             return response.read()
 
     @staticmethod
@@ -315,7 +323,10 @@ class _FixedFalProvider:
             raise ProductionCompositionError("recovery URLs are invalid")
         _fixed_https_url(status_url, hosts=frozenset({_FAL_QUEUE_HOST}))
         _fixed_https_url(result_url, hosts=frozenset({_FAL_QUEUE_HOST}))
-        status = json.loads((await asyncio.to_thread(self._open, urllib.request.Request(status_url, method="GET"))).decode())
+        status_request = urllib.request.Request(
+            status_url, method="GET", headers={"Authorization": f"Key {self.credential}"},
+        )
+        status = json.loads((await asyncio.to_thread(self._open, status_request)).decode())
         try:
             status_value = self._queue_status(status, remote)
         except ProductionCompositionError:
@@ -323,7 +334,10 @@ class _FixedFalProvider:
             raise
         if status_value != "COMPLETED":
             raise ProductionCompositionError("FAL request is pending; preserve checkpoint and use only status/result GET recovery")
-        result = json.loads((await asyncio.to_thread(self._open, urllib.request.Request(result_url, method="GET"))).decode())
+        result_request = urllib.request.Request(
+            result_url, method="GET", headers={"Authorization": f"Key {self.credential}"},
+        )
+        result = json.loads((await asyncio.to_thread(self._open, result_request)).decode())
         images = result.get("images") if isinstance(result, dict) else None
         if not isinstance(images, list) or len(images) != 1:
             self._unexpected_output(remote, images)
