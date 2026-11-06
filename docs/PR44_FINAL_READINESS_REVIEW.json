@@ -1,52 +1,32 @@
 {
-  "schema": "PR44_FINAL_INDEPENDENT_REVIEW/2",
-  "verdict": "PASS_LOCAL_VERIFICATION_CI_PENDING",
-  "reviewed_commit": "684981188649da891bfb6074c202385e409f608e",
-  "reviewed_tree": "9efafb5fde26c963ef4f7a9a0200e837e620c946",
-  "reviewed_commit_diff_sha256": "d1919940a21148da315f75697dae91c710d09fd7fed3266600cdcaa866400fb8",
-  "reviewed_git_inventory_sha256": "41b618c0f1550252c06f8e36a41a3cc6d7100f6c2661c98fadb38782a9c7ee12",
-  "scope": "all PR44 code, tests, fixture, and evidence files in reviewed_commit",
+  "schema": "PR44_CI_REMEDIATION_REVIEW/1",
+  "verdict": "PASS_LOCAL_TEST_FIX_CI_PENDING",
+  "reviewed_commit": "cbf14b7795e437a958049a269755cce15e246dce",
+  "reviewed_tree": "b33f2d0da0df2b24a3f7cbb8b5c7bbf1aa983b3d",
+  "base_head": "796a7f3044a3ecf575c768d6d9f39df7f3678fb3",
+  "base_to_reviewed_diff_sha256": "f6ef6e73547106b03d95932d79f978ac6d02a4c3fb6a59556d254e4accfbe268",
+  "reviewed_git_inventory_sha256": "2aa5964d15353ceb1c6e16885d52726e99a9b1ed39218b96dd1b62e7ac568f9a",
+  "scope": "TEST_ONLY hermetic fixture remediation for the four CI failures on base_head",
+  "changes": {
+    "fal_credential_tests": "Replace .env filenames with test-fal-credentials.fixture and monkeypatch only the default fixture-path constant. Values are non-secret test strings.",
+    "fresh_review_tests": "Construct complete TEST_ONLY policy, consent SQLite database, source-evidence hashes, financial record, and final-admission binding under tmp_path. The real mandate validator and real fresh_review execute; only HTTP boundaries are faked.",
+    "subprocess_contract": "A fresh interpreter runs actual fresh_review with the complete closed TEST_ONLY contract and external HTTP fakes."
+  },
   "local_verification": {
-    "focused_pr44_pytest": "49 passed in 11.20s",
-    "focused_fal_pytest": "38 passed in 13.12s",
-    "ruff": "PASS",
-    "git_diff_check": "PASS",
-    "canonical_mandate_readback": "PASS",
-    "production_execute_diagnostic": "PASS_RECONCILED reaches NETWORK_BLOCKED_BEFORE_TRANSPORT with zero claims and no provider receipt in a controlled production-composition test"
+    "focused_exact_offline_wrapper": "22 passed in 8.39s",
+    "related_exact_offline_wrapper": "1316 passed, 2 skipped, 1 deselected in 1266.73s",
+    "ruff_0_17_3": "PASS",
+    "git_diff_check": "PASS"
   },
-  "canonical_budget_readback": {
-    "status": "PASS_RECONCILED",
-    "ledger_path": "C:/HermesStudio/production/jaco-flux3/ledger/standing-budget.sqlite3",
-    "available_usd": "10.000000",
-    "count_records": 0,
-    "count_paid_records": 0,
-    "count_ambiguous_or_unsettled_records": 0,
-    "policy_sha256": "916e8230db47406db96cbe774b9332c00ed24cf156c66d4d91d11a213b64f50d",
-    "bootstrap_receipt_sha256": "46c6c758abd57e055e3a23ee7d2cdb7e50401d842d5e07c531dd3191e57ea613",
-    "inventory_sha256": "61c06e75e6539909ade0e4d626f7e0d396c4b92318210d493f6ae9ca46773828"
-  },
-  "deployed_policy_inventory": {
-    "final_admission_authorization": "8d86c4b7a00954d843ed4516ea422705f0bc92b53781233208e9f26f5b1ed96d",
-    "financial_record": "916e8230db47406db96cbe774b9332c00ed24cf156c66d4d91d11a213b64f50d",
-    "parent_provisioned_policy": "bdf95145506c7fb588e621f83bcdc40a30e353e798682504d592206f49a2d686",
-    "production_composition": "ef658882a349b06ef82a95815093c58a79137a167ba161436807cef299d6c060",
-    "provenance": "c6c696bfb71dd840e41c067390e6cbdd83eb70fc4864305e653c0c9f7ee608a4",
-    "user_mandate": "a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170"
-  },
-  "authority_limits": {
-    "scope": "EVALUATION_GENERATION_ONLY",
-    "release_authorization": "NOT_AUTHORIZED",
-    "license_status": "EVALUATION_ONLY_CONDITIONALLY_SUPPORTABLE",
-    "call_limit": 1,
-    "maximum_usd": "0.048",
-    "budget_cap_usd": "10.00"
-  },
-  "dispatch": {
-    "ci": "PENDING_FOR_reviewed_commit",
-    "catalog_refresh": "NOT_PERFORMED_WHILE_CI_PENDING",
+  "production_boundary": {
+    "production_root": "UNCHANGED",
+    "production_secrets_or_private_history_read": false,
     "real_reservation": "NOT_PERFORMED",
     "real_provider_post": "NOT_PERFORMED",
-    "publish": "NOT_AUTHORIZED",
-    "merge": "NOT_AUTHORIZED_UNTIL_PARENT_CI_READBACK"
+    "production_gate": "NOT_CLAIMED_PASS; CI is pending for the remediated head"
+  },
+  "dispatch": {
+    "ci": "PENDING_FOR_REMEDIATED_HEAD",
+    "merge": "NOT_AUTHORIZED_UNTIL_CI_READBACK"
   }
 }
