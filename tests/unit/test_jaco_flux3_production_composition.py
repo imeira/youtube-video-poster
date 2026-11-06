@@ -6,6 +6,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,85 @@ from src.hybrid.jaco_flux3_production import (
     _price_snapshot,
     _queue_route,
 )
+
+
+def _write_hermetic_production_authority(tmp_path, monkeypatch, *, assistant_role="assistant"):
+    """Install complete TEST-only authority bytes; never read operator state."""
+    import src.hybrid.jaco_flux3_production as production
+
+    root = tmp_path / "TEST_ONLY_NONSECRET_PRODUCTION_AUTHORITY"
+    source = tmp_path / "TEST_ONLY_NONSECRET_SOURCE_EVIDENCE"
+    root.mkdir()
+    source.mkdir()
+    session_id = "local-712d007e4f3efba4d8c6cfc52f947e69023fed6f445a54206a6c3ede9b317fbb"
+    assistant_content = "TEST ONLY: proposed bounded local evaluation."
+    user_content = "TEST ONLY: I authorize one bounded local evaluation."
+    finance = {
+        "schema": "jaco-factory-financial-reconciliation/1",
+        "request_hash": production.REQUEST_ID,
+        "currency": "USD",
+        "total_episode_cap": "10.00",
+        "authorizes_generation": False,
+    }
+    (root / "financial-record.json").write_text(json.dumps(finance), encoding="utf-8")
+    (source / "financial-record.json").write_text(json.dumps(finance), encoding="utf-8")
+    contract = source / "official-contract-review"
+    contract.mkdir()
+    (contract / "official-contract-review.md").write_text("TEST ONLY contract review", encoding="utf-8")
+    (source / "packet.json").write_text("TEST ONLY packet", encoding="utf-8")
+    preflight = source / "get-only-current"
+    preflight.mkdir()
+    (preflight / "preflight.json").write_text("TEST ONLY preflight", encoding="utf-8")
+    mandate = {
+        "schema": "JACO_USER_EXECUTION_MANDATE/2", "request_id": production.REQUEST_ID,
+        "revision": "818556d97edb648f", "endpoint": production.ENDPOINT,
+        "payload_sha256": sha256(production._canon(production._PAYLOAD)).hexdigest(),
+        "maximum_usd": production.MAX_USD, "call_limit": 1, "budget_cap_usd": "10.00",
+        "scope": "EVALUATION_GENERATION_ONLY", "release_authorization": "NOT_AUTHORIZED",
+        "license_status": "EVALUATION_ONLY_CONDITIONALLY_SUPPORTABLE",
+    }
+    (root / "user-mandate.json").write_text(json.dumps(mandate), encoding="utf-8")
+    provenance = {
+        "schema": "JACO_FLUX3_CANONICAL_TRANSCRIPT_PROVENANCE/1", "session_id": session_id,
+        "user_message_id": 144800, "adjacent_assistant_message_id": 144799,
+        "user_message_sha256": sha256(user_content.encode()).hexdigest(),
+        "assistant_message_sha256": sha256(assistant_content.encode()).hexdigest(),
+        "financial_record_sha256": production._sha_path(source / "financial-record.json"),
+        "review_source_sha256": production._sha_path(contract / "official-contract-review.md"),
+    }
+    (root / "provenance.json").write_text(json.dumps(provenance), encoding="utf-8")
+    policy = {
+        "schema": "JACO_FLUX3_LOCAL_OPERATOR_POLICY/1",
+        "trust_derivation": "CANONICAL_USER_TRANSCRIPT_PLUS_TRUSTED_LOCAL_OPERATOR",
+        "mandate_sha256": production._sha_path(root / "user-mandate.json"),
+        "provenance_sha256": production._sha_path(root / "provenance.json"),
+        "source_evidence": {
+            "financial_record": production._sha_path(source / "financial-record.json"),
+            "official_contract_review": production._sha_path(contract / "official-contract-review.md"),
+            "packet": production._sha_path(source / "packet.json"),
+            "get_only_preflight": production._sha_path(preflight / "preflight.json"),
+        },
+    }
+    (root / "parent-provisioned-policy.json").write_text(json.dumps(policy), encoding="utf-8")
+    (root / "production-composition.json").write_text(json.dumps({
+        "schema": "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION/1", "financial_record": "financial-record.json",
+    }), encoding="utf-8")
+    (root / "final-admission-authorization.json").write_text(json.dumps({
+        "schema": 1, "kind": "JACO_FLUX3_FINAL_ADMISSION_AUTHORIZATION", "version": "TEST_ONLY",
+        "request_id": production.REQUEST_ID, "endpoint": production.ENDPOINT,
+        "payload_sha256": sha256(production._canon(production._PAYLOAD)).hexdigest(),
+        "maximum_usd": production.MAX_USD, "call_limit": 1,
+        "user_authorization_evidence": "USER_AUTHORIZED_LOCAL_QA_AND_ONE_ALTERNATIVE_IMAGE_EVAL_WITHIN_USD10",
+    }), encoding="utf-8")
+    state = tmp_path / "TEST_ONLY_NONSECRET_canonical_state.sqlite3"
+    with sqlite3.connect(state) as database:
+        database.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
+        database.execute("INSERT INTO messages VALUES (?, ?, ?, ?)", (144799, session_id, assistant_role, assistant_content))
+        database.execute("INSERT INTO messages VALUES (?, ?, ?, ?)", (144800, session_id, "user", user_content))
+    monkeypatch.setattr(production, "_PROVISIONED_ROOT", root)
+    monkeypatch.setattr(production, "_SOURCE_EVIDENCE_ROOT", source)
+    monkeypatch.setattr(production, "_CANONICAL_STATE_DB", state)
+    return root
 
 
 def test_mandate_loader_requires_pinned_root_and_never_claims_license_verification(tmp_path):
@@ -346,15 +426,14 @@ async def test_execute_accepts_reconciled_bootstrap_and_reaches_pretransport_bou
 
 @pytest.mark.asyncio
 async def test_actual_fresh_review_is_awaitable_inside_execute_loop_with_only_http_boundaries_faked(tmp_path, monkeypatch):
-    """The real fresh-review method cannot nest asyncio.run under execute()."""
+    """Real mandate validation and review run against explicit TEST-only authority."""
+    import src.hybrid.fal_get_only_preflight as fal_preflight
     import src.hybrid.jaco_flux3_production as production
 
-    source_root = production._PROVISIONED_ROOT
-    root = tmp_path / "provisioned-root"
-    root.mkdir()
-    for name in ("production-composition.json", "parent-provisioned-policy.json", "user-mandate.json", "provenance.json", "financial-record-source.json"):
-        (root / name).write_bytes((source_root / name).read_bytes())
-    monkeypatch.setattr(production, "_PROVISIONED_ROOT", root)
+    root = _write_hermetic_production_authority(tmp_path, monkeypatch)
+    credential_fixture = tmp_path / "test-fal-credentials.fixture"
+    credential_fixture.write_text("FAL_KEY=test-only-fresh-review-key\n", encoding="utf-8")
+    monkeypatch.setattr(fal_preflight, "DEFAULT_DOTENV_PATH", credential_fixture)
     factory = production.FixedFalProductionFactory(root)
 
     class Response:
@@ -396,24 +475,67 @@ async def test_actual_fresh_review_is_awaitable_inside_execute_loop_with_only_ht
     assert quote == run / "quote.json"
 
 
-def test_validate_mandate_rejects_wrong_canonical_message_role_before_any_network(tmp_path, monkeypatch):
-    """Matching provenance hashes alone cannot authorize a swapped transcript role."""
-    import sqlite3
+def test_actual_fresh_review_subprocess_accepts_only_complete_test_contract(tmp_path, monkeypatch):
+    """A fresh interpreter validates the closed fixture contract before review."""
+    root = _write_hermetic_production_authority(tmp_path, monkeypatch)
+    credential_fixture = tmp_path / "test-fal-credentials.fixture"
+    credential_fixture.write_text("FAL_KEY=test-only-subprocess-key\n", encoding="utf-8")
+    script = tmp_path / "run_test_only_fresh_review.py"
+    script.write_text(
+        """import asyncio, json, sys, types
+from pathlib import Path
+import src.hybrid.fal_get_only_preflight as fal
+import src.hybrid.jaco_flux3_production as production
+root, source, state, credential = map(Path, sys.argv[1:])
+production._PROVISIONED_ROOT = root
+production._SOURCE_EVIDENCE_ROOT = source
+production._CANONICAL_STATE_DB = state
+fal.DEFAULT_DOTENV_PATH = credential
+class Response:
+    def read(self): return json.dumps({\"info\": {\"x-fal-metadata\": {\"endpointId\": production.ENDPOINT}}, \"paths\": {}}).encode()
+    def __enter__(self): return self
+    def __exit__(self, *_): return False
+class Content:
+    async def read(self, _limit): return json.dumps({\"prices\": [{\"endpoint_id\": production.ENDPOINT, \"unit_price\": 0.048, \"unit\": \"image\", \"currency\": \"USD\"}], \"next_cursor\": None, \"has_more\": False}).encode()
+class AioResponse:
+    status = 200
+    content = Content()
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_): return False
+class Session:
+    def __init__(self, **_): pass
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_): return False
+    def get(self, url, **_):
+        assert url == production._FAL_PRICE_API_URL
+        return AioResponse()
+sys.modules[\"aiohttp\"] = types.SimpleNamespace(ClientTimeout=lambda **_: object(), ClientSession=Session, DummyCookieJar=lambda: object())
+production.urllib.request.urlopen = lambda request, timeout: Response()
+review, run, quote = asyncio.run(production.FixedFalProductionFactory(root).fresh_review())
+assert review[\"packet_sha256\"] == production._sha_path(run / \"packet.json\")
+assert quote == run / \"quote.json\"
+print(json.dumps({\"review\": review[\"output_sha256\"], \"run\": str(run)}))
+""",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script), str(root), str(tmp_path / "TEST_ONLY_NONSECRET_SOURCE_EVIDENCE"),
+         str(tmp_path / "TEST_ONLY_NONSECRET_canonical_state.sqlite3"), str(credential_fixture)],
+        cwd=Path.cwd(), capture_output=True, text=True, timeout=30, check=True,
+    )
+    result = json.loads(completed.stdout)
+    assert len(result["review"]) == 64
+    assert "TEST_ONLY_NONSECRET_PRODUCTION_AUTHORITY" in result["run"]
 
+
+def test_validate_mandate_rejects_wrong_canonical_message_role_before_any_network(tmp_path, monkeypatch):
+    """Matching hashes cannot authorize a swapped transcript role."""
     import src.hybrid.jaco_flux3_production as production
 
-    state = tmp_path / "state.db"
-    connection = sqlite3.connect(state)
-    connection.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
-    connection.execute("INSERT INTO messages VALUES (?, ?, ?, ?)", (144799,
-        "local-712d007e4f3efba4d8c6cfc52f947e69023fed6f445a54206a6c3ede9b317fbb", "user", "approved"))
-    connection.execute("INSERT INTO messages VALUES (?, ?, ?, ?)", (144800,
-        "local-712d007e4f3efba4d8c6cfc52f947e69023fed6f445a54206a6c3ede9b317fbb", "user", "autorizo"))
-    connection.commit(); connection.close()
-    monkeypatch.setattr(production, "_CANONICAL_STATE_DB", state)
+    root = _write_hermetic_production_authority(tmp_path, monkeypatch, assistant_role="user")
 
     with pytest.raises(production.ProductionCompositionError, match="canonical transcript"):
-        production._validate_mandate(production._PROVISIONED_ROOT)
+        production._validate_mandate(root)
 
 
 @pytest.mark.parametrize("tampered", ["packet.json", "review-request.json", "quote.json", "openapi.json", "financial-record.json"])

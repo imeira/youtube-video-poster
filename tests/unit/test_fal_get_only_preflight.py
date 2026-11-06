@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+import src.hybrid.fal_get_only_preflight as fal_preflight
 from src.hybrid.fal_get_only_preflight import (
     FalCredentialResolutionError,
     _price_snapshot,
@@ -12,23 +13,25 @@ from src.hybrid.fal_get_only_preflight import (
 )
 
 
-def test_resolver_reads_default_dotenv_privately_and_prefers_existing_fal_key(tmp_path):
-    dotenv = tmp_path / ".env"
-    dotenv.write_text("FAL_API_KEY=secondary\nFAL_KEY=primary\n", encoding="utf-8")
+def test_resolver_reads_test_default_fixture_privately_and_prefers_existing_fal_key(tmp_path, monkeypatch):
+    dotenv = tmp_path / "test-fal-credentials.fixture"
+    dotenv.write_text("FAL_API_KEY=test-secondary\nFAL_KEY=test-primary\n", encoding="utf-8")
+    monkeypatch.setattr(fal_preflight, "DEFAULT_DOTENV_PATH", dotenv)
 
-    credential, presence = resolve_default_fal_credential(dotenv_path=dotenv)
+    credential, presence = resolve_default_fal_credential()
 
-    assert credential == "primary"
+    assert credential == "test-primary"
     assert presence == {"fal_key_present": True, "fal_api_key_present": True}
 
 
 def test_resolver_reports_actual_dotenv_absence_without_environment_fallback(tmp_path, monkeypatch):
-    dotenv = tmp_path / ".env"
+    dotenv = tmp_path / "test-fal-credentials.fixture"
     dotenv.write_text("OTHER_KEY=configured\n", encoding="utf-8")
+    monkeypatch.setattr(fal_preflight, "DEFAULT_DOTENV_PATH", dotenv)
     monkeypatch.setenv("FAL_KEY", "must-not-be-inherited")
 
     with pytest.raises(FalCredentialResolutionError, match="default dotenv has no supported FAL credential") as raised:
-        resolve_default_fal_credential(dotenv_path=dotenv)
+        resolve_default_fal_credential()
 
     assert raised.value.presence == {"fal_key_present": False, "fal_api_key_present": False}
     assert "must-not-be-inherited" not in str(raised.value)
