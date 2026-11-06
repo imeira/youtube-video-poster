@@ -11,6 +11,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
+from typing import ClassVar
 
 from src.hybrid.execution import Executor
 from src.hybrid.fal_billing import (
@@ -27,6 +28,169 @@ class SettlementDenied(ValueError):
 
 _MAX_FRESH_SECONDS = 300
 _HASH = re.compile(r"[a-f0-9]{64}")
+
+
+class JacoFinalAdmissionContractVerifier:
+    """Verify the one deployed Jacó final-admission settlement contract.
+
+    This is deliberately a typed, composition-created verifier rather than a
+    scope-prefix exception.  Its root paths are protected composition inputs;
+    reconciliation callers still supply only a local request ID and time window.
+    """
+
+    _MANDATE_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "schema", "request_id", "revision", "endpoint", "payload_sha256",
+        "maximum_usd", "call_limit", "budget_cap_usd", "scope",
+        "release_authorization", "license_status",
+    })
+    _POLICY_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "schema", "trust_derivation", "mandate_sha256", "provenance_sha256",
+        "source_evidence",
+    })
+    _AUTHORIZATION_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "schema", "kind", "version", "request_id", "endpoint",
+        "payload_sha256", "maximum_usd", "call_limit",
+        "user_authorization_evidence",
+    })
+    _FINAL_RECEIPT_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "schema", "kind", "request_id", "endpoint", "reserved_usd",
+        "call_limit", "packet_sha256", "review_sha256", "authorization_sha256",
+        "quote_sha256", "authorization_version", "validated_at_epoch",
+        "receipt_sha256",
+    })
+    _MARKER_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "schema", "kind", "receipt_path", "receipt_sha256", "request_id",
+        "endpoint", "payload_sha256", "input_kind", "auth_scope",
+        "reserved_usd", "trust_identity",
+    })
+
+    def __init__(self, *, root, execution_root) -> None:
+        from pathlib import Path
+
+        self.root = Path(root).resolve()
+        self.execution_root = Path(execution_root).resolve()
+
+    @staticmethod
+    def _document(path, label: str) -> tuple[dict, str]:
+        from pathlib import Path
+
+        candidate = Path(path)
+        try:
+            raw = candidate.read_bytes()
+            value = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SettlementDenied(f"final-admission {label} is unreadable") from exc
+        if not isinstance(value, dict):
+            raise SettlementDenied(f"final-admission {label} must be an object")
+        return value, sha256(raw).hexdigest()
+
+    def _policy_contract(self) -> tuple[dict, str, dict, str, dict]:
+        policy, _ = self._document(self.root / "parent-provisioned-policy.json", "policy")
+        mandate, mandate_sha = self._document(self.root / "user-mandate.json", "consent")
+        authorization, authorization_sha = self._document(
+            self.root / "final-admission-authorization.json", "authorization"
+        )
+        if (
+            set(policy) != self._POLICY_FIELDS
+            or policy.get("schema") != "JACO_FLUX3_LOCAL_OPERATOR_POLICY/1"
+            or policy.get("trust_derivation")
+            != "CANONICAL_USER_TRANSCRIPT_PLUS_TRUSTED_LOCAL_OPERATOR"
+            or policy.get("mandate_sha256") != mandate_sha
+            or not isinstance(policy.get("provenance_sha256"), str)
+            or not _HASH.fullmatch(policy["provenance_sha256"])
+            or not isinstance(policy.get("source_evidence"), dict)
+            or set(policy["source_evidence"])
+            != {"financial_record", "official_contract_review", "packet", "get_only_preflight"}
+            or any(not isinstance(value, str) or not _HASH.fullmatch(value)
+                   for value in policy["source_evidence"].values())
+        ):
+            raise SettlementDenied("final-admission protected policy is invalid")
+        if (
+            set(mandate) != self._MANDATE_FIELDS
+            or mandate.get("schema") != "JACO_USER_EXECUTION_MANDATE/2"
+            or mandate.get("request_id") != "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9"
+            or mandate.get("endpoint") != "blackforestlabs/flux-3/text-to-image"
+            or not isinstance(mandate.get("payload_sha256"), str)
+            or not _HASH.fullmatch(mandate["payload_sha256"])
+            or mandate.get("maximum_usd") != "0.048" or mandate.get("call_limit") != 1
+            or mandate.get("budget_cap_usd") != "10.00"
+            or mandate.get("scope") != "EVALUATION_GENERATION_ONLY"
+            or mandate.get("release_authorization") != "NOT_AUTHORIZED"
+            or mandate.get("license_status") != "EVALUATION_ONLY_CONDITIONALLY_SUPPORTABLE"
+        ):
+            raise SettlementDenied("final-admission protected consent is invalid")
+        if (
+            set(authorization) != self._AUTHORIZATION_FIELDS
+            or authorization.get("schema") != 1
+            or authorization.get("kind") != "JACO_FLUX3_FINAL_ADMISSION_AUTHORIZATION"
+            or authorization.get("request_id") != mandate["request_id"]
+            or authorization.get("endpoint") != mandate["endpoint"]
+            or authorization.get("payload_sha256") != mandate["payload_sha256"]
+            or authorization.get("maximum_usd") != mandate["maximum_usd"]
+            or authorization.get("call_limit") != mandate["call_limit"]
+            or authorization.get("user_authorization_evidence")
+            != "USER_AUTHORIZED_LOCAL_QA_AND_ONE_ALTERNATIVE_IMAGE_EVAL_WITHIN_USD10"
+            or authorization.get("version") != f"mandate-provenance-v1-{mandate_sha[:12]}"
+        ):
+            raise SettlementDenied("final-admission authorization is invalid")
+        return mandate, mandate_sha, authorization, authorization_sha, policy
+
+    def verify(self, receipt: dict, binding: dict, claim: dict) -> None:
+        mandate, mandate_sha, authorization, authorization_sha, _policy = self._policy_contract()
+        final_receipt, _ = self._document(
+            self.execution_root / "final-admission-receipt.json", "receipt"
+        )
+        final_body = {key: value for key, value in final_receipt.items() if key != "receipt_sha256"}
+        if (
+            set(final_receipt) != self._FINAL_RECEIPT_FIELDS
+            or final_receipt.get("receipt_sha256") != _canonical_hash(final_body)
+            or final_receipt.get("schema") != 1
+            or final_receipt.get("kind") != "JACO_FLUX3_FINAL_ADMISSION"
+            or final_receipt.get("request_id") != mandate["request_id"]
+            or final_receipt.get("endpoint") != mandate["endpoint"]
+            or final_receipt.get("reserved_usd") != "0.048"
+            or final_receipt.get("call_limit") != 1
+            or final_receipt.get("authorization_sha256") != authorization_sha
+            or final_receipt.get("authorization_version") != authorization["version"]
+        ):
+            raise SettlementDenied("final-admission receipt is invalid")
+        scope = f"JACO_FLUX3_FINAL_ADMISSION:{mandate_sha}"
+        marker = receipt.get("final_admission_marker") if isinstance(receipt, dict) else None
+        if (
+            receipt.get("mode") != "LIVE" or receipt.get("request_id") != binding["local_request_id"]
+            or receipt.get("endpoint") != mandate["endpoint"]
+            or receipt.get("input_contract") != {
+                "schema": 1,
+                "input_kind": "TEXT_TO_IMAGE",
+                "payload_sha256": mandate["payload_sha256"],
+            }
+            or not isinstance(marker, dict) or set(marker) != self._MARKER_FIELDS
+            or marker.get("schema") != 2 or marker.get("kind") != "JACO_FLUX3_FINAL_ADMISSION_MARKER"
+            or marker.get("receipt_path") != str((self.execution_root / "final-admission-receipt.json").resolve())
+            or marker.get("receipt_sha256") != final_receipt["receipt_sha256"]
+            or marker.get("request_id") != binding["local_request_id"]
+            or marker.get("endpoint") != mandate["endpoint"]
+            or marker.get("payload_sha256") != mandate["payload_sha256"]
+            or marker.get("input_kind") != "TEXT_TO_IMAGE" or marker.get("auth_scope") != scope
+            or marker.get("reserved_usd") != "0.048"
+            or marker.get("trust_identity") != "FIXED_PRODUCTION_COMPOSITION"
+            or binding.get("auth_scope") != scope or binding.get("authority_mode") != "LIVE"
+            or claim.get("request_id") != binding["local_request_id"]
+            or claim.get("episode_id") != "JACO_GENESIS28"
+            or claim.get("provider") != mandate["endpoint"]
+            or claim.get("reserved_usd") != "0.048000" or claim.get("state") != "RESERVED"
+            or claim.get("actual_usd") is not None
+            or claim.get("settlement_mode") != "FAL_READBACK_V2"
+            or claim.get("auth_scope") != scope
+            or claim.get("provider_request_id") != binding["provider_request_id"]
+            or claim.get("authority_mode") != "LIVE"
+        ):
+            raise SettlementDenied("final-admission binding mismatch")
+
+    def scope(self) -> str:
+        """Return the single exact scope after reopening protected policy."""
+        _mandate, mandate_sha, _authorization, _authorization_sha, _policy = self._policy_contract()
+        return f"JACO_FLUX3_FINAL_ADMISSION:{mandate_sha}"
 
 
 def _canonical_hash(document: dict) -> str:
@@ -77,6 +241,7 @@ class FalLedgerSettlementService:
         clock: Callable[[], datetime] | None = None,
         max_fresh_seconds: int = _MAX_FRESH_SECONDS,
         coordinator=None,
+        jaco_final_admission_verifier: JacoFinalAdmissionContractVerifier | None = None,
     ) -> None:
         if (
             not isinstance(ledger, StandingBudgetLedger)
@@ -95,6 +260,12 @@ class FalLedgerSettlementService:
         self.consumer = consumer
         self.clock = clock or (lambda: datetime.now(UTC))
         self.max_fresh_seconds = max_fresh_seconds
+        if (
+            jaco_final_admission_verifier is not None
+            and not isinstance(jaco_final_admission_verifier, JacoFinalAdmissionContractVerifier)
+        ):
+            raise TypeError("Jaco final-admission verifier must be trusted composition")
+        self.jaco_final_admission_verifier = jaco_final_admission_verifier
         if coordinator is not None:
             from src.hybrid.billing_snapshot import BillingSnapshotCoordinator
             if not isinstance(coordinator, BillingSnapshotCoordinator):
@@ -143,10 +314,17 @@ class FalLedgerSettlementService:
         if receipt.get("mode") == "TEST":
             expected_scope = "TEST_LOCAL_ONLY"
         elif receipt.get("mode") == "LIVE":
-            authorization = receipt.get("authorization")
-            if not isinstance(authorization, dict) or authorization.get("request_id") != local_request_id:
-                raise SettlementDenied("LIVE executor receipt authorization binding is missing")
-            expected_scope = f"LIVE_AUTHORIZATION_REQUEST:{local_request_id}"
+            jaco_scope = (
+                self.jaco_final_admission_verifier.scope()
+                if self.jaco_final_admission_verifier is not None else None
+            )
+            if binding["auth_scope"] == jaco_scope:
+                expected_scope = jaco_scope
+            else:
+                authorization = receipt.get("authorization")
+                if not isinstance(authorization, dict) or authorization.get("request_id") != local_request_id:
+                    raise SettlementDenied("LIVE executor receipt authorization binding is missing")
+                expected_scope = f"LIVE_AUTHORIZATION_REQUEST:{local_request_id}"
         else:
             raise SettlementDenied("executor receipt mode is invalid")
         if binding["auth_scope"] != expected_scope or binding["authority_mode"] != receipt["mode"]:
@@ -187,6 +365,11 @@ class FalLedgerSettlementService:
                 "FAL_READBACK_V2", binding["auth_scope"],
                 binding["provider_request_id"], binding["authority_mode"]):
             raise SettlementDenied("standing-ledger settlement binding mismatch")
+        if (
+            self.jaco_final_admission_verifier is not None
+            and binding["auth_scope"] == self.jaco_final_admission_verifier.scope()
+        ):
+            self.jaco_final_admission_verifier.verify(receipt, binding, claim)
         transport_authority = getattr(self.consumer._transport, "authority", None)
         if transport_authority == "TEST_NOT_AUTHORITY":
             if self.ledger.binding.get("mode") != "TEST" or receipt["mode"] != "TEST":

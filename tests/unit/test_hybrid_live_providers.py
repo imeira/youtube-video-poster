@@ -96,6 +96,51 @@ async def test_fal_stages_exact_references_checkpoints_and_quarantines(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_fal_flux3_text_bootstrap_does_not_upload_a_non_reference_manifest_asset(tmp_path):
+    remote = tmp_path / "remote.png"
+    Image.new("RGB", (1024, 768), "orange").save(remote)
+    client = FalClient("https://signed.example/result")
+    provider = FalFluxProvider(tmp_path / "quarantine", client=client, downloader=Downloader(remote))
+    job = Job(
+        "JACO_GEN28_CANONICAL_001", "first", "LIVE", "blackforestlabs/flux-3/text-to-image",
+        {"prompt": "A canonical Genesis 28 image", "aspect_ratio": "4:3", "resolution": "1k",
+         "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2,
+         "image_size": {"width": 1024, "height": 768}},
+        live_manifest(tmp_path), Decimal("0.048"),
+    )
+
+    # The frozen manifest records provenance, not a source image. Bootstrap must
+    # not upload it or manufacture image_urls before independent QA exists.
+    staged = provider._stage(job)
+
+    assert staged == {"prompt": "A canonical Genesis 28 image", "aspect_ratio": "4:3", "resolution": "1k",
+                      "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2}
+    assert client.uploads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"prompt": "A canonical Genesis 28 image", "aspect_ratio": "16:9", "resolution": "1k", "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2},
+        {"prompt": "A canonical Genesis 28 image", "aspect_ratio": "4:3", "resolution": "1k", "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2, "num_images": 2},
+    ],
+)
+async def test_fal_flux3_canary_rejects_nonexact_payload_before_upload_or_submit(tmp_path, payload):
+    provider = FalFluxProvider(tmp_path / "quarantine", client=FalClient("https://signed.example/result"))
+    job = Job(
+        "JACO_GEN28_CANONICAL_001", "first", "LIVE", "blackforestlabs/flux-3/text-to-image",
+        {**payload, "image_size": {"width": 1024, "height": 768}}, live_manifest(tmp_path), Decimal("0.048"),
+    )
+
+    with pytest.raises(ValueError, match="exact FLUX 3 canary payload"):
+        provider._stage(job)
+
+    assert provider.client.uploads == []
+    assert provider.client.submits == 0
+
+
+@pytest.mark.asyncio
 async def test_fal_recovery_is_get_download_only(tmp_path):
     remote = tmp_path / "remote.png"
     Image.new("RGB", (64, 36), "orange").save(remote)

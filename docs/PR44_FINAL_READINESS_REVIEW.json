@@ -1,0 +1,32 @@
+{
+  "schema": "PR44_CI_REMEDIATION_REVIEW/1",
+  "verdict": "PASS_LOCAL_TEST_FIX_CI_PENDING",
+  "reviewed_commit": "cbf14b7795e437a958049a269755cce15e246dce",
+  "reviewed_tree": "b33f2d0da0df2b24a3f7cbb8b5c7bbf1aa983b3d",
+  "base_head": "796a7f3044a3ecf575c768d6d9f39df7f3678fb3",
+  "base_to_reviewed_diff_sha256": "f6ef6e73547106b03d95932d79f978ac6d02a4c3fb6a59556d254e4accfbe268",
+  "reviewed_git_inventory_sha256": "2aa5964d15353ceb1c6e16885d52726e99a9b1ed39218b96dd1b62e7ac568f9a",
+  "scope": "TEST_ONLY hermetic fixture remediation for the four CI failures on base_head",
+  "changes": {
+    "fal_credential_tests": "Replace .env filenames with test-fal-credentials.fixture and monkeypatch only the default fixture-path constant. Values are non-secret test strings.",
+    "fresh_review_tests": "Construct complete TEST_ONLY policy, consent SQLite database, source-evidence hashes, financial record, and final-admission binding under tmp_path. The real mandate validator and real fresh_review execute; only HTTP boundaries are faked.",
+    "subprocess_contract": "A fresh interpreter runs actual fresh_review with the complete closed TEST_ONLY contract and external HTTP fakes."
+  },
+  "local_verification": {
+    "focused_exact_offline_wrapper": "22 passed in 8.39s",
+    "related_exact_offline_wrapper": "1316 passed, 2 skipped, 1 deselected in 1266.73s",
+    "ruff_0_17_3": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "production_boundary": {
+    "production_root": "UNCHANGED",
+    "production_secrets_or_private_history_read": false,
+    "real_reservation": "NOT_PERFORMED",
+    "real_provider_post": "NOT_PERFORMED",
+    "production_gate": "NOT_CLAIMED_PASS; CI is pending for the remediated head"
+  },
+  "dispatch": {
+    "ci": "PENDING_FOR_REMEDIATED_HEAD",
+    "merge": "NOT_AUTHORIZED_UNTIL_CI_READBACK"
+  }
+}

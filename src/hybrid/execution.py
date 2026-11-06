@@ -5,6 +5,7 @@ stays reserved and requires reconciliation; it must never be blindly resubmitted
 """
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import time
@@ -42,13 +43,27 @@ class Job:
     mode: str
     endpoint: str
     payload: dict
-    manifest: Manifest
+    manifest: Manifest | None
     cost: Decimal
     predecessor: str = ""
+    input_kind: str = "IMAGE_EDIT"
 
     @property
     def request_id(self):
         return digest(asdict(self))
+
+    @property
+    def intent_input_sha256(self) -> str:
+        """Hash literal canonical payload bytes, never a stand-in reference."""
+        return hashlib.sha256(
+            json.dumps(
+                self.payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -117,6 +132,8 @@ class Executor:
         standing_ledger=None,
         _authenticated_budget_composition: dict | None = None,
         _authenticated_budget_bridge=None,
+        _jaco_final_admission_verifier=None,
+        _jaco_production_binding: dict | None = None,
     ):
         self.database = Path(database)
         self.database.parent.mkdir(parents=True, exist_ok=True)
@@ -126,6 +143,12 @@ class Executor:
         self.events = events
         self._authenticated_budget_composition = _authenticated_budget_composition
         self._authenticated_budget_bridge = _authenticated_budget_bridge
+        if _jaco_final_admission_verifier is not None and not callable(_jaco_final_admission_verifier):
+            raise TypeError("Jacó final admission verifier must be composition-owned callable")
+        self._jaco_final_admission_verifier = _jaco_final_admission_verifier
+        # Deliberately private, factory-installed binding.  This is not a
+        # general LIVE switch: only the fixed Jacó FLUX3 composition can use it.
+        self._jaco_production_binding = _jaco_production_binding
         if (_authenticated_budget_composition is None) != (
             _authenticated_budget_bridge is None
         ) or (
@@ -230,6 +253,27 @@ class Executor:
         if self._standing_ledger is not None and self._standing_ledger is not ledger:
             raise ValueError("executor standing ledger is immutable")
         self._standing_ledger = ledger
+
+    @staticmethod
+    def _validate_input_contract(job: Job) -> None:
+        """Keep reference-free and reference-bound jobs as disjoint contracts."""
+        if job.input_kind == "TEXT_TO_IMAGE":
+            if job.manifest is not None:
+                raise ValueError("TEXT_TO_IMAGE must not carry reference inputs")
+            if not isinstance(job.payload, dict) or not isinstance(
+                job.payload.get("prompt"), str
+            ) or not job.payload["prompt"].strip():
+                raise ValueError("TEXT_TO_IMAGE requires an explicit prompt payload")
+            forbidden = {"image_urls", "reference_image", "reference_images", "image_hash"}
+            if forbidden & set(job.payload):
+                raise ValueError("TEXT_TO_IMAGE must not carry reference inputs")
+            return
+        if job.input_kind == "IMAGE_EDIT":
+            if not isinstance(job.manifest, Manifest):
+                raise ValueError("IMAGE_EDIT requires a verified reference manifest")
+            job.manifest.verify(job.mode)
+            return
+        raise ValueError("closed input kind required")
 
     def _configured_authenticated_budget_binding(self, job: Job) -> dict | None:
         """Re-read the factory-pinned bridge receipt for this exact TEST job."""
@@ -343,6 +387,12 @@ class Executor:
             or binding.get("provider_request_id") != "UNASSIGNED"
         ):
             raise PermissionError("prepared FAL submit has no durable intent binding")
+        if row.get("input_contract") != {
+            "schema": 1,
+            "input_kind": job.input_kind,
+            "payload_sha256": job.intent_input_sha256,
+        }:
+            raise PermissionError("prepared FAL submit input contract changed")
         try:
             claim = ledger.claim(job.request_id)
         except Exception as exc:
@@ -371,8 +421,45 @@ class Executor:
             raise PermissionError(
                 "prepared FAL submit ledger reservation value mismatch"
             )
+        jaco_final_admission = False
+        if job.endpoint == "blackforestlabs/flux-3/text-to-image":
+            marker = row.get("final_admission_marker")
+            if (
+                not isinstance(marker, dict)
+                or marker != {
+                    "schema": 2,
+                    "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER",
+                    "receipt_path": marker.get("receipt_path"),
+                    "receipt_sha256": marker.get("receipt_sha256"),
+                    "request_id": job.request_id,
+                    "endpoint": job.endpoint,
+                    "payload_sha256": marker.get("payload_sha256"),
+                    "input_kind": marker.get("input_kind"),
+                    "auth_scope": marker.get("auth_scope"),
+                    "reserved_usd": "0.048",
+                    "trust_identity": marker.get("trust_identity"),
+                }
+                or not isinstance(marker["receipt_path"], str)
+                or not isinstance(marker["receipt_sha256"], str)
+                or len(marker["receipt_sha256"]) != 64
+                or not isinstance(marker["payload_sha256"], str)
+                or len(marker["payload_sha256"]) != 64
+                or marker["payload_sha256"] != job.intent_input_sha256
+                or marker["input_kind"] != "TEXT_TO_IMAGE"
+                or marker["auth_scope"] != binding["auth_scope"]
+                or not isinstance(marker["trust_identity"], str)
+                or self._jaco_final_admission_verifier is None
+            ):
+                raise PermissionError("FLUX 3 canary submit requires configured durable final-admission marker")
+            # The verifier belongs to the composition, reopens its immutable receipt,
+            # mandate and evidence root, and rejects a marker that is merely
+            # self-consistent caller JSON.
+            self._jaco_final_admission_verifier(job, marker, claim)
+            jaco_final_admission = True
         authenticated = self._fresh_authenticated_budget_admission(job, row)
         if authenticated is None:
+            if jaco_final_admission:
+                return
             # Legacy TEST ledger paths remain mechanically useful, but their
             # fixed local scope cannot be relabeled as bridge authority or LIVE.
             if job.mode != "TEST" or binding["auth_scope"] != "TEST_LOCAL_ONLY":
@@ -641,6 +728,7 @@ class Executor:
         reservation_cost = (
             job.cost if reservation_cost is None else money(reservation_cost)
         )
+        self._validate_input_contract(job)
         if auth_scope is None:
             if job.mode != "TEST":
                 raise PermissionError(
@@ -743,6 +831,11 @@ class Executor:
                     if billing_snapshot_owner
                     else None,
                     "authenticated_budget_admission": authenticated_budget_admission,
+                    "input_contract": {
+                        "schema": 1,
+                        "input_kind": job.input_kind,
+                        "payload_sha256": job.intent_input_sha256,
+                    },
                     "settlement_binding": {
                         "schema": 2,
                         "local_request_id": job.request_id,
@@ -757,7 +850,7 @@ class Executor:
                     "mode": job.mode,
                     "category": job.category,
                     "predecessor": job.predecessor,
-                    "manifest": job.manifest.checksum,
+                    "manifest": job.manifest.checksum if job.manifest is not None else None,
                     "endpoint": job.endpoint,
                     "status": "INTENT",
                     "charged": str(reservation_cost),
@@ -791,18 +884,28 @@ class Executor:
             raise ValueError(
                 "explicit scene, endpoint and positive maximum cost required"
             )
-        job.manifest.verify(job.mode)
+        self._validate_input_contract(job)
         authenticated_binding = self._configured_authenticated_budget_binding(job)
         if authenticated_binding is None:
-            if job.mode != "TEST":
+            jaco_live = (
+                job.mode == "LIVE"
+                and job.endpoint == "blackforestlabs/flux-3/text-to-image"
+                and isinstance(self._jaco_production_binding, dict)
+                and self._jaco_production_binding.get("kind") == "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION"
+            )
+            if job.mode != "TEST" and not jaco_live:
                 raise PermissionError(
                     "raw prepared intent cannot authorize LIVE admission"
                 )
-            if auth_scope not in {None, "TEST_LOCAL_ONLY"}:
+            expected_scope = (
+                self._jaco_production_binding["auth_scope"]
+                if jaco_live else "TEST_LOCAL_ONLY"
+            )
+            if auth_scope not in {None, expected_scope}:
                 raise PermissionError(
-                    "raw prepared intent cannot forge bridge authorization scope"
+                    "raw prepared intent cannot forge composition authorization scope"
                 )
-            auth_scope = "TEST_LOCAL_ONLY"
+            auth_scope = expected_scope
         else:
             required_scope = (
                 f"AUTHENTICATED_TEST_REQUEST:{authenticated_binding['request_id']}"
@@ -931,7 +1034,7 @@ class Executor:
                     ]
                 ),
             ):
-                job.manifest.verify(job.mode)
+                self._validate_input_contract(job)
                 existing = self.inspect(job.request_id)
                 if existing is None:
                     cache_key = job_content_key(job) if self.cas is not None else ""
