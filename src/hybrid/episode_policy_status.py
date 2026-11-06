@@ -98,6 +98,23 @@ class EpisodePolicyStatusProjection:
         if queue.get("status") == "RUNNING" or runner.get("state") in {"RUNNING", "UNKNOWN", "UNKNOWN_REQUIRES_RECONCILIATION"}:
             return "UNKNOWN_REQUIRES_RECONCILIATION"
         if queue.get("status") == "WAITING":
+            asset_name = {
+                "WAITING_HUMAN_THUMBNAIL": "thumbnail",
+                "WAITING_HUMAN_VIDEO": "video",
+            }.get(runner.get("state"))
+            if asset_name is None:
+                return "UNKNOWN_REQUIRES_RECONCILIATION"
+            qa, narrative, assets = (loaded[name][0] for name in ("qa", "narrative", "assets"))
+            ready_asset_states = {"DELIVERED_FOR_REVIEW", "READY_FOR_HUMAN_GATE"}
+            unavailable = {None, "", "NONE", "UNAVAILABLE", "MISSING"}
+            if (
+                assets.get(asset_name) not in ready_asset_states
+                or assets.get("identity") in unavailable
+                or assets.get("license") in unavailable
+                or narrative.get("final_approved") is not True
+                or qa.get("verdict") != "PROMOTED"
+            ):
+                return "BLOCKED_DELIVERY_READINESS"
             return "WAITING_HUMAN_GATE"
         if policy.get("mode") == "LIVE" and policy.get("external_trust") is not True:
             return "BLOCKED_QUALIFICATION"
@@ -165,3 +182,8 @@ class EpisodePolicyStatusProjection:
             return document
         except (OSError, ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
             return self._stale()
+
+    @classmethod
+    def inspect_snapshot(cls, path: Path | str) -> dict[str, Any]:
+        """Read a prepublished projection without treating it as configuration."""
+        return cls(path, path).inspect()

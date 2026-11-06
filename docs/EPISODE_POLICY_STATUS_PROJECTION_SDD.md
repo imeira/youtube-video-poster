@@ -15,14 +15,15 @@ The atomically published closed projection contains generation, episode ID, sour
 - `TEST_ELIGIBLE`
 - `WAITING_HUMAN_GATE`
 - `BLOCKED_POLICY`
+- `BLOCKED_DELIVERY_READINESS`
 - `BLOCKED_QUALIFICATION`
 - `BLOCKED_BILLING_READBACK`
 - `UNKNOWN_REQUIRES_RECONCILIATION`
 - `STALE`
 
-`RUNNING`, unknown, stale, conflicting, or malformed worker evidence is `UNKNOWN_REQUIRES_RECONCILIATION` or `STALE`, never an automatic retry and never a zero-cost result. A queue `WAITING` maps to `WAITING_HUMAN_GATE`; it cannot wake a gate. A LIVE policy without externally trusted qualification remains `BLOCKED_QUALIFICATION`; local billing evidence cannot change `live_dispatch`.
+`RUNNING`, unknown, stale, conflicting, or malformed worker evidence is `UNKNOWN_REQUIRES_RECONCILIATION` or `STALE`, never an automatic retry and never a zero-cost result. A queue `WAITING` maps to `WAITING_HUMAN_GATE` only when the runner identifies a gate and the corresponding asset is delivery-ready with a final-approved narrator, promoted visual QA, and bound identity and license. Missing media, identity, license, or approval evidence is `BLOCKED_DELIVERY_READINESS`, not a human wait. A LIVE policy without externally trusted qualification remains `BLOCKED_QUALIFICATION`; local billing evidence cannot change `live_dispatch`.
 
-The Jacó canary projection preserves the settled amount `0.048` and remaining `9.952` only when supplied by the pinned existing ledger projection snapshot. Its visual QA verdict remains `NOT_PROMOTED`; narrator is not final approved; identity and license are unavailable; thumbnail, video, and publication remain explicitly absent. CI success is not a human gate and never produces an all-green status.
+Fixture values, including the Jacó-shaped `0.048`/`9.952` example, are test data and never deployed-production evidence. A canonical projection can report measured amounts only from its pinned existing ledger snapshot. When visual QA is not promoted, narrator approval is absent, identity/license are unavailable, or thumbnail/video delivery is absent, the projection is `BLOCKED_DELIVERY_READINESS`. CI success is not a human gate and never produces an all-green status.
 
 ## Publication and recovery
 

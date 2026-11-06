@@ -22,15 +22,22 @@ def _write(path: Path, document: dict) -> tuple[str, str]:
     return str(path), hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _config(tmp_path: Path, *, queue_status: str = "WAITING", policy_mode: str = "LIVE") -> tuple[Path, Path]:
+def _config(
+    tmp_path: Path,
+    *,
+    queue_status: str = "WAITING",
+    policy_mode: str = "LIVE",
+    delivery_ready: bool = False,
+) -> tuple[Path, Path]:
     now = datetime.now(UTC).isoformat()
+    asset_state = "DELIVERED_FOR_REVIEW" if delivery_ready else "NONE"
     documents = {
         "policy": {"schema": "episode-policy/v1", "episode_id": EPISODE, "mode": policy_mode, "external_trust": False},
         "queue": {"schema": "episode-task-queue-snapshot-v1", "episode_id": EPISODE, "status": queue_status, "generated_at_utc": now},
         "runner": {"schema": "runner-receipt/v1", "episode_id": EPISODE, "state": "WAITING_HUMAN_THUMBNAIL"},
-        "qa": {"schema": "visual-qa/v1", "episode_id": EPISODE, "verdict": "NOT_PROMOTED"},
-        "narrative": {"schema": "narrative-status/v1", "episode_id": EPISODE, "final_approved": False},
-        "assets": {"schema": "asset-status/v1", "episode_id": EPISODE, "identity": "UNAVAILABLE", "license": "UNAVAILABLE", "thumbnail": "NONE", "video": "NONE", "publication": "NONE"},
+        "qa": {"schema": "visual-qa/v1", "episode_id": EPISODE, "verdict": "PROMOTED" if delivery_ready else "NOT_PROMOTED"},
+        "narrative": {"schema": "narrative-status/v1", "episode_id": EPISODE, "final_approved": delivery_ready},
+        "assets": {"schema": "asset-status/v1", "episode_id": EPISODE, "identity": "BOUND" if delivery_ready else "UNAVAILABLE", "license": "BOUND" if delivery_ready else "UNAVAILABLE", "thumbnail": asset_state, "video": "NONE", "publication": "NONE"},
         "billing": {"schema": "ledger-projection/v1", "episode_id": EPISODE, "settlement": "SETTLED", "actual_cost_usd": "0.048", "remaining_usd": "9.952", "authenticated": True},
     }
     sources = {}
@@ -42,15 +49,15 @@ def _config(tmp_path: Path, *, queue_status: str = "WAITING", policy_mode: str =
     return config, tmp_path / "episode-policy-status.json"
 
 
-def test_projection_preserves_actual_canary_evidence_and_never_enables_live(tmp_path: Path):
+def test_absent_media_identity_or_license_is_technical_block_not_human_wait(tmp_path: Path):
     from src.hybrid.episode_policy_status import EpisodePolicyStatusProjection
 
     config, output = _config(tmp_path)
     result = EpisodePolicyStatusProjection(config, output).publish()
 
-    assert result["status"] == "WAITING_HUMAN_GATE"
+    assert result["status"] == "BLOCKED_DELIVERY_READINESS"
     assert result["live_dispatch"] is False
-    assert result["actual_cost_usd"] == "0.048"
+    assert result["actual_cost_usd"] == "0.048"  # Synthetic fixture, not deployed status.
     assert result["remaining_usd"] == "9.952"
     assert result["visual_qa"] == "NOT_PROMOTED"
     assert result["narrator_final_approved"] is False
@@ -59,7 +66,15 @@ def test_projection_preserves_actual_canary_evidence_and_never_enables_live(tmp_
     assert result["thumbnail"] == result["video"] == result["publication"] == "NONE"
     assert result["pending_human_approvals"] is True
     assert result["generation"] == 1
-    assert result["status"] != "TEST_ELIGIBLE"  # CI/pass labels are not human approval.
+    assert result["status"] != "WAITING_HUMAN_GATE"
+
+
+def test_waiting_human_gate_requires_a_delivery_ready_artifact(tmp_path: Path):
+    from src.hybrid.episode_policy_status import EpisodePolicyStatusProjection
+
+    config, output = _config(tmp_path, delivery_ready=True)
+
+    assert EpisodePolicyStatusProjection(config, output).publish()["status"] == "WAITING_HUMAN_GATE"
 
 
 def test_projection_rejects_tamper_foreign_episode_and_unknown_worker(tmp_path: Path):
@@ -67,7 +82,7 @@ def test_projection_rejects_tamper_foreign_episode_and_unknown_worker(tmp_path: 
 
     config, output = _config(tmp_path)
     projection = EpisodePolicyStatusProjection(config, output)
-    assert projection.publish()["status"] == "WAITING_HUMAN_GATE"
+    assert projection.publish()["status"] == "BLOCKED_DELIVERY_READINESS"
 
     qa = tmp_path / "qa.json"
     qa.write_bytes(_canonical({"schema": "visual-qa/v1", "episode_id": EPISODE, "verdict": "PASS"}))
@@ -96,6 +111,27 @@ def test_projection_read_is_filesystem_only_and_does_not_open_sqlite(tmp_path: P
     before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
     monkeypatch.setattr(sqlite3, "connect", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("SQLite must not open")))
-    assert projection.inspect()["status"] == "WAITING_HUMAN_GATE"
+    assert projection.inspect()["status"] == "BLOCKED_DELIVERY_READINESS"
     after = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     assert after == before
+
+
+def test_worker_status_with_prebuilt_projection_never_opens_queue_sqlite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    from src.hybrid.autonomous_cli import main
+    from src.hybrid.episode_policy_status import EpisodePolicyStatusProjection
+
+    config, output = _config(tmp_path)
+    EpisodePolicyStatusProjection(config, output).publish()
+    monkeypatch.setattr(
+        sqlite3,
+        "connect",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("queue SQLite must not open")),
+    )
+
+    assert main([
+        "worker-status", "--workspace", str(tmp_path), "--request-id", "request",
+        "--policy-status-snapshot", str(output),
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "BLOCKED_DELIVERY_READINESS"

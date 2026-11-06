@@ -833,7 +833,7 @@ def main(argv=None):
     p.add_argument("--mode", choices=("TEST", "PREPRODUCTION"))
     p.add_argument("--compiled-input", type=Path)
     p.add_argument("--request-id")
-    p.add_argument("--policy-status-snapshot", type=Path, help="prepublished read-only episode policy status JSON")
+    p.add_argument("--policy-status-snapshot", type=Path, help="prepublished canonical read-only episode policy status JSON")
     p.add_argument("--kind", choices=("thumbnail", "video"))
     p.add_argument("--test-approval", action="store_true")
     p.add_argument("--test-publish", action="store_true")
@@ -851,23 +851,25 @@ def main(argv=None):
         if a.action == "worker-status":
             if not a.request_id:
                 p.error("worker-status requires --request-id")
-            # This branch is deliberately before EpisodeTaskQueue construction:
-            # status is an external, filesystem-only JSON projection.
-            from src.hybrid.worker import EpisodeTaskQueue
-            queue_path = Path(a.workspace).resolve() / "TEST" / "worker.sqlite3"
-            fixture_root = Path(a.workspace).resolve() / "TEST" / a.request_id
-            compiled_root = _compiled_root(a.workspace, a.request_id)
-            root = fixture_root if fixture_root.is_dir() else compiled_root / "runner"
-            result = EpisodeTaskQueue.read_status(queue_path, _worker_episode_id(root))
-            result.pop("root", None)
             if a.policy_status_snapshot is not None:
+                # A prebuilt canonical projection is a filesystem-only status
+                # source. Do not discover a runner or open the TEST queue here.
                 from src.hybrid.episode_policy_status import (
                     EpisodePolicyStatusProjection,
                 )
 
-                result["policy_status"] = EpisodePolicyStatusProjection(
-                    a.policy_status_snapshot, a.policy_status_snapshot
-                ).inspect()
+                result = EpisodePolicyStatusProjection.inspect_snapshot(
+                    a.policy_status_snapshot
+                )
+            else:
+                from src.hybrid.worker import EpisodeTaskQueue
+
+                queue_path = Path(a.workspace).resolve() / "TEST" / "worker.sqlite3"
+                fixture_root = Path(a.workspace).resolve() / "TEST" / a.request_id
+                compiled_root = _compiled_root(a.workspace, a.request_id)
+                root = fixture_root if fixture_root.is_dir() else compiled_root / "runner"
+                result = EpisodeTaskQueue.read_status(queue_path, _worker_episode_id(root))
+                result.pop("root", None)
         elif a.action in {"enqueue", "run", "serve", "host"}:
             from src.hybrid.worker import DurableEpisodeWorker, EpisodeTaskQueue
 
