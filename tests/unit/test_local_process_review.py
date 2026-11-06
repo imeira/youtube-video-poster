@@ -22,17 +22,24 @@ def _write_json(path: Path, value: object) -> Path:
 
 def _inputs(tmp_path: Path, *, observed_at_epoch: int | None = None) -> dict[str, Path]:
     quote = _write_json(tmp_path / "quote.json", {
-        "schema": "FAL_AUTHENTICATED_CATALOG_PRICE_SNAPSHOT/1",
+        "schema": "FAL_AUTHENTICATED_PRICE_CONSUMER_SNAPSHOT/2",
         "endpoint_id": ENDPOINT,
         "currency": "USD",
         "maximum_usd": "0.048",
-        "unit": "megapixels",
-                "unit_price_usd": "0.048",
+        "unit_price_usd": "0.048",
+        "provider_unit": "image",
+        "semantic_unit": "FLAT_1K_SINGLE_IMAGE",
+        "quantity": 1,
+        "api_url": "https://api.fal.ai/v1/models/pricing",
+        "raw_sanitized_sha256": "0" * 64,
         "observed_at_epoch": observed_at_epoch if observed_at_epoch is not None else int(time.time()),
-        "provider_expiry": None,
-        "price_validity": "CATALOG_PRICE_NOT_TRANSACTION_QUOTE",
+        "provider_expiry": "UNKNOWN_NOT_ASSERTED",
+        "price_validity": "LOCAL_OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_EXPIRY",
     })
-    openapi = _write_json(tmp_path / "openapi.json", {"endpoint": ENDPOINT, "output_format": "png", "resolution": "1k"})
+    # Regression input is the saved official provider schema, not a simplified surrogate.
+    official = Path(__file__).parents[1] / "fixtures" / "fal_flux3_queue_openapi_20261106.json"
+    openapi = tmp_path / "openapi.json"
+    openapi.write_bytes(official.read_bytes())
     finance = _write_json(tmp_path / "finance.json", {
         "schema": "jaco-factory-financial-reconciliation/1", "request_hash": REQUEST_ID,
         "revision": "818556d97edb648f", "currency": "USD", "total_episode_cap": "10.00",
@@ -87,6 +94,8 @@ def test_local_process_reviewer_produces_readback_verified_pass_without_provider
 
     assert result["verdict"] == "PASS"
     assert result["admission_state"] == "READY_FOR_PARENT_VERIFICATION_ONLY"
+    assert type(result["reviewed_at_epoch"]) is int
+    assert result["provenance"] == "LOCAL_PROCESS_REVIEW_SAME_HOST_NON_PROMOTABLE"
     assert result["isolation"]["provider_secrets_available"] is False
     assert result["isolation"]["same_host_threat_model"] == "NOT_HOSTILE_CODE_ISOLATION"
     assert result["prohibitions"] == ["NO_FAL_PAID_POST", "NO_RESERVATION", "NO_GATEWAY_OR_OTHER_EP_WRITE", "NO_TEST_AS_LIVE"]
@@ -124,7 +133,7 @@ def test_local_process_reviewer_accepts_catalog_price_without_inventing_provider
     policy = _policy(tmp_path)
     result = run_local_process_review(policy)
 
-    assert result["price_evidence"]["provider_expiry"] is None
+    assert result["price_evidence"]["provider_expiry"] == "UNKNOWN_NOT_ASSERTED"
     assert result["price_evidence"]["local_refresh_policy"] == "OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_PRICE_VALIDITY"
 
 

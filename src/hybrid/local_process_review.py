@@ -26,7 +26,7 @@ _POLICY_KIND = "LOCAL_PROCESS_REVIEW_POLICY"
 _POLICY_SCHEMA = 1
 _OUTPUT_KIND = "LOCAL_PROCESS_REVIEW_OUTPUT"
 _OUTPUT_SCHEMA = 1
-_CATALOG_PRICE_SCHEMA = "FAL_AUTHENTICATED_CATALOG_PRICE_SNAPSHOT/1"
+_CATALOG_PRICE_SCHEMA = "FAL_AUTHENTICATED_PRICE_CONSUMER_SNAPSHOT/2"
 _LOCAL_CATALOG_REFRESH_MAX_AGE_SECONDS = 300
 _LOCAL_CATALOG_REFRESH_POLICY = "OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_PRICE_VALIDITY"
 _REQUIRED_PROHIBITIONS = [
@@ -101,16 +101,20 @@ def _regular_beneath(path: Path, root: Path, label: str, *, must_exist: bool = T
 
 def _catalog_price_snapshot(document: dict[str, Any], *, clock: float) -> int:
     required = {
-        "schema", "endpoint_id", "currency", "maximum_usd", "unit", "unit_price_usd",
-        "observed_at_epoch", "provider_expiry", "price_validity",
+        "schema", "endpoint_id", "currency", "maximum_usd", "unit_price_usd", "provider_unit",
+        "semantic_unit", "quantity", "api_url", "raw_sanitized_sha256", "observed_at_epoch",
+        "provider_expiry", "price_validity",
     }
     if set(document) != required or document.get("schema") != _CATALOG_PRICE_SCHEMA:
         raise LocalProcessReviewError("closed authenticated catalog price snapshot required")
     if (document.get("endpoint_id") != ENDPOINT or document.get("currency") != "USD"
-            or document.get("unit") != "megapixels" or document.get("unit_price_usd") != "0.048"
-            or document.get("maximum_usd") != "0.048"
-            or document.get("provider_expiry") is not None
-            or document.get("price_validity") != "CATALOG_PRICE_NOT_TRANSACTION_QUOTE"):
+            or document.get("unit_price_usd") != "0.048" or document.get("maximum_usd") != "0.048"
+            or document.get("semantic_unit") != "FLAT_1K_SINGLE_IMAGE" or document.get("quantity") != 1
+            or document.get("api_url") != "https://api.fal.ai/v1/models/pricing"
+            or not isinstance(document.get("provider_unit"), str) or not document["provider_unit"]
+            or not isinstance(document.get("raw_sanitized_sha256"), str) or len(document["raw_sanitized_sha256"]) != 64
+            or document.get("provider_expiry") != "UNKNOWN_NOT_ASSERTED"
+            or document.get("price_validity") != "LOCAL_OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_EXPIRY"):
         raise LocalProcessReviewError("quote value mismatch")
     observed_at = document.get("observed_at_epoch")
     if type(observed_at) is not int or observed_at > clock or clock - observed_at > _LOCAL_CATALOG_REFRESH_MAX_AGE_SECONDS:
@@ -240,8 +244,8 @@ def _review(policy: dict[str, Any]) -> dict[str, Any]:
     quote_observed_at = _catalog_price_snapshot(quote, clock=time.time())
     _expect(quote_sha == bindings.get("authenticated_price_quote", {}).get("sha256") and quote_bytes == bindings.get("authenticated_price_quote", {}).get("bytes"), "quote binding mismatch")
     _expect(openapi_sha == bindings.get("openapi_snapshot", {}).get("sha256") and openapi_bytes == bindings.get("openapi_snapshot", {}).get("bytes"), "OpenAPI binding mismatch")
-    quote_endpoint = quote.get("endpoint_id", quote.get("endpoint"))
-    quote_maximum = quote.get("maximum_cost_usd", quote.get("maximum_usd"))
+    quote_endpoint = quote.get("endpoint_id")
+    quote_maximum = quote.get("maximum_usd")
     openapi_endpoint = openapi.get("endpoint")
     if openapi_endpoint is None:
         info = openapi.get("info")
@@ -254,12 +258,13 @@ def _review(policy: dict[str, Any]) -> dict[str, Any]:
     output = {
         "schema": _OUTPUT_SCHEMA, "kind": _OUTPUT_KIND, "reviewer": "LOCAL_PROCESS_REVIEW_AUTOMATED_V1",
         "verdict": "PASS", "admission_state": "READY_FOR_PARENT_VERIFICATION_ONLY",
+        "provenance": "LOCAL_PROCESS_REVIEW_SAME_HOST_NON_PROMOTABLE", "reviewed_at_epoch": int(time.time()),
         "scope": "JACO_FLUX3_ONE_CANARY_EVALUATION", "request_id": REQUEST_ID, "endpoint": ENDPOINT,
         "packet_sha256": packet_sha, "review_request_sha256": request_sha,
         "quote_sha256": quote_sha, "openapi_sha256": openapi_sha, "financial_record_sha256": finance_sha,
         "prohibitions": _REQUIRED_PROHIBITIONS,
         "price_evidence": {"snapshot_kind": _CATALOG_PRICE_SCHEMA, "observed_at_epoch": quote_observed_at,
-                           "provider_expiry": None, "price_validity": "CATALOG_PRICE_NOT_TRANSACTION_QUOTE",
+                           "provider_expiry": "UNKNOWN_NOT_ASSERTED", "price_validity": "LOCAL_OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_EXPIRY",
                            "local_refresh_policy": _LOCAL_CATALOG_REFRESH_POLICY},
         "isolation": {"fresh_process": True, "environment": "SCRUBBED_MINIMAL", "provider_secrets_available": False,
                       "spend_credentials_available": False, "gateway_available": False, "publish_available": False,
@@ -268,6 +273,70 @@ def _review(policy: dict[str, Any]) -> dict[str, Any]:
     }
     output["output_sha256"] = _sha256_bytes(_canonical(output))
     return output
+
+
+def validate_local_process_review_output(
+    output: object,
+    *,
+    packet_sha256: str,
+    review_request_sha256: str,
+    quote_sha256: str,
+    openapi_sha256: str,
+    financial_record_sha256: str,
+) -> dict[str, Any]:
+    """Validate every binding emitted by the closed reviewer contract."""
+    if not isinstance(output, dict):
+        raise LocalProcessReviewError("review output must be an object")
+    required = {
+        "schema", "kind", "reviewer", "verdict", "admission_state", "provenance", "reviewed_at_epoch",
+        "scope", "request_id", "endpoint", "packet_sha256", "review_request_sha256", "quote_sha256",
+        "openapi_sha256", "financial_record_sha256", "prohibitions", "price_evidence", "isolation", "output_sha256",
+    }
+    price_evidence = {
+        "snapshot_kind": _CATALOG_PRICE_SCHEMA, "observed_at_epoch": None,
+        "provider_expiry": "UNKNOWN_NOT_ASSERTED",
+        "price_validity": "LOCAL_OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_EXPIRY",
+        "local_refresh_policy": _LOCAL_CATALOG_REFRESH_POLICY,
+    }
+    isolation = {
+        "fresh_process": True, "environment": "SCRUBBED_MINIMAL", "provider_secrets_available": False,
+        "spend_credentials_available": False, "gateway_available": False, "publish_available": False,
+        "allowed_inputs": "READ_ONLY_HASH_BOUND_ALLOWLIST", "output": "WRITE_ONLY_REVIEW_OUTPUT",
+        "same_host_threat_model": "NOT_HOSTILE_CODE_ISOLATION",
+    }
+    body = {key: value for key, value in output.items() if key != "output_sha256"}
+    expected_hashes = {
+        "packet_sha256": packet_sha256, "review_request_sha256": review_request_sha256,
+        "quote_sha256": quote_sha256, "openapi_sha256": openapi_sha256,
+        "financial_record_sha256": financial_record_sha256,
+    }
+    if (
+        set(output) != required
+        or output.get("schema") != _OUTPUT_SCHEMA
+        or output.get("kind") != _OUTPUT_KIND
+        or output.get("reviewer") != "LOCAL_PROCESS_REVIEW_AUTOMATED_V1"
+        or output.get("verdict") != "PASS"
+        or output.get("admission_state") != "READY_FOR_PARENT_VERIFICATION_ONLY"
+        or output.get("provenance") != "LOCAL_PROCESS_REVIEW_SAME_HOST_NON_PROMOTABLE"
+        or output.get("scope") != "JACO_FLUX3_ONE_CANARY_EVALUATION"
+        or output.get("request_id") != REQUEST_ID
+        or output.get("endpoint") != ENDPOINT
+        or any(output.get(key) != value for key, value in expected_hashes.items())
+        or output.get("prohibitions") != _REQUIRED_PROHIBITIONS
+        or not isinstance(output.get("reviewed_at_epoch"), int)
+        or not isinstance(output.get("price_evidence"), dict)
+        or set(output["price_evidence"]) != set(price_evidence)
+        or output["price_evidence"].get("snapshot_kind") != price_evidence["snapshot_kind"]
+        or not isinstance(output["price_evidence"].get("observed_at_epoch"), int)
+        or output["price_evidence"].get("provider_expiry") != price_evidence["provider_expiry"]
+        or output["price_evidence"].get("price_validity") != price_evidence["price_validity"]
+        or output["price_evidence"].get("local_refresh_policy") != price_evidence["local_refresh_policy"]
+        or not isinstance(output.get("isolation"), dict)
+        or output["isolation"] != isolation
+        or output.get("output_sha256") != _sha256_bytes(_canonical(body))
+    ):
+        raise LocalProcessReviewError("closed LOCAL_PROCESS_REVIEW output contract is invalid")
+    return dict(output)
 
 
 def _reviewer_main(policy_path: str) -> int:
@@ -297,12 +366,16 @@ def run_local_process_review(policy_path: Path, *, clock=time.time) -> dict[str,
         raise LocalProcessReviewError(f"reviewer process blocked: {completed.stderr.strip()}")
     output_path = Path(policy["output_path"])
     output, digest, _ = _load_json(output_path, "review output")
-    body = {key: value for key, value in output.items() if key != "output_sha256"}
-    if output.get("output_sha256") != _sha256_bytes(_canonical(body)) or digest != _sha256_bytes(_canonical(output)):
+    if digest != _sha256_bytes(_canonical(output)):
         raise LocalProcessReviewError("review output readback hash mismatch")
-    if output.get("verdict") != "PASS" or output.get("admission_state") != "READY_FOR_PARENT_VERIFICATION_ONLY":
-        raise LocalProcessReviewError("review output is not ready")
-    return output
+    return validate_local_process_review_output(
+        output,
+        packet_sha256=policy["inputs"]["packet"]["sha256"],
+        review_request_sha256=policy["review_request_sha256"],
+        quote_sha256=policy["inputs"]["quote"]["sha256"],
+        openapi_sha256=policy["inputs"]["openapi"]["sha256"],
+        financial_record_sha256=policy["inputs"]["financial_record"]["sha256"],
+    )
 
 
 if __name__ == "__main__":

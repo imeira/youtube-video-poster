@@ -78,10 +78,11 @@ def _replace_local_paths(value: Any) -> Any:
 def job_content_key(job: Any) -> str:
     """Derive a provider-work key without workspace or reviewer identities."""
     return content_key(
-        (asset.path for asset in job.manifest.assets),
+        (asset.path for asset in job.manifest.assets) if job.manifest is not None else (),
         {
             "endpoint": job.endpoint,
             "mode": job.mode,
+            "input_kind": job.input_kind,
             "payload": _replace_local_paths(job.payload),
         },
     )

@@ -22,7 +22,7 @@ def _evidence(tmp_path: Path, *, price: str = "0.048", reviewed_at: int | None =
     packet = _write(tmp_path / "packet.json", {"endpoint": "blackforestlabs/flux-3/text-to-image", "payload_sha256": "a" * 64, "maximum_usd": "0.048"})
     review = _write(tmp_path / "review.json", {"schema": 1, "kind": "LOCAL_PROCESS_REVIEW_OUTPUT", "verdict": "PASS", "admission_state": "READY_FOR_PARENT_VERIFICATION_ONLY", "request_id": "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9", "endpoint": "blackforestlabs/flux-3/text-to-image", "packet_sha256": _sha(packet), "reviewed_at_epoch": reviewed_at})
     authorization = _write(tmp_path / "authorization.json", {"schema": 1, "kind": "JACO_FLUX3_FINAL_ADMISSION_AUTHORIZATION", "version": "2026-11-06", "request_id": "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9", "endpoint": "blackforestlabs/flux-3/text-to-image", "payload_sha256": "a" * 64, "maximum_usd": "0.048", "call_limit": 1, "user_authorization_evidence": "USER_AUTHORIZED_LOCAL_QA_AND_ONE_ALTERNATIVE_IMAGE_EVAL_WITHIN_USD10"})
-    price_doc = {"schema": "FAL_AUTHENTICATED_CATALOG_PRICE_SNAPSHOT/1", "endpoint_id": "blackforestlabs/flux-3/text-to-image", "currency": "USD", "maximum_usd": price, "unit": "megapixels", "unit_price_usd": price, "observed_at_epoch": int(time.time()), "provider_expiry": None, "price_validity": "CATALOG_PRICE_NOT_TRANSACTION_QUOTE"}
+    price_doc = {"schema": "FAL_AUTHENTICATED_PRICE_CONSUMER_SNAPSHOT/2", "endpoint_id": "blackforestlabs/flux-3/text-to-image", "currency": "USD", "maximum_usd": price, "unit_price_usd": price, "provider_unit": "image", "semantic_unit": "FLAT_1K_SINGLE_IMAGE", "quantity": 1, "api_url": "https://api.fal.ai/v1/models/pricing", "raw_sanitized_sha256": "0" * 64, "observed_at_epoch": int(time.time()), "provider_expiry": "UNKNOWN_NOT_ASSERTED", "price_validity": "LOCAL_OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_EXPIRY"}
     quote = _write(tmp_path / "quote.json", price_doc)
     return {"packet": packet, "review": review, "authorization": authorization, "quote": quote}
 
@@ -84,7 +84,6 @@ async def test_final_receipt_uses_existing_executor_ledger_kernel_and_recovers_w
 
     from PIL import Image
 
-    from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
     from src.hybrid.execution import Executor, Job, ProviderResult
     from src.hybrid.jaco_flux3_final_admission import (
         FinalAdmissionKernel,
@@ -94,16 +93,10 @@ async def test_final_receipt_uses_existing_executor_ledger_kernel_and_recovers_w
     from src.hybrid.standing_budget import StandingBudgetLedger
 
     paths = _evidence(tmp_path)
-    reference = tmp_path / "reference.png"
-    Image.new("RGB", (8, 8), "white").save(reference)
-    asset = FrozenAsset.approve(reference, "test", "TEST")
-    sheet = tmp_path / "sheet.png"
-    contact_sheet((asset,), sheet)
-    manifest = Manifest.freeze((asset,), FrozenAsset.approve(sheet, "test", "TEST"), "test", "TEST")
     job = Job("JACO_GEN28_CANONICAL_001", "first", "TEST", "blackforestlabs/flux-3/text-to-image",
               {"prompt": "A canonical Genesis image", "aspect_ratio": "4:3", "resolution": "1k",
                "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2},
-              manifest, Decimal("0.048"))
+              None, Decimal("0.048"), input_kind="TEXT_TO_IMAGE")
     ledger = StandingBudgetLedger(tmp_path / "ledger.sqlite3", policy_sha256="a" * 64,
                                   episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
     executor = Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal(10)), standing_ledger=ledger)
@@ -135,3 +128,33 @@ async def test_final_receipt_uses_existing_executor_ledger_kernel_and_recovers_w
     assert kernel.provider.submits == 1
     assert kernel.provider.recovers == 1
     assert ledger.claim(job.request_id)["state"] == "RESERVED"
+
+
+@pytest.mark.asyncio
+async def test_caller_constructed_live_objects_cannot_prepare_provider_work(tmp_path):
+    """Caller-created objects cannot mint the LIVE admission capability."""
+    from decimal import Decimal
+
+    from PIL import Image
+
+    from src.hybrid.artifacts import FrozenAsset, Manifest, contact_sheet
+    from src.hybrid.execution import Executor, Job
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    reference = tmp_path / "reference.png"
+    Image.new("RGB", (8, 8), "white").save(reference)
+    asset = FrozenAsset.approve(reference, "test", "LIVE")
+    sheet = tmp_path / "sheet.png"
+    contact_sheet((asset,), sheet)
+    manifest = Manifest.freeze((asset,), FrozenAsset.approve(sheet, "test", "LIVE"), "test", "LIVE")
+    job = Job("JACO_GEN28_CANONICAL_001", "first", "LIVE", "blackforestlabs/flux-3/text-to-image",
+              {"prompt": "A canonical Genesis image", "aspect_ratio": "4:3", "resolution": "1k",
+               "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2},
+              manifest, Decimal("0.048"))
+    ledger = StandingBudgetLedger(tmp_path / "ledger.sqlite3", policy_sha256="a" * 64,
+                                  episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE")
+    executor = Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal(10)), standing_ledger=ledger)
+    with pytest.raises(PermissionError, match="raw prepared intent cannot authorize LIVE admission"):
+        executor.prepare_intent(job)
+    assert executor.inspect(job.request_id) is None

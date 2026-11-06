@@ -26,7 +26,11 @@ REQUEST_ID = "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9"
 REVISION = "818556d97edb648f"
 EPISODE_ID = "JACO_GENESIS28"
 CAP_USD = Decimal("10.00")
-_ALLOWED_ENDPOINTS = frozenset({"fal-ai/flux-2/klein/9b/edit", "seedance-v1-5-pro-i2v"})
+_ALLOWED_ENDPOINTS = frozenset({
+    "fal-ai/flux-2/klein/9b/edit",
+    "seedance-v1-5-pro-i2v",
+    "blackforestlabs/flux-3/text-to-image",
+})
 
 
 class LiveAdmissionError(PermissionError):

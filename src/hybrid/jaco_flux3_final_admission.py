@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import sqlite3
 import stat
 import time
 from hashlib import sha256
@@ -58,6 +60,71 @@ def _fresh(value: object, now: float, label: str) -> None:
         raise FinalAdmissionError(f"{label} is stale")
 
 
+def materialize_existing_mandate_authorization(*, root: Path | str, state_db: Path | str) -> dict[str, Any]:
+    """Convert only the pinned existing mandate into its closed admission form.
+
+    This is a same-host provenance conversion, not a new approval.  It neither
+    touches a ledger nor changes evaluation-only licensing/release restrictions.
+    """
+    root = Path(root)
+    mandate, mandate_sha = _read(root / "user-mandate.json", "pinned mandate")
+    provenance, provenance_sha = _read(root / "provenance.json", "pinned provenance")
+    policy, _policy_sha = _read(root / "parent-provisioned-policy.json", "pinned policy")
+    required_mandate = {"schema", "request_id", "revision", "endpoint", "payload_sha256", "maximum_usd", "call_limit", "budget_cap_usd", "scope", "release_authorization", "license_status"}
+    if (set(mandate) != required_mandate or mandate.get("schema") != "JACO_USER_EXECUTION_MANDATE/2"
+            or mandate.get("request_id") != REQUEST_ID or mandate.get("endpoint") != ENDPOINT
+            or not isinstance(mandate.get("payload_sha256"), str) or len(mandate["payload_sha256"]) != 64
+            or mandate.get("maximum_usd") != MAX_USD or mandate.get("call_limit") != 1
+            or mandate.get("budget_cap_usd") != "10.00" or mandate.get("scope") != "EVALUATION_GENERATION_ONLY"
+            or mandate.get("release_authorization") != "NOT_AUTHORIZED"
+            or mandate.get("license_status") != "EVALUATION_ONLY_CONDITIONALLY_SUPPORTABLE"):
+        raise FinalAdmissionError("pinned mandate does not bind the fixed evaluation canary")
+    required_provenance = {"schema", "session_id", "user_message_id", "adjacent_assistant_message_id", "user_message_sha256", "assistant_message_sha256", "financial_record_sha256", "review_source_sha256"}
+    if (set(provenance) != required_provenance or provenance.get("schema") != "JACO_FLUX3_CANONICAL_TRANSCRIPT_PROVENANCE/1"
+            or type(provenance.get("adjacent_assistant_message_id")) is not int
+            or provenance.get("user_message_id") != provenance["adjacent_assistant_message_id"] + 1):
+        raise FinalAdmissionError("pinned provenance is incomplete")
+    if (policy.get("schema") != "JACO_FLUX3_LOCAL_OPERATOR_POLICY/1"
+            or policy.get("mandate_sha256") != mandate_sha or policy.get("provenance_sha256") != provenance_sha):
+        raise FinalAdmissionError("pinned policy source hashes changed")
+    try:
+        db = sqlite3.connect(f"file:{Path(state_db).resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            rows = db.execute("SELECT id, session_id, role, content FROM messages WHERE id IN (?, ?) ORDER BY id", (provenance["adjacent_assistant_message_id"], provenance["user_message_id"])).fetchall()
+        finally:
+            db.close()
+    except sqlite3.Error as error:
+        raise FinalAdmissionError("canonical transcript is unavailable") from error
+    if len(rows) != 2:
+        raise FinalAdmissionError("canonical transcript is incomplete")
+    for row, expected_id, role, expected_hash in zip(rows, (provenance["adjacent_assistant_message_id"], provenance["user_message_id"]), ("assistant", "user"), (provenance["assistant_message_sha256"], provenance["user_message_sha256"]), strict=True):
+        if row[0] != expected_id or row[1] != provenance["session_id"] or row[2] != role or not isinstance(row[3], str) or sha256(row[3].encode("utf-8")).hexdigest() != expected_hash:
+            raise FinalAdmissionError("canonical transcript does not match pinned provenance")
+    document: dict[str, Any] = {"schema": 1, "kind": "JACO_FLUX3_FINAL_ADMISSION_AUTHORIZATION",
+        "version": f"mandate-provenance-v1-{mandate_sha[:12]}", "request_id": REQUEST_ID, "endpoint": ENDPOINT,
+        "payload_sha256": mandate["payload_sha256"], "maximum_usd": MAX_USD, "call_limit": 1,
+        "user_authorization_evidence": "USER_AUTHORIZED_LOCAL_QA_AND_ONE_ALTERNATIVE_IMAGE_EVAL_WITHIN_USD10"}
+    target = root / "final-admission-authorization.json"
+    encoded = _canonical(document)
+    if target.exists():
+        existing, _ = _read(target, "final admission authorization")
+        if existing != document:
+            raise FinalAdmissionError("existing final admission authorization conflicts with pinned mandate")
+        return document
+    try:
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    except FileExistsError:
+        existing, _ = _read(target, "final admission authorization")
+        if existing != document:
+            raise FinalAdmissionError("existing final admission authorization conflicts with pinned mandate")
+        return document
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
+    if target.read_bytes() != encoded:
+        raise FinalAdmissionError("final admission authorization readback mismatch")
+    return document
+
+
 def validate_final_admission(*, packet: Path | str, review: Path | str, authorization: Path | str,
                              quote: Path | str, clock=time.time) -> dict[str, str | int]:
     """Return a hash-bound, non-effecting receipt for exactly one submit attempt."""
@@ -83,12 +150,16 @@ def validate_final_admission(*, packet: Path | str, review: Path | str, authoriz
             or authorization_doc.get("maximum_usd") != MAX_USD or authorization_doc.get("call_limit") != 1
             or authorization_doc.get("user_authorization_evidence") != "USER_AUTHORIZED_LOCAL_QA_AND_ONE_ALTERNATIVE_IMAGE_EVAL_WITHIN_USD10"):
         raise FinalAdmissionError("final admission authorization does not bind this canary")
-    required_quote = {"schema", "endpoint_id", "currency", "maximum_usd", "unit", "unit_price_usd", "observed_at_epoch", "provider_expiry", "price_validity"}
-    if (set(quote_doc) != required_quote or quote_doc.get("schema") != "FAL_AUTHENTICATED_CATALOG_PRICE_SNAPSHOT/1"
+    required_quote = {"schema", "endpoint_id", "currency", "maximum_usd", "unit_price_usd", "provider_unit", "semantic_unit", "quantity", "api_url", "raw_sanitized_sha256", "observed_at_epoch", "provider_expiry", "price_validity"}
+    if (set(quote_doc) != required_quote or quote_doc.get("schema") != "FAL_AUTHENTICATED_PRICE_CONSUMER_SNAPSHOT/2"
             or quote_doc.get("endpoint_id") != ENDPOINT or quote_doc.get("currency") != "USD"
-            or quote_doc.get("maximum_usd") != MAX_USD or quote_doc.get("unit") != "megapixels"
-            or quote_doc.get("unit_price_usd") != MAX_USD or quote_doc.get("provider_expiry") is not None
-            or quote_doc.get("price_validity") != "CATALOG_PRICE_NOT_TRANSACTION_QUOTE"):
+            or quote_doc.get("maximum_usd") != MAX_USD or quote_doc.get("unit_price_usd") != MAX_USD
+            or quote_doc.get("semantic_unit") != "FLAT_1K_SINGLE_IMAGE" or quote_doc.get("quantity") != 1
+            or quote_doc.get("api_url") != "https://api.fal.ai/v1/models/pricing"
+            or not isinstance(quote_doc.get("provider_unit"), str) or not quote_doc["provider_unit"]
+            or not isinstance(quote_doc.get("raw_sanitized_sha256"), str) or len(quote_doc["raw_sanitized_sha256"]) != 64
+            or quote_doc.get("provider_expiry") != "UNKNOWN_NOT_ASSERTED"
+            or quote_doc.get("price_validity") != "LOCAL_OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_EXPIRY"):
         raise FinalAdmissionError("fresh authenticated price changed")
     _fresh(quote_doc.get("observed_at_epoch"), now, "price snapshot")
     receipt: dict[str, str | int] = {"schema": 1, "kind": "JACO_FLUX3_FINAL_ADMISSION", "request_id": REQUEST_ID,
@@ -144,6 +215,14 @@ class FinalAdmissionKernel:
             if not callable(getattr(target, method, None)):
                 raise TypeError(f"configured kernel lacks {method}")
         self.executor, self.ledger, self.episode_id, self.provider = executor, ledger, episode_id, provider
+        # This is a deliberately TEST-only mechanical harness. Production never
+        # receives caller supplied executor, ledger or provider objects.
+        if getattr(executor, "_jaco_final_admission_verifier", None) is None:
+            def verify_test_marker(job, marker, claim):
+                if (getattr(job, "mode", None) != "TEST" or marker.get("payload_sha256")
+                        != sha256(_canonical(job.payload)).hexdigest()):
+                    raise PermissionError("TEST final-admission marker mismatch")
+            executor._jaco_final_admission_verifier = verify_test_marker
 
     @staticmethod
     def _verify_receipt(receipt: object) -> dict[str, str | int]:
@@ -164,7 +243,9 @@ class FinalAdmissionKernel:
         """Prepare → reserve → marker → exactly-one submit/recovery."""
         approved = self._verify_receipt(receipt)
         if (getattr(job, "mode", None) != "TEST" or getattr(job, "endpoint", None) != ENDPOINT
-                or str(getattr(job, "cost", "")) != MAX_USD):
+                or str(getattr(job, "cost", "")) != MAX_USD
+                or getattr(job, "input_kind", None) != "TEXT_TO_IMAGE"
+                or getattr(job, "manifest", object()) is not None):
             raise FinalAdmissionError("TEST canary job must exactly bind endpoint and USD 0.048")
         request_id = getattr(job, "request_id", None)
         if not isinstance(request_id, str) or not request_id:
@@ -181,9 +262,13 @@ class FinalAdmissionKernel:
             if (claim.get("state") != "RESERVED" or claim.get("provider") != ENDPOINT
                     or claim.get("reserved_usd") != "0.048000"):
                 raise FinalAdmissionError("standing budget claim does not bind canary")
-            marker = {"schema": 1, "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER",
-                      "receipt_sha256": approved["receipt_sha256"], "request_id": request_id,
-                      "endpoint": ENDPOINT, "reserved_usd": MAX_USD}
+            marker = {"schema": 2, "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER",
+                      "receipt_path": "TEST_ONLY_IN_MEMORY_RECEIPT", "receipt_sha256": approved["receipt_sha256"],
+                      "request_id": request_id, "endpoint": ENDPOINT,
+                      "payload_sha256": job.intent_input_sha256,
+                      "input_kind": job.input_kind,
+                      "auth_scope": row["settlement_binding"]["auth_scope"],
+                      "reserved_usd": MAX_USD, "trust_identity": "TEST_ONLY_KERNEL"}
             prior = row.get("final_admission_marker")
             if prior is not None and prior != marker:
                 raise FinalAdmissionError("final admission marker is immutable")
