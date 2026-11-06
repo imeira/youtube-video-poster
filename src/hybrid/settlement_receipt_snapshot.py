@@ -109,7 +109,7 @@ class SettlementReceiptSnapshotPublisher:
         row = dict(rows[0])
         receipt_body = row["receipt_body"]
         if not isinstance(receipt_body, str):
-            raise ValueError("canonical receipt body is invalid")
+            raise TypeError("canonical receipt body is invalid")
         receipt = self._strict(receipt_body.encode("utf-8"))
         canonical_body = self._canonical(receipt).decode("utf-8")
         required = {"schema", "authority", "local_request_id", "provider_request_id", "endpoint_id", "auth_scope", "authority_mode", "currency", "cost_total_micro_usd", "evidence_hash", "provenance"}

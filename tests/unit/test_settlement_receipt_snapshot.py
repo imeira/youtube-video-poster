@@ -7,6 +7,9 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from src.hybrid.actual_deployment_status import ActualDeploymentStatus
+from src.hybrid.settlement_receipt_snapshot import SettlementReceiptSnapshotPublisher
+
 OUTER_REQUEST = "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9"
 LOCAL_REQUEST = "7f19aab26d71464a9bc257f4f566d2c6cb642aab0bc55864bad8dcbaeab0ae47"
 REMOTE_REQUEST = "01a1b229-3ac4-78f2-a320-73ee43fc8bc2"
@@ -60,8 +63,6 @@ def _ledger(root: Path, *, foreign: bool = False, tamper: bool = False) -> Path:
 
 
 def test_read_only_publisher_exports_bound_canonical_settlement_receipt(tmp_path: Path):
-    from src.hybrid.settlement_receipt_snapshot import SettlementReceiptSnapshotPublisher
-
     root = _root(tmp_path)
     _ledger(root)
     result = SettlementReceiptSnapshotPublisher(root).publish()
@@ -75,8 +76,6 @@ def test_read_only_publisher_exports_bound_canonical_settlement_receipt(tmp_path
 
 
 def test_publisher_rejects_foreign_or_tampered_receipts(tmp_path: Path):
-    from src.hybrid.settlement_receipt_snapshot import SettlementReceiptSnapshotPublisher
-
     root = _root(tmp_path / "foreign")
     _ledger(root, foreign=True)
     assert SettlementReceiptSnapshotPublisher(root).publish()["status"] == "STALE"
@@ -87,9 +86,6 @@ def test_publisher_rejects_foreign_or_tampered_receipts(tmp_path: Path):
 
 
 def test_filesystem_status_uses_valid_settlement_over_stale_provider_unknown_without_sqlite(tmp_path: Path, monkeypatch):
-    from src.hybrid.actual_deployment_status import ActualDeploymentStatus
-    from src.hybrid.settlement_receipt_snapshot import SettlementReceiptSnapshotPublisher
-
     root = _root(tmp_path)
     _ledger(root)
     SettlementReceiptSnapshotPublisher(root).publish()
@@ -105,9 +101,6 @@ def test_filesystem_status_uses_valid_settlement_over_stale_provider_unknown_wit
 
 
 def test_filesystem_status_treats_tampered_or_expired_snapshot_as_unknown(tmp_path: Path):
-    from src.hybrid.actual_deployment_status import ActualDeploymentStatus
-    from src.hybrid.settlement_receipt_snapshot import SettlementReceiptSnapshotPublisher
-
     root = _root(tmp_path / "tamper")
     _ledger(root)
     snapshot = SettlementReceiptSnapshotPublisher(root).publish()
