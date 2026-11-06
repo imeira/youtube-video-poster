@@ -17,6 +17,7 @@ from src.hybrid.jaco_flux3_production import (
     _FAL_QUEUE_HOST,
     FixedFalProductionFactory,
     ProductionCompositionError,
+    _fal_png_locator_projection,
     _fixed_https_url,
     _FixedFalProvider,
     _official_openapi_endpoint,
@@ -169,7 +170,16 @@ def test_only_fixed_https_fal_hosts_can_receive_provider_or_result_traffic():
         f"https://{_FAL_QUEUE_HOST}/blackforestlabs/flux-3/text-to-image",
         hosts=frozenset({_FAL_QUEUE_HOST}),
     )
-    _fixed_https_url("https://v3.fal.media/result.png?signature=x", hosts=_FAL_MEDIA_HOSTS)
+    # Official fal CDN documentation shows v3b.fal.media files URLs.  The query
+    # is opaque signed data and may never be recorded in evidence.
+    projection = _fal_png_locator_projection(
+        "https://v3b.fal.media/files/b/store/candidate.png?signature=SIGNED_SECRET",
+    )
+    assert projection == {
+        "scheme": "https", "hostname": "v3b.fal.media", "port": None,
+        "extension": ".png", "query_present": True,
+    }
+    assert "SIGNED_SECRET" not in json.dumps(projection)
     for hostile in (
         "http://queue.fal.run/submit",
         "https://queue.fal.run.evil.example/submit",
@@ -177,9 +187,14 @@ def test_only_fixed_https_fal_hosts_can_receive_provider_or_result_traffic():
         "https://queue.fal.run:444/submit",
         "https://127.0.0.1/submit",
         "https://queue.fal.run/submit#fragment",
+        "https://v3b.fal.media.evil.example/result.png?signature=x",
+        "https://user@v3b.fal.media/result.png?signature=x",
+        "https://v3b.fal.media:444/result.png?signature=x",
     ):
         with pytest.raises(ProductionCompositionError, match="unapproved FAL HTTPS origin"):
-            _fixed_https_url(hostile, hosts=frozenset({_FAL_QUEUE_HOST}))
+            _fixed_https_url(hostile, hosts=_FAL_MEDIA_HOSTS)
+    with pytest.raises(ProductionCompositionError, match="PNG locator"):
+        _fal_png_locator_projection("https://v3b.fal.media/files/b/store/no-extension?signature=x")
 
 
 def test_persisted_official_openapi_uses_metadata_endpoint_and_official_queue_routes():

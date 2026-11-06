@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import json
 import os
 import sqlite3
+import ssl
 import time
 import urllib.request
 from decimal import Decimal
@@ -18,6 +20,9 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
+
+import certifi
+from PIL import Image, UnidentifiedImageError
 
 from src.hybrid.execution import Authorization, Executor, Job, Price, ProviderResult
 from src.hybrid.fal_billing import AiohttpFalBillingClient
@@ -44,12 +49,16 @@ _PROVISIONED_ROOT = Path("C:/HermesStudio/production/jaco-flux3")
 _SOURCE_EVIDENCE_ROOT = Path("C:/HermesStudio/review-evidence/jaco-flux3-canary-20261106")
 _FAL_QUEUE_HOST = "queue.fal.run"
 _FAL_API_HOST = "fal.ai"
-_FAL_MEDIA_HOSTS = frozenset({"fal.media", "v3.fal.media"})
+# Public FAL CDN documentation identifies these exact host profiles.  This is
+# intentionally not a suffix rule: an arbitrary HTTPS origin must not inherit
+# FAL result-read authority.
+_FAL_MEDIA_HOSTS = frozenset({"fal.media", "v3.fal.media", "v3b.fal.media"})
 _FAL_PRICE_API_URL = "https://api.fal.ai/v1/models/pricing"
 _FAL_OPENAPI_URL = "https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=blackforestlabs/flux-3/text-to-image"
 _FAL_SUBMIT_URL = "https://queue.fal.run/blackforestlabs/flux-3/text-to-image"
 _QUOTE_SCHEMA = "FAL_AUTHENTICATED_PRICE_CONSUMER_SNAPSHOT/2"
 _CANONICAL_STATE_DB = Path("C:/Users/meira/AppData/Local/hermes/state.db")
+_MAX_FAL_PNG_BYTES = 50 * 1024 * 1024
 
 class ProductionCompositionError(PermissionError): pass
 
@@ -160,12 +169,81 @@ def _validate_mandate(root: Path) -> dict[str, Any]:
 
 def _fixed_https_url(url: str, *, hosts: frozenset[str]) -> str:
     """Reject provider-controlled routing before a credential can be attached."""
+    if not isinstance(url, str):
+        raise ProductionCompositionError("unapproved FAL HTTPS origin")
     parsed = urlparse(url)
-    if (not isinstance(url, str) or parsed.scheme != "https" or parsed.username
+    if (parsed.scheme != "https" or parsed.username
             or parsed.password or parsed.port is not None or parsed.fragment
             or parsed.hostname not in hosts):
         raise ProductionCompositionError("unapproved FAL HTTPS origin")
     return url
+
+
+def _fal_png_locator_projection(url: str) -> dict[str, object]:
+    """Validate a signed FAL PNG locator without serializing its opaque query."""
+    _fixed_https_url(url, hosts=_FAL_MEDIA_HOSTS)
+    parsed = urlparse(url)
+    suffix = Path(parsed.path).suffix.lower()
+    if suffix != ".png":
+        raise ProductionCompositionError("FAL result lacks a PNG locator")
+    return {
+        "scheme": parsed.scheme,
+        "hostname": parsed.hostname,
+        "port": parsed.port,
+        "extension": suffix,
+        "query_present": bool(parsed.query),
+    }
+
+
+def _download_fal_png_once(url: str, destination: Path) -> dict[str, object]:
+    """One credential-free, no-redirect CDN GET into an immutable quarantine."""
+    projection = _fal_png_locator_projection(url)
+    if destination.exists():
+        raise ProductionCompositionError("FAL quarantine destination already exists")
+    request = urllib.request.Request(url, method="GET", headers={"Accept": "image/png"})
+    context = ssl.create_default_context(cafile=certifi.where())
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _NoRedirect(), urllib.request.HTTPSHandler(context=context),
+    )
+    try:
+        with opener.open(request, timeout=30) as response:
+            length = response.headers.get("Content-Length")
+            if length is not None and (not length.isdecimal() or int(length) > _MAX_FAL_PNG_BYTES):
+                raise ProductionCompositionError("FAL PNG exceeds bounded download size")
+            chunks, received = [], 0
+            while True:
+                chunk = response.read(min(65536, _MAX_FAL_PNG_BYTES - received + 1))
+                if not chunk:
+                    break
+                received += len(chunk)
+                if received > _MAX_FAL_PNG_BYTES:
+                    raise ProductionCompositionError("FAL PNG exceeds bounded download size")
+                chunks.append(chunk)
+    except ProductionCompositionError:
+        raise
+    except OSError as exc:
+        raise ProductionCompositionError("FAL PNG GET failed") from exc
+    body = b"".join(chunks)
+    if not body.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ProductionCompositionError("FAL result is not PNG bytes")
+    try:
+        with Image.open(io.BytesIO(body)) as image:
+            image.verify()
+        with Image.open(io.BytesIO(body)) as image:
+            width, height = image.size
+            if width < 1 or height < 1:
+                raise ProductionCompositionError("FAL PNG has invalid dimensions")
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ProductionCompositionError("FAL result PNG decode failed") from exc
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(body)
+        stream.flush()
+        os.fsync(stream.fileno())
+    if sha256(destination.read_bytes()).hexdigest() != sha256(body).hexdigest():
+        raise ProductionCompositionError("FAL quarantine download readback mismatch")
+    return {**projection, "sha256": sha256(body).hexdigest(), "bytes": len(body), "width": width, "height": height}
 
 def _get_json(url: str) -> dict[str, Any]:
     """Unauthenticated fixed-origin GET used solely for the public OpenAPI."""
