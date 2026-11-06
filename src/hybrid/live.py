@@ -138,8 +138,12 @@ class _FalQueueSubmitter:
         key = os.environ.get("FAL_KEY", "")
         if not key:
             raise RuntimeError("FAL_KEY is NOT CONFIGURED")
-        if not endpoint.startswith("fal-ai/") or any(piece in endpoint for piece in ("?", "#", "..")):
-            raise ValueError("safe FAL application endpoint required")
+        if endpoint not in {
+            "fal-ai/flux-2/klein/9b/edit",
+            "blackforestlabs/flux-3/text-to-image",
+            "blackforestlabs/flux-3/edit-image",
+        }:
+            raise ValueError("approved FAL application endpoint required")
         request = urllib.request.Request(
             f"https://queue.fal.run/{endpoint}",
             data=__import__("json").dumps(arguments, separators=(",", ":")).encode(),
@@ -208,6 +212,29 @@ class FalFluxProvider(_QuarantineProvider):
         # but is not a field in the FAL API schema.
         for key in ("episode", "compilation", "semantic_action", "start", "end"):
             payload.pop(key, None)
+        # Flux 3 bootstrap is text-only. Its manifest is provenance rather than
+        # a model reference; no upload is permitted before the output is QAed.
+        if job.endpoint == "blackforestlabs/flux-3/text-to-image":
+            if "image_urls" in payload:
+                raise ValueError("FLUX 3 text bootstrap must not contain image references")
+            payload.pop("image_size", None)
+            expected = {
+                "prompt", "aspect_ratio", "resolution", "output_format",
+                "enable_prompt_expansion", "safety_tolerance",
+            }
+            if (
+                set(payload) != expected
+                or not isinstance(payload["prompt"], str)
+                or not payload["prompt"].strip()
+                or payload["aspect_ratio"] != "4:3"
+                or payload["resolution"] != "1k"
+                or payload["output_format"] != "png"
+                or payload["enable_prompt_expansion"] is not False
+                or type(payload["safety_tolerance"]) is not int
+                or not 0 <= payload["safety_tolerance"] <= 4
+            ):
+                raise ValueError("exact FLUX 3 canary payload required")
+            return payload
         requested = payload.get("image_urls")
         exact_assets = [str(asset.path) for asset in job.manifest.assets]
         if requested != exact_assets:
