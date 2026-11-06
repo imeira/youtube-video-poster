@@ -9,7 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -20,7 +21,7 @@ _SCHEMA = "episode-policy-status/v1"
 _OUTPUT_FIELDS = frozenset({
     "schema", "status", "generation", "episode_id", "generated_at_utc", "sources",
     "evidence_binding_sha256", "live_dispatch", "actual_cost_usd", "remaining_usd",
-    "visual_qa", "narrator_final_approved", "identity", "license", "thumbnail", "video",
+    "financial_status", "financial_observation", "visual_qa", "narrator_final_approved", "identity", "license", "thumbnail", "video",
     "publication", "pending_human_approvals", "snapshot_sha256",
 })
 
@@ -78,6 +79,57 @@ class ActualDeploymentStatus:
     def _stale(self) -> dict[str, Any]:
         return {"schema": _SCHEMA, "status": "STALE", "live_dispatch": False, "pending_human_approvals": False}
 
+    def _financial(self, *, endpoint: object) -> tuple[str, str, str, str]:
+        """Consume only a fresh, hash-bound settlement JSON read model.
+
+        This adapter deliberately does not import or open the SQLite publisher's
+        ledger. A bounded observation is evidence of the read time, not a
+        writer-coordinated CURRENT claim.
+        """
+        try:
+            snapshot = self._strict((self.root / "status" / "canonical-settlement-receipt.json").read_bytes())
+            expected = {
+                "schema", "status", "classification", "generation", "observed_at_utc", "outer_request_id",
+                "local_request_id", "remote_request_id", "endpoint_id", "auth_scope", "authority_mode",
+                "claim_state", "actual_micro_usd", "provenance", "canonical_receipt", "canonical_receipt_sha256",
+                "snapshot_sha256",
+            }
+            if set(snapshot) != expected or snapshot.get("schema") != "jaco-canonical-settlement-receipt-observed/v1":
+                raise ValueError("closed settlement observation required")
+            claimed = snapshot.pop("snapshot_sha256")
+            if not isinstance(claimed, str) or claimed != self._digest(self._canonical(snapshot)):
+                raise ValueError("settlement observation hash invalid")
+            observed = datetime.fromisoformat(snapshot["observed_at_utc"])
+            now = datetime.now(UTC)
+            if observed.tzinfo is None or not timedelta(0) <= now - observed.astimezone(UTC) <= timedelta(minutes=5):
+                raise ValueError("settlement observation is stale")
+            receipt = snapshot["canonical_receipt"]
+            required = {"schema", "authority", "local_request_id", "provider_request_id", "endpoint_id", "auth_scope", "authority_mode", "currency", "cost_total_micro_usd", "evidence_hash", "provenance"}
+            bindings = (snapshot["local_request_id"], snapshot["remote_request_id"], snapshot["endpoint_id"], snapshot["auth_scope"], snapshot["authority_mode"])
+            if (not isinstance(receipt, dict) or set(receipt) != required or receipt.get("schema") != 2
+                    or self._digest(self._canonical(receipt)) != snapshot["canonical_receipt_sha256"]
+                    or snapshot["outer_request_id"] != REQUEST_ID or snapshot["endpoint_id"] != endpoint
+                    or snapshot["status"] != "BOUNDED_OBSERVED"
+                    or snapshot["classification"] != "BOUNDED_OBSERVED_NO_WRITER_COORDINATION"
+                    or snapshot["claim_state"] != "SETTLED" or snapshot["provenance"] != "FAL_BILLING_READBACK"
+                    or receipt.get("authority") != "TRANSPORT_AUTHENTICATED_FAL_READBACK"
+                    or receipt.get("currency") != "USD" or receipt.get("provenance") != snapshot["provenance"]
+                    or (receipt.get("local_request_id"), receipt.get("provider_request_id"), receipt.get("endpoint_id"), receipt.get("auth_scope"), receipt.get("authority_mode")) != bindings):
+                raise ValueError("settlement receipt binding invalid")
+            actual_micro = snapshot["actual_micro_usd"]
+            if not isinstance(actual_micro, str) or not actual_micro.isdecimal() or (len(actual_micro) > 1 and actual_micro.startswith("0")) or receipt.get("cost_total_micro_usd") != actual_micro:
+                raise ValueError("settlement amount invalid")
+            financial = self._strict((self.root / "financial-record-source.json").read_bytes())
+            if financial.get("request_hash") != REQUEST_ID or financial.get("status") != "APPROVED_USD10":
+                raise ValueError("financial authority binding invalid")
+            cap = Decimal(financial["total_episode_cap"])
+            actual = Decimal(actual_micro) / Decimal(1_000_000)
+            if not cap.is_finite() or cap < actual:
+                raise ValueError("financial amount exceeds validated cap")
+            return "SETTLED", "BOUNDED_OBSERVED", format(actual, "f"), format(cap - actual, "f")
+        except (OSError, ValueError, TypeError, KeyError, InvalidOperation, UnicodeDecodeError, json.JSONDecodeError):
+            return "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"
+
     def publish(self) -> dict[str, Any]:
         try:
             loaded = {name: self._read(name) for name in (
@@ -101,13 +153,15 @@ class ActualDeploymentStatus:
                 "sources": {name: {"path": str(path.resolve()), "sha256": sources[name]} for name, (path, _raw, _doc) in loaded.items()},
             }
             inventory["inventory_sha256"] = self._digest(self._canonical(inventory))
-            # The receipt explicitly says billing is unreconciled.  Never convert a
-            # ceiling, claimed receipt, or balance calculation into actual spend.
+            financial_status, financial_observation, actual_cost, remaining = self._financial(
+                endpoint=packet.get("bindings", {}).get("endpoint")
+            )
             document = {
                 "schema": _SCHEMA, "status": "BLOCKED_DELIVERY_READINESS", "generation": self._generation(),
                 "episode_id": "JACO_GENESIS28", "generated_at_utc": datetime.now(UTC).isoformat(),
                 "sources": sources, "evidence_binding_sha256": self._digest(self._canonical(sources)),
-                "live_dispatch": False, "actual_cost_usd": "UNKNOWN", "remaining_usd": "UNKNOWN",
+                "live_dispatch": False, "actual_cost_usd": actual_cost, "remaining_usd": remaining,
+                "financial_status": financial_status, "financial_observation": financial_observation,
                 "visual_qa": qa.get("verdict"), "narrator_final_approved": "UNKNOWN",
                 "identity": "UNKNOWN", "license": mandate.get("license_status", "UNKNOWN"),
                 "thumbnail": "UNKNOWN", "video": "UNKNOWN", "publication": "UNKNOWN",
