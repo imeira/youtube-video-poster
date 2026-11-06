@@ -54,13 +54,16 @@ constraints.  Until a configured independent reviewer service returns a
 trust-rooted PASS bound to that packet, the existing `LiveExecutionService`
 remains the boundary and no reservation or POST is created.
 
-The authenticated FAL pricing GET is quote evidence only.  The current quote is
-USD 0.048 per megapixel; it is not billing readback and the OpenAPI resolution
-tier does not document exact output pixels or billing rounding.  Therefore the
-packet exposes USD 0.048 as the requested one-megapixel reservation ceiling but
-does not claim that a `4:3`, `1k` raster is billed at exactly one megapixel.  A
-LIVE admission must fail closed if the reviewer/trust service cannot confirm
-that the requested tier is bounded by that ceiling.
+The authenticated FAL pricing GET is catalog evidence only, not billing
+readback and not a transaction quote. Its exact current row has unit
+`megapixels` and unit price USD 0.048. The official model page separately says
+that a `1k` image is 1 MP, costs USD 0.048, and has one flat price per image by
+resolution. Thus this review binds USD 0.048 only for this closed one-output
+`1k` payload, by comparing the fresh authenticated catalog row with that
+published model-price contract. It never represents `observed_at` or a local
+refresh age as provider-issued price validity or expiry. A later paid admission
+must refresh the authenticated GET and re-check both facts immediately before
+POST; any different price/unit or unavailable evidence blocks it.
 
 ## LOCAL_PROCESS_REVIEW successor policy
 
@@ -89,14 +92,17 @@ host/user, **not** hostile-code isolation or an independent organization claim.
 No caller `VERIFIED` string, `mode` boolean, local root, or arbitrary expiry can
 promote it.
 
-The provider must issue an expiry in the authenticated quote evidence.  The
-policy rejects a local/invented TTL, stale quote, changed input/request hash,
-symlink/reparse input, and replay before reviewer spawn.  If the quote is
-expired, one authenticated GET-only refresh is permitted; if the price differs,
-the flow stops for a new bounded preflight rather than recomputing authority.
-Only a parent-owned later admission path may perform the one durable
-`prepare → reserve USD 0.048 → checkpoint → POST` attempt after revalidating
-the review output.  That path remains unimplemented and is intentionally not
-called by this review policy.  Post-generation visual QA is a separate
-pixel-based review and can never be self-approved by this pre-generation
-reviewer.
+The authenticated catalog snapshot records the provider's actual `observed_at`
+time and explicitly records `provider_expiry: null`, because this documented
+pricing GET does not issue a transaction-quote expiry. `observed_at` is checked
+against a local 300-second refresh policy labelled
+`OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_PRICE_VALIDITY`; it is only an
+admission freshness control, never a claim that FAL guarantees a price for that
+period. A stale catalog observation, changed input/request hash, symlink/reparse
+input, or replay blocks before reviewer spawn. Only a parent-owned later
+admission path may perform the one durable `prepare → reserve USD 0.048 →
+checkpoint → POST` attempt after independently revalidating the review output
+and the fresh catalog/model-price comparison. That path remains unimplemented
+and is intentionally not called by this review policy. Post-generation visual QA
+is a separate pixel-based review and can never be self-approved by this
+pre-generation reviewer.

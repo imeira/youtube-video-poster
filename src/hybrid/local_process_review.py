@@ -26,6 +26,9 @@ _POLICY_KIND = "LOCAL_PROCESS_REVIEW_POLICY"
 _POLICY_SCHEMA = 1
 _OUTPUT_KIND = "LOCAL_PROCESS_REVIEW_OUTPUT"
 _OUTPUT_SCHEMA = 1
+_CATALOG_PRICE_SCHEMA = "FAL_AUTHENTICATED_CATALOG_PRICE_SNAPSHOT/1"
+_LOCAL_CATALOG_REFRESH_MAX_AGE_SECONDS = 300
+_LOCAL_CATALOG_REFRESH_POLICY = "OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_PRICE_VALIDITY"
 _REQUIRED_PROHIBITIONS = [
     "NO_FAL_PAID_POST", "NO_RESERVATION", "NO_GATEWAY_OR_OTHER_EP_WRITE", "NO_TEST_AS_LIVE",
 ]
@@ -96,6 +99,25 @@ def _regular_beneath(path: Path, root: Path, label: str, *, must_exist: bool = T
     return path
 
 
+def _catalog_price_snapshot(document: dict[str, Any], *, clock: float) -> int:
+    required = {
+        "schema", "endpoint_id", "currency", "maximum_usd", "unit", "unit_price_usd",
+        "observed_at_epoch", "provider_expiry", "price_validity",
+    }
+    if set(document) != required or document.get("schema") != _CATALOG_PRICE_SCHEMA:
+        raise LocalProcessReviewError("closed authenticated catalog price snapshot required")
+    if (document.get("endpoint_id") != ENDPOINT or document.get("currency") != "USD"
+            or document.get("unit") != "megapixels" or document.get("unit_price_usd") != "0.048"
+            or document.get("maximum_usd") != "0.048"
+            or document.get("provider_expiry") is not None
+            or document.get("price_validity") != "CATALOG_PRICE_NOT_TRANSACTION_QUOTE"):
+        raise LocalProcessReviewError("quote value mismatch")
+    observed_at = document.get("observed_at_epoch")
+    if type(observed_at) is not int or observed_at > clock or clock - observed_at > _LOCAL_CATALOG_REFRESH_MAX_AGE_SECONDS:
+        raise LocalProcessReviewError("catalog observation is stale")
+    return observed_at
+
+
 def _read_policy(policy_path: Path, *, clock: float) -> tuple[dict[str, Any], Path]:
     policy_path = Path(policy_path)
     if not policy_path.is_absolute():
@@ -103,7 +125,7 @@ def _read_policy(policy_path: Path, *, clock: float) -> tuple[dict[str, Any], Pa
     root = policy_path.parent
     _regular_beneath(policy_path, root, "policy")
     policy, digest, _size = _load_json(policy_path, "policy")
-    required = {"schema", "kind", "scope", "root", "request_id", "review_request_sha256", "quote_expires_at", "inputs", "output_path", "policy_sha256"}
+    required = {"schema", "kind", "scope", "root", "request_id", "review_request_sha256", "quote_observed_at_epoch", "inputs", "output_path", "policy_sha256"}
     if set(policy) != required or policy.get("schema") != _POLICY_SCHEMA or policy.get("kind") != _POLICY_KIND:
         raise LocalProcessReviewError("closed LOCAL_PROCESS_REVIEW policy required")
     body = {key: value for key, value in policy.items() if key != "policy_sha256"}
@@ -113,11 +135,9 @@ def _read_policy(policy_path: Path, *, clock: float) -> tuple[dict[str, Any], Pa
         raise LocalProcessReviewError("policy scope is not the Jacó one-canary scope")
     if policy.get("root") != str(root):
         raise LocalProcessReviewError("policy root mismatch")
-    expiry = policy.get("quote_expires_at")
-    if type(expiry) is not int or expiry <= clock:
-        raise LocalProcessReviewError("quote expiry is stale")
-    if expiry - clock > 300:
-        raise LocalProcessReviewError("quote expiry exceeds bounded freshness")
+    observed_at = policy.get("quote_observed_at_epoch")
+    if type(observed_at) is not int or observed_at > clock or clock - observed_at > _LOCAL_CATALOG_REFRESH_MAX_AGE_SECONDS:
+        raise LocalProcessReviewError("catalog observation is stale")
     if not isinstance(policy.get("review_request_sha256"), str) or len(policy["review_request_sha256"]) != 64:
         raise LocalProcessReviewError("review request hash is invalid")
     if not isinstance(policy.get("inputs"), dict) or set(policy["inputs"]) != {"packet", "review_request", "quote", "openapi", "financial_record"}:
@@ -133,6 +153,9 @@ def _read_policy(policy_path: Path, *, clock: float) -> tuple[dict[str, Any], Pa
     review_descriptor = policy["inputs"]["review_request"]
     if review_descriptor["sha256"] != policy["review_request_sha256"]:
         raise LocalProcessReviewError("review request hash does not bind input")
+    quote_document, _quote_digest, _quote_bytes = _load_json(Path(policy["inputs"]["quote"]["path"]), "quote")
+    if _catalog_price_snapshot(quote_document, clock=clock) != observed_at:
+        raise LocalProcessReviewError("catalog observation does not bind policy")
     output = Path(policy["output_path"])
     _regular_beneath(output, root, "review output", must_exist=False)
     if output.exists():
@@ -159,14 +182,12 @@ def build_local_process_review_policy(*, root: Path, packet_path: Path, review_r
     if inputs["review_request"]["sha256"] != review_request_sha256:
         raise LocalProcessReviewError("review request hash mismatch")
     quote_document, _quote_digest, _quote_bytes = _load_json(Path(quote_path), "quote")
-    provider_expiry = quote_document.get("valid_until_epoch")
-    if type(provider_expiry) is not int:
-        raise LocalProcessReviewError("provider-issued quote expiry is required; local TTL is not accepted")
+    observed_at = _catalog_price_snapshot(quote_document, clock=time.time())
     _regular_beneath(Path(output_path), root, "review output", must_exist=False)
     body: dict[str, object] = {
         "schema": _POLICY_SCHEMA, "kind": _POLICY_KIND, "scope": "JACO_FLUX3_ONE_CANARY_EVALUATION",
         "root": str(root), "request_id": request_id, "review_request_sha256": review_request_sha256,
-        "quote_expires_at": provider_expiry, "inputs": inputs, "output_path": str(Path(output_path)),
+        "quote_observed_at_epoch": observed_at, "inputs": inputs, "output_path": str(Path(output_path)),
     }
     policy = {**body, "policy_sha256": _sha256_bytes(_canonical(body))}
     path = root / "local-process-review-policy.json"
@@ -216,6 +237,7 @@ def _review(policy: dict[str, Any]) -> dict[str, Any]:
     _expect(payload["aspect_ratio"] == "4:3" and payload["resolution"] == "1k" and payload["output_format"] == "png" and payload["enable_prompt_expansion"] is False and type(payload["safety_tolerance"]) is int and 0 <= payload["safety_tolerance"] <= 4, "payload contract mismatch")
     _expect(candidate.get("call_limit") == 1 and candidate.get("single_output") is True and candidate.get("reference_inputs") == [], "one-canary scope mismatch")
     _expect(bindings.get("payload_sha256") == _sha256_bytes(_canonical(payload)) == exact.get("payload_sha256"), "payload hash mismatch")
+    quote_observed_at = _catalog_price_snapshot(quote, clock=time.time())
     _expect(quote_sha == bindings.get("authenticated_price_quote", {}).get("sha256") and quote_bytes == bindings.get("authenticated_price_quote", {}).get("bytes"), "quote binding mismatch")
     _expect(openapi_sha == bindings.get("openapi_snapshot", {}).get("sha256") and openapi_bytes == bindings.get("openapi_snapshot", {}).get("bytes"), "OpenAPI binding mismatch")
     quote_endpoint = quote.get("endpoint_id", quote.get("endpoint"))
@@ -236,6 +258,9 @@ def _review(policy: dict[str, Any]) -> dict[str, Any]:
         "packet_sha256": packet_sha, "review_request_sha256": request_sha,
         "quote_sha256": quote_sha, "openapi_sha256": openapi_sha, "financial_record_sha256": finance_sha,
         "prohibitions": _REQUIRED_PROHIBITIONS,
+        "price_evidence": {"snapshot_kind": _CATALOG_PRICE_SCHEMA, "observed_at_epoch": quote_observed_at,
+                           "provider_expiry": None, "price_validity": "CATALOG_PRICE_NOT_TRANSACTION_QUOTE",
+                           "local_refresh_policy": _LOCAL_CATALOG_REFRESH_POLICY},
         "isolation": {"fresh_process": True, "environment": "SCRUBBED_MINIMAL", "provider_secrets_available": False,
                       "spend_credentials_available": False, "gateway_available": False, "publish_available": False,
                       "allowed_inputs": "READ_ONLY_HASH_BOUND_ALLOWLIST", "output": "WRITE_ONLY_REVIEW_OUTPUT",

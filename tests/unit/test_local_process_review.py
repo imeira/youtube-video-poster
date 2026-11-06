@@ -20,8 +20,18 @@ def _write_json(path: Path, value: object) -> Path:
     return path
 
 
-def _inputs(tmp_path: Path, *, quote_expiry: int | None = None) -> dict[str, Path]:
-    quote = _write_json(tmp_path / "quote.json", {"endpoint_id": ENDPOINT, "currency": "USD", "maximum_usd": "0.048", "quote_id": "quoted-1", "valid_until_epoch": quote_expiry if quote_expiry is not None else int(time.time()) + 120})
+def _inputs(tmp_path: Path, *, observed_at_epoch: int | None = None) -> dict[str, Path]:
+    quote = _write_json(tmp_path / "quote.json", {
+        "schema": "FAL_AUTHENTICATED_CATALOG_PRICE_SNAPSHOT/1",
+        "endpoint_id": ENDPOINT,
+        "currency": "USD",
+        "maximum_usd": "0.048",
+        "unit": "megapixels",
+                "unit_price_usd": "0.048",
+        "observed_at_epoch": observed_at_epoch if observed_at_epoch is not None else int(time.time()),
+        "provider_expiry": None,
+        "price_validity": "CATALOG_PRICE_NOT_TRANSACTION_QUOTE",
+    })
     openapi = _write_json(tmp_path / "openapi.json", {"endpoint": ENDPOINT, "output_format": "png", "resolution": "1k"})
     finance = _write_json(tmp_path / "finance.json", {
         "schema": "jaco-factory-financial-reconciliation/1", "request_hash": REQUEST_ID,
@@ -56,10 +66,10 @@ def _inputs(tmp_path: Path, *, quote_expiry: int | None = None) -> dict[str, Pat
     return {"packet": packet_path, "request": request, "quote": quote, "openapi": openapi, "finance": finance}
 
 
-def _policy(tmp_path: Path, *, request_sha: str | None = None, expires_at: int | None = None) -> Path:
+def _policy(tmp_path: Path, *, request_sha: str | None = None, observed_at_epoch: int | None = None) -> Path:
     from src.hybrid.local_process_review import build_local_process_review_policy
 
-    paths = _inputs(tmp_path, quote_expiry=expires_at)
+    paths = _inputs(tmp_path, observed_at_epoch=observed_at_epoch)
     return build_local_process_review_policy(
         root=tmp_path, packet_path=paths["packet"], review_request_path=paths["request"],
         quote_path=paths["quote"], openapi_path=paths["openapi"], financial_record_path=paths["finance"],
@@ -91,36 +101,54 @@ def test_local_process_reviewer_rejects_wrong_review_request_hash_before_policy_
     assert not (tmp_path / "review-output.json").exists()
 
 
-def test_local_process_reviewer_rejects_expired_quote_before_spawn(tmp_path):
+def test_local_process_reviewer_rejects_stale_catalog_observation_before_spawn(tmp_path):
     from src.hybrid.local_process_review import (
         LocalProcessReviewError,
         run_local_process_review,
     )
 
-    policy = _policy(tmp_path, expires_at=int(time.time()) - 1)
-    with pytest.raises(LocalProcessReviewError, match="quote expiry"):
+    policy = _policy(tmp_path)
+    document = json.loads(policy.read_text(encoding="utf-8"))
+    document["quote_observed_at_epoch"] = int(time.time()) - 301
+    body = {key: value for key, value in document.items() if key != "policy_sha256"}
+    document["policy_sha256"] = sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    _write_json(policy, document)
+    with pytest.raises(LocalProcessReviewError, match="catalog observation is stale"):
         run_local_process_review(policy)
     assert not (tmp_path / "review-output.json").exists()
 
 
-def test_local_process_reviewer_requires_provider_issued_expiry_not_a_local_ttl(tmp_path):
+def test_local_process_reviewer_accepts_catalog_price_without_inventing_provider_expiry(tmp_path):
+    from src.hybrid.local_process_review import run_local_process_review
+
+    policy = _policy(tmp_path)
+    result = run_local_process_review(policy)
+
+    assert result["price_evidence"]["provider_expiry"] is None
+    assert result["price_evidence"]["local_refresh_policy"] == "OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_PRICE_VALIDITY"
+
+
+def test_local_process_reviewer_rejects_fake_catalog_price(tmp_path):
     from src.hybrid.local_process_review import (
         LocalProcessReviewError,
         build_local_process_review_policy,
+        run_local_process_review,
     )
 
     paths = _inputs(tmp_path)
+    policy = build_local_process_review_policy(
+        root=tmp_path, packet_path=paths["packet"], review_request_path=paths["request"],
+        quote_path=paths["quote"], openapi_path=paths["openapi"], financial_record_path=paths["finance"],
+        output_path=tmp_path / "review-output.json", request_id=REQUEST_ID,
+        review_request_sha256=_sha(paths["request"]),
+    )
     quote = json.loads(paths["quote"].read_text(encoding="utf-8"))
-    quote.pop("valid_until_epoch")
+    quote["maximum_usd"] = "0.047"
     _write_json(paths["quote"], quote)
 
-    with pytest.raises(LocalProcessReviewError, match="provider-issued quote expiry"):
-        build_local_process_review_policy(
-            root=tmp_path, packet_path=paths["packet"], review_request_path=paths["request"],
-            quote_path=paths["quote"], openapi_path=paths["openapi"], financial_record_path=paths["finance"],
-            output_path=tmp_path / "review-output.json", request_id=REQUEST_ID,
-            review_request_sha256=_sha(paths["request"]),
-        )
+    with pytest.raises(LocalProcessReviewError, match="input hash mismatch"):
+        run_local_process_review(policy)
+    assert not (tmp_path / "review-output.json").exists()
 
 
 def test_local_process_reviewer_replay_is_write_once(tmp_path):
