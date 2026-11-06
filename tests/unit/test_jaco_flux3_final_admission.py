@@ -106,7 +106,7 @@ async def test_final_receipt_uses_existing_executor_ledger_kernel_and_recovers_w
               manifest, Decimal("0.048"))
     ledger = StandingBudgetLedger(tmp_path / "ledger.sqlite3", policy_sha256="a" * 64,
                                   episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
-    executor = Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal("10")), standing_ledger=ledger)
+    executor = Executor(tmp_path / "executor.sqlite3", Config(limit=Decimal(10)), standing_ledger=ledger)
 
     class Provider:
         mode = "TEST"
