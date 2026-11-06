@@ -7,7 +7,6 @@ Signed media URLs exist only in local variables while the CDN GET is in flight.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import ssl
 import urllib.request
@@ -19,9 +18,9 @@ import certifi
 from src.hybrid.fal_get_only_preflight import resolve_default_fal_credential
 from src.hybrid.jaco_flux3_production import (
     ProductionCompositionError,
-    _NoRedirect,
     _download_fal_png_once,
     _fal_png_locator_projection,
+    _NoRedirect,
     _write_once,
 )
 
