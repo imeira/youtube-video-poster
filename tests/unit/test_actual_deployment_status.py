@@ -63,3 +63,19 @@ def test_actual_evidence_projection_fails_closed_for_tamper_foreign_request_and_
     output = root / "status" / "actual-deployment-status.json"
     _write(output, {"schema": "episode-policy-status/v1", "status": "BLOCKED_DELIVERY_READINESS"})
     assert ActualDeploymentStatus(root).inspect() == {"status": "STALE", "reason": "INVALID"}
+
+
+def test_inspect_rejects_boolean_generation_even_with_recomputed_hash(tmp_path: Path):
+    from src.hybrid.actual_deployment_status import ActualDeploymentStatus
+
+    root = _root(tmp_path)
+    status = ActualDeploymentStatus(root)
+    document = status.publish()
+    document["generation"] = True
+    body = {key: value for key, value in document.items() if key != "snapshot_sha256"}
+    document["snapshot_sha256"] = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    ).hexdigest()
+    _write(root / "status" / "actual-deployment-status.json", document)
+
+    assert status.inspect() == {"status": "STALE", "reason": "INVALID"}

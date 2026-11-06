@@ -85,6 +85,29 @@ def test_publisher_rejects_foreign_or_tampered_receipts(tmp_path: Path):
     assert SettlementReceiptSnapshotPublisher(root).publish()["status"] == "STALE"
 
 
+def test_publisher_rejects_boolean_nested_receipt_field_and_non_live_authority(tmp_path: Path):
+    root = _root(tmp_path / "boolean")
+    ledger = _ledger(root)
+    with sqlite3.connect(ledger) as db:
+        body = db.execute("SELECT receipt_body FROM settlement_receipts").fetchone()[0]
+        receipt = json.loads(body)
+        receipt["evidence_hash"] = True
+        body = _canonical(receipt).decode("utf-8")
+        db.execute("UPDATE settlement_receipts SET receipt_body=?, receipt_sha256=?", (body, hashlib.sha256(body.encode()).hexdigest()))
+    assert SettlementReceiptSnapshotPublisher(root).publish()["status"] == "STALE"
+
+    root = _root(tmp_path / "test-authority")
+    ledger = _ledger(root)
+    with sqlite3.connect(ledger) as db:
+        body = db.execute("SELECT receipt_body FROM settlement_receipts").fetchone()[0]
+        receipt = json.loads(body)
+        receipt["authority_mode"] = "TEST"
+        body = _canonical(receipt).decode("utf-8")
+        db.execute("UPDATE claims SET authority_mode='TEST'")
+        db.execute("UPDATE settlement_receipts SET receipt_body=?, receipt_sha256=?", (body, hashlib.sha256(body.encode()).hexdigest()))
+    assert SettlementReceiptSnapshotPublisher(root).publish()["status"] == "STALE"
+
+
 def test_filesystem_status_uses_valid_settlement_over_stale_provider_unknown_without_sqlite(tmp_path: Path, monkeypatch):
     root = _root(tmp_path)
     _ledger(root)

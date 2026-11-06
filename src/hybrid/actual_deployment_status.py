@@ -94,10 +94,16 @@ class ActualDeploymentStatus:
                 "claim_state", "actual_micro_usd", "provenance", "canonical_receipt", "canonical_receipt_sha256",
                 "snapshot_sha256",
             }
-            if set(snapshot) != expected or snapshot.get("schema") != "jaco-canonical-settlement-receipt-observed/v1":
+            text_fields = ("outer_request_id", "local_request_id", "remote_request_id", "endpoint_id", "auth_scope", "authority_mode", "claim_state", "actual_micro_usd", "provenance", "canonical_receipt_sha256", "observed_at_utc")
+            if (set(snapshot) != expected or snapshot.get("schema") != "jaco-canonical-settlement-receipt-observed/v1"
+                    or type(snapshot.get("generation")) is not int or snapshot["generation"] < 1
+                    or any(not isinstance(snapshot.get(key), str) or not snapshot[key] or len(snapshot[key]) > 512 for key in text_fields)
+                    or snapshot.get("authority_mode") != "LIVE"):
                 raise ValueError("closed settlement observation required")
             claimed = snapshot.pop("snapshot_sha256")
-            if not isinstance(claimed, str) or claimed != self._digest(self._canonical(snapshot)):
+            if (not isinstance(claimed, str) or len(claimed) != 64
+                    or any(character not in "0123456789abcdef" for character in claimed)
+                    or claimed != self._digest(self._canonical(snapshot))):
                 raise ValueError("settlement observation hash invalid")
             observed = datetime.fromisoformat(snapshot["observed_at_utc"])
             now = datetime.now(UTC)
@@ -106,14 +112,20 @@ class ActualDeploymentStatus:
             receipt = snapshot["canonical_receipt"]
             required = {"schema", "authority", "local_request_id", "provider_request_id", "endpoint_id", "auth_scope", "authority_mode", "currency", "cost_total_micro_usd", "evidence_hash", "provenance"}
             bindings = (snapshot["local_request_id"], snapshot["remote_request_id"], snapshot["endpoint_id"], snapshot["auth_scope"], snapshot["authority_mode"])
-            if (not isinstance(receipt, dict) or set(receipt) != required or receipt.get("schema") != 2
+            if (not isinstance(receipt, dict) or set(receipt) != required or type(receipt.get("schema")) is not int
+                    or receipt.get("schema") != 2
+                    or not isinstance(receipt.get("evidence_hash"), str)
+                    or len(receipt["evidence_hash"]) != 64
+                    or any(character not in "0123456789abcdef" for character in receipt["evidence_hash"])
+                    or any(not isinstance(receipt.get(key), str) or not receipt[key] or len(receipt[key]) > 512 for key in ("local_request_id", "provider_request_id", "endpoint_id", "auth_scope", "authority_mode"))
                     or self._digest(self._canonical(receipt)) != snapshot["canonical_receipt_sha256"]
                     or snapshot["outer_request_id"] != REQUEST_ID or snapshot["endpoint_id"] != endpoint
                     or snapshot["status"] != "BOUNDED_OBSERVED"
                     or snapshot["classification"] != "BOUNDED_OBSERVED_NO_WRITER_COORDINATION"
                     or snapshot["claim_state"] != "SETTLED" or snapshot["provenance"] != "FAL_BILLING_READBACK"
                     or receipt.get("authority") != "TRANSPORT_AUTHENTICATED_FAL_READBACK"
-                    or receipt.get("currency") != "USD" or receipt.get("provenance") != snapshot["provenance"]
+                    or receipt.get("currency") != "USD" or receipt.get("authority_mode") != "LIVE"
+                    or receipt.get("provenance") != snapshot["provenance"]
                     or (receipt.get("local_request_id"), receipt.get("provider_request_id"), receipt.get("endpoint_id"), receipt.get("auth_scope"), receipt.get("authority_mode")) != bindings):
                 raise ValueError("settlement receipt binding invalid")
             actual_micro = snapshot["actual_micro_usd"]
@@ -179,6 +191,18 @@ class ActualDeploymentStatus:
             document = self._strict(self.output.read_bytes())
             if set(document) != _OUTPUT_FIELDS or document.get("schema") != _SCHEMA:
                 raise ValueError("closed status schema required")
+            if (type(document.get("generation")) is not int or document["generation"] < 1
+                    or type(document.get("live_dispatch")) is not bool or document["live_dispatch"] is not False
+                    or type(document.get("pending_human_approvals")) is not bool or document["pending_human_approvals"] is not False
+                    or document.get("status") != "BLOCKED_DELIVERY_READINESS"
+                    or document.get("episode_id") != "JACO_GENESIS28"
+                    or not isinstance(document.get("generated_at_utc"), str)
+                    or not isinstance(document.get("sources"), dict)
+                    or set(document["sources"]) != {"user-mandate.json", "execution/packet.json", "execution/provider-receipt.json", "execution/qa/provider-receipt.visual-qa.v1.json", "execution/provider-receipt.quarantine.png"}
+                    or any(not isinstance(value, str) or len(value) != 64 or any(character not in "0123456789abcdef" for character in value) for value in document["sources"].values())
+                    or not isinstance(document.get("evidence_binding_sha256"), str)
+                    or document["evidence_binding_sha256"] != self._digest(self._canonical(document["sources"]))):
+                raise ValueError("status values are invalid")
             claimed = document["snapshot_sha256"]
             body = {key: value for key, value in document.items() if key != "snapshot_sha256"}
             if not isinstance(claimed, str) or claimed != self._digest(self._canonical(body)):

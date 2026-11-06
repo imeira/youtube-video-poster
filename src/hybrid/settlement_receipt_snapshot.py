@@ -113,12 +113,21 @@ class SettlementReceiptSnapshotPublisher:
         receipt = self._strict(receipt_body.encode("utf-8"))
         canonical_body = self._canonical(receipt).decode("utf-8")
         required = {"schema", "authority", "local_request_id", "provider_request_id", "endpoint_id", "auth_scope", "authority_mode", "currency", "cost_total_micro_usd", "evidence_hash", "provenance"}
-        if (set(receipt) != required or receipt.get("schema") != 2 or canonical_body != receipt_body
+        if (set(receipt) != required or type(receipt.get("schema")) is not int
+                or receipt.get("schema") != 2 or canonical_body != receipt_body
                 or not isinstance(row["receipt_sha256"], str)
                 or sha256(receipt_body.encode("utf-8")).hexdigest() != row["receipt_sha256"]):
             raise ValueError("canonical receipt integrity is invalid")
+        text_fields = ("local_request_id", "provider_request_id", "endpoint_id", "auth_scope", "authority_mode")
         if (receipt.get("authority") != "TRANSPORT_AUTHENTICATED_FAL_READBACK"
                 or receipt.get("currency") != "USD" or receipt.get("provenance") != "FAL_BILLING_READBACK"
+                or receipt.get("authority_mode") != "LIVE"
+                or not isinstance(receipt.get("evidence_hash"), str)
+                or len(receipt["evidence_hash"]) != 64
+                or any(character not in "0123456789abcdef" for character in receipt["evidence_hash"])
+                or any(not isinstance(receipt.get(key), str) or not receipt[key] or len(receipt[key]) > 512 for key in text_fields)
+                or any(not isinstance(row.get(key), str) or not row[key] for key in ("request_id", "provider", "auth_scope", "provider_request_id", "authority_mode", "provenance"))
+                or type(row.get("actual")) is not int or type(row.get("receipt_actual")) is not int
                 or receipt.get("provenance") != row["provenance"]):
             raise ValueError("canonical receipt provenance is invalid")
         amount = receipt.get("cost_total_micro_usd")
