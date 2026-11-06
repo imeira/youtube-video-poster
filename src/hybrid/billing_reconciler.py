@@ -159,7 +159,11 @@ class JacoFinalAdmissionContractVerifier:
         if (
             receipt.get("mode") != "LIVE" or receipt.get("request_id") != binding["local_request_id"]
             or receipt.get("endpoint") != mandate["endpoint"]
-            or receipt.get("intent_input_sha256") != mandate["payload_sha256"]
+            or receipt.get("input_contract") != {
+                "schema": 1,
+                "input_kind": "TEXT_TO_IMAGE",
+                "payload_sha256": mandate["payload_sha256"],
+            }
             or not isinstance(marker, dict) or set(marker) != self._MARKER_FIELDS
             or marker.get("schema") != 2 or marker.get("kind") != "JACO_FLUX3_FINAL_ADMISSION_MARKER"
             or marker.get("receipt_path") != str((self.execution_root / "final-admission-receipt.json").resolve())

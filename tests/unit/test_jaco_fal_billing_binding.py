@@ -67,7 +67,11 @@ def _contract(tmp_path: Path):
     executor_receipt = {
         "receipt_schema": 2, "request_id": LOCAL_ID, "endpoint": ENDPOINT,
         "mode": "LIVE", "authorization": {"request_id": LOCAL_ID},
-        "intent_input_sha256": PAYLOAD_SHA,
+        "input_contract": {
+            "schema": 1,
+            "input_kind": "TEXT_TO_IMAGE",
+            "payload_sha256": PAYLOAD_SHA,
+        },
         "final_admission_marker": {
             "schema": 2, "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER",
             "receipt_path": str((execution / "final-admission-receipt.json").resolve()),
@@ -112,11 +116,32 @@ def test_jaco_contract_verifier_rejects_test_as_live_and_wrong_receipt_or_remote
         lambda r, b, c: r.__setitem__("mode", "TEST"),
         lambda r, b, c: r["final_admission_marker"].__setitem__("receipt_sha256", "0" * 64),
         lambda r, b, c: b.__setitem__("provider_request_id", "wrong-remote"),
+        lambda r, b, c: b.__setitem__("auth_scope", "JACO_FLUX3_FINAL_ADMISSION:wrong"),
     ):
         r, b, c = deepcopy(receipt), deepcopy(binding), deepcopy(claim)
         mutate(r, b, c)
         with pytest.raises(SettlementDenied, match="final-admission"):
             verifier.verify(r, b, c)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("schema", 2), ("input_kind", "IMAGE_EDIT"), ("payload_sha256", "f" * 64)),
+)
+def test_jaco_contract_verifier_rejects_forged_input_contract_before_readback(
+    tmp_path, field, value,
+):
+    from src.hybrid.billing_reconciler import (
+        JacoFinalAdmissionContractVerifier,
+        SettlementDenied,
+    )
+
+    receipt, binding, claim, root, execution = _contract(tmp_path)
+    receipt["input_contract"][field] = value
+    verifier = JacoFinalAdmissionContractVerifier(root=root, execution_root=execution)
+
+    with pytest.raises(SettlementDenied, match="final-admission"):
+        verifier.verify(receipt, binding, claim)
 
 
 def test_jaco_contract_verifier_rejects_wrong_claim_currency_amount_and_settlement_identity(tmp_path):
