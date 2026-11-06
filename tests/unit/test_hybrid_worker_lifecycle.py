@@ -257,3 +257,39 @@ def test_read_status_uses_no_sql_and_rejects_duplicate_json_keys(tmp_path, monke
 
     snapshot.write_bytes(b'{"schema":"episode-task-queue-snapshot-v1","schema":"forged"}')
     assert EpisodeTaskQueue.read_status(queue.database, "TEST-EP")["snapshot"] == "STALE"
+
+
+def test_serve_uses_a_rolling_bounded_window_without_another_runner(tmp_path):
+    """One worker host can own two distinct TEST episodes, never more than asked."""
+    queue = EpisodeTaskQueue(tmp_path / "worker.sqlite3")
+    queue.enqueue("TEST-ONE", str(tmp_path / "one"), "fixture")
+    queue.enqueue("TEST-TWO", str(tmp_path / "two"), "fixture")
+    entered, release, stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    active, peak = set(), []
+
+    async def handler(task):
+        active.add(task["episode_id"])
+        peak.append(len(active))
+        if len(active) == 2:
+            entered.set()
+        await release.wait()
+        active.remove(task["episode_id"])
+        return {"state": "DONE", "next_action": "TERMINAL"}
+
+    async def exercise():
+        worker = DurableEpisodeWorker(queue, "bounded", handler, poll_seconds=0.01)
+        serving = asyncio.create_task(worker.serve(stop=stop, concurrency=2))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert peak == [1, 2]
+        release.set()
+        for episode_id in ("TEST-ONE", "TEST-TWO"):
+            deadline = asyncio.get_running_loop().time() + 2
+            while queue.status(episode_id)["status"] != "DONE":
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.01)
+        stop.set()
+        await asyncio.wait_for(serving, timeout=2)
+        with pytest.raises(ValueError, match="1 through 32"):
+            await worker.serve(stop=asyncio.Event(), concurrency=33)
+
+    asyncio.run(exercise())
