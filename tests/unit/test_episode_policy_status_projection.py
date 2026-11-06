@@ -1,0 +1,101 @@
+"""TDD acceptance for the read-only episode policy status projection."""
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+EPISODE = "JACO_GENESIS28"
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _write(path: Path, document: dict) -> tuple[str, str]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_canonical(document))
+    return str(path), hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _config(tmp_path: Path, *, queue_status: str = "WAITING", policy_mode: str = "LIVE") -> tuple[Path, Path]:
+    now = datetime.now(UTC).isoformat()
+    documents = {
+        "policy": {"schema": "episode-policy/v1", "episode_id": EPISODE, "mode": policy_mode, "external_trust": False},
+        "queue": {"schema": "episode-task-queue-snapshot-v1", "episode_id": EPISODE, "status": queue_status, "generated_at_utc": now},
+        "runner": {"schema": "runner-receipt/v1", "episode_id": EPISODE, "state": "WAITING_HUMAN_THUMBNAIL"},
+        "qa": {"schema": "visual-qa/v1", "episode_id": EPISODE, "verdict": "NOT_PROMOTED"},
+        "narrative": {"schema": "narrative-status/v1", "episode_id": EPISODE, "final_approved": False},
+        "assets": {"schema": "asset-status/v1", "episode_id": EPISODE, "identity": "UNAVAILABLE", "license": "UNAVAILABLE", "thumbnail": "NONE", "video": "NONE", "publication": "NONE"},
+        "billing": {"schema": "ledger-projection/v1", "episode_id": EPISODE, "settlement": "SETTLED", "actual_cost_usd": "0.048", "remaining_usd": "9.952", "authenticated": True},
+    }
+    sources = {}
+    for name, document in documents.items():
+        path, digest = _write(tmp_path / f"{name}.json", document)
+        sources[name] = {"path": path, "sha256": digest}
+    config = tmp_path / "config.json"
+    _write(config, {"schema": "episode-policy-status-config/v1", "episode_id": EPISODE, "max_age_seconds": 300, "sources": sources})
+    return config, tmp_path / "episode-policy-status.json"
+
+
+def test_projection_preserves_actual_canary_evidence_and_never_enables_live(tmp_path: Path):
+    from src.hybrid.episode_policy_status import EpisodePolicyStatusProjection
+
+    config, output = _config(tmp_path)
+    result = EpisodePolicyStatusProjection(config, output).publish()
+
+    assert result["status"] == "WAITING_HUMAN_GATE"
+    assert result["live_dispatch"] is False
+    assert result["actual_cost_usd"] == "0.048"
+    assert result["remaining_usd"] == "9.952"
+    assert result["visual_qa"] == "NOT_PROMOTED"
+    assert result["narrator_final_approved"] is False
+    assert result["identity"] == "UNAVAILABLE"
+    assert result["license"] == "UNAVAILABLE"
+    assert result["thumbnail"] == result["video"] == result["publication"] == "NONE"
+    assert result["pending_human_approvals"] is True
+    assert result["generation"] == 1
+    assert result["status"] != "TEST_ELIGIBLE"  # CI/pass labels are not human approval.
+
+
+def test_projection_rejects_tamper_foreign_episode_and_unknown_worker(tmp_path: Path):
+    from src.hybrid.episode_policy_status import EpisodePolicyStatusProjection
+
+    config, output = _config(tmp_path)
+    projection = EpisodePolicyStatusProjection(config, output)
+    assert projection.publish()["status"] == "WAITING_HUMAN_GATE"
+
+    qa = tmp_path / "qa.json"
+    qa.write_bytes(_canonical({"schema": "visual-qa/v1", "episode_id": EPISODE, "verdict": "PASS"}))
+    assert projection.publish()["status"] == "STALE"
+
+    config, output = _config(tmp_path / "foreign")
+    foreign = tmp_path / "foreign" / "assets.json"
+    foreign_doc = json.loads(foreign.read_text())
+    foreign_doc["episode_id"] = "EP12"
+    path, digest = _write(foreign, foreign_doc)
+    config_doc = json.loads(config.read_text())
+    config_doc["sources"]["assets"] = {"path": path, "sha256": digest}
+    _write(config, config_doc)
+    assert EpisodePolicyStatusProjection(config, output).publish()["status"] == "STALE"
+
+    config, output = _config(tmp_path / "unknown", queue_status="RUNNING")
+    assert EpisodePolicyStatusProjection(config, output).publish()["status"] == "UNKNOWN_REQUIRES_RECONCILIATION"
+
+
+def test_projection_read_is_filesystem_only_and_does_not_open_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.hybrid.episode_policy_status import EpisodePolicyStatusProjection
+
+    config, output = _config(tmp_path)
+    projection = EpisodePolicyStatusProjection(config, output)
+    projection.publish()
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("SQLite must not open")))
+    assert projection.inspect()["status"] == "WAITING_HUMAN_GATE"
+    after = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert after == before

@@ -833,6 +833,7 @@ def main(argv=None):
     p.add_argument("--mode", choices=("TEST", "PREPRODUCTION"))
     p.add_argument("--compiled-input", type=Path)
     p.add_argument("--request-id")
+    p.add_argument("--policy-status-snapshot", type=Path, help="prepublished read-only episode policy status JSON")
     p.add_argument("--kind", choices=("thumbnail", "video"))
     p.add_argument("--test-approval", action="store_true")
     p.add_argument("--test-publish", action="store_true")
@@ -859,6 +860,14 @@ def main(argv=None):
             root = fixture_root if fixture_root.is_dir() else compiled_root / "runner"
             result = EpisodeTaskQueue.read_status(queue_path, _worker_episode_id(root))
             result.pop("root", None)
+            if a.policy_status_snapshot is not None:
+                from src.hybrid.episode_policy_status import (
+                    EpisodePolicyStatusProjection,
+                )
+
+                result["policy_status"] = EpisodePolicyStatusProjection(
+                    a.policy_status_snapshot, a.policy_status_snapshot
+                ).inspect()
         elif a.action in {"enqueue", "run", "serve", "host"}:
             from src.hybrid.worker import DurableEpisodeWorker, EpisodeTaskQueue
 
