@@ -38,6 +38,9 @@ PRIOR_QUALIFIED_EXECUTION_SHA256 = "f701cb1b1d296238ab00708bb92ad131ca7a5665d237
 LEDGER_PATH = ROOT / "ledger" / "standing-budget.sqlite3"
 FINANCIAL_SOURCE_PATH = ROOT / "financial-record-source.json"
 CAP = Decimal("0.048")
+_HISTORICAL_SETTLED_SCOPES = frozenset({
+    "JACO_FLUX3_FINAL_ADMISSION", "JACO_GEN28_STYLE_REMEDIATION_001",
+})
 EXPECTED_PAYLOAD = {
     "prompt": (
         "Evaluation-only Genesis 28 young-adult Jacó identity model sheet in one 16:9 PNG. "
@@ -637,10 +640,9 @@ class YoungIdentityModelSheetProduction:
     ) -> None:
         """Read the canonical ledger without initializing or mutating it.
 
-        A zero-job executor is retryable only when there is no ledger claim at
-        all.  A claim has already crossed the admission boundary, but no job
-        checkpoint exists to bind it to recovery, so it is ambiguous rather
-        than permission to reopen quote/review/credential handling.
+        A zero-job executor may restart only over a fully authenticated,
+        bounded historical SETTLED baseline.  Current-operation claims and any
+        pending/unknown or malformed historical row remain ambiguous.
         """
         if not ledger_path.exists():
             return
@@ -654,7 +656,13 @@ class YoungIdentityModelSheetProduction:
             with sqlite3.connect(uri, uri=True) as database:
                 policy_rows = database.execute("SELECT binding FROM policy").fetchall()
                 claim_rows = database.execute(
-                    "SELECT request_id, provider, auth_scope, authority_mode FROM claims"
+                    "SELECT request_id, episode_id, provider, month, cap, experiment, state, actual, "
+                    "settlement_mode, auth_scope, provider_request_id, authority_mode "
+                    "FROM claims"
+                ).fetchall()
+                receipt_rows = database.execute(
+                    "SELECT request_id, receipt_sha256, actual, receipt_body, provenance "
+                    "FROM settlement_receipts"
                 ).fetchall()
         except (sqlite3.Error, OSError) as exc:
             raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
@@ -663,16 +671,51 @@ class YoungIdentityModelSheetProduction:
                 raise ValueError("ledger policy metadata changed")
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
-        # Evaluate the exact operation identity and scope even though every
-        # row fails closed: this prevents a future relaxation from accepting a
-        # same-ID claim with a foreign scope or a same-operation foreign ID.
-        for row_request_id, provider, row_scope, row_mode in claim_rows:
-            if (row_request_id == request_id and row_scope != scope) or (
-                provider == ENDPOINT and row_request_id != request_id
-            ) or row_mode != mode:
-                raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
-        if claim_rows:
-            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+        try:
+            from src.hybrid.standing_budget import (
+                _units,
+                validate_canonical_settlement_receipt,
+            )
+
+            receipts = {row[0]: row[1:] for row in receipt_rows}
+            if len(receipts) != len(receipt_rows):
+                raise ValueError("duplicate receipt rows")
+            settled_total = 0
+            for row in claim_rows:
+                (row_request_id, episode_id, provider, month, cap, experiment, state, actual,
+                 settlement_mode, row_scope, provider_request_id, row_mode) = row
+                # Any claim bound to this operation, whether by deterministic
+                # request identity or authorization scope, crossed admission.
+                if row_request_id == request_id or row_scope == scope:
+                    raise ValueError("current operation already claimed")
+                if (not all(isinstance(value, str) and value and len(value) <= 512 for value in
+                            (row_request_id, episode_id, provider, month, settlement_mode, row_scope,
+                             provider_request_id, row_mode))
+                        or type(cap) is not int or type(actual) is not int or type(experiment) is not int):
+                    raise ValueError("claim financial metadata is malformed")
+                if (episode_id != EPISODE_ID or provider != ENDPOINT or not re.fullmatch(r"20[0-9]{2}-(0[1-9]|1[0-2])", month)
+                        or cap != _units(CAP) or actual != _units(CAP) or experiment not in {0, 1}
+                        or state != "SETTLED" or settlement_mode != "FAL_READBACK_V2"
+                        or row_scope not in _HISTORICAL_SETTLED_SCOPES or provider_request_id == "UNASSIGNED"
+                        or row_mode != "LIVE"):
+                    raise ValueError("claim is not bounded settled history")
+                receipt_row = receipts.pop(row_request_id, None)
+                if receipt_row is None:
+                    raise ValueError("settled claim lacks receipt")
+                receipt_sha, receipt_actual, receipt_body, provenance = receipt_row
+                receipt, parsed_actual, parsed_sha = validate_canonical_settlement_receipt(receipt_body)
+                if (type(receipt_actual) is not int or receipt_actual != actual or receipt_sha != parsed_sha
+                        or provenance != "FAL_BILLING_READBACK" or parsed_actual != actual
+                        or receipt["authority"] != "TRANSPORT_AUTHENTICATED_FAL_READBACK"
+                        or (receipt["local_request_id"], receipt["provider_request_id"], receipt["endpoint_id"],
+                            receipt["auth_scope"], receipt["authority_mode"]) !=
+                           (row_request_id, provider_request_id, provider, row_scope, row_mode)):
+                    raise ValueError("settlement receipt does not bind history")
+                settled_total += actual
+            if receipts or settled_total + _units(CAP) > expected_policy["episode"]:
+                raise ValueError("historical cumulative budget is invalid")
+        except (TypeError, ValueError, sqlite3.Error) as exc:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
 
     def _pre_post_marker_snapshot(self, execution: Path, qualification: dict[str, Any]) -> None:
         """Allow a versioned marker only when its immutable predecessor survives."""

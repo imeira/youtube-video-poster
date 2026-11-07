@@ -288,6 +288,82 @@ async def test_empty_pre_post_executor_retries_qualified_admission(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_pre_post_admits_two_bound_settled_live_history_and_preserves_cumulative_budget(
+    tmp_path, monkeypatch
+):
+    """Two prior FAL SETTLED receipts are history, not a fresh-operation claim."""
+    from hashlib import sha256
+
+    import src.hybrid.jaco_flux3_production as canonical_production
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import Executor, ProviderResult
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    authority_path = _qualified_live_root(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text())
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)))
+    qualification = json.loads(Path(authority["deployment_qualification"]["path"]).read_text())
+    _write(execution / "protected-qualification.json", qualification)
+    ledger_path = tmp_path / "ledger" / "standing-budget.sqlite3"
+    StandingBudgetLedger(
+        ledger_path, policy_sha256=authority["canonical_ledger"]["financial_policy_sha256"],
+        episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE",
+    )
+    histories = (
+        ("historical-final-admission", "JACO_FLUX3_FINAL_ADMISSION"),
+        ("historical-style-remediation", "JACO_GEN28_STYLE_REMEDIATION_001"),
+    )
+    with sqlite3.connect(ledger_path) as db:
+        for request_id, scope in histories:
+            receipt = {
+                "schema": 2, "authority": "TRANSPORT_AUTHENTICATED_FAL_READBACK",
+                "local_request_id": request_id, "provider_request_id": f"remote-{request_id}",
+                "endpoint_id": production.ENDPOINT, "auth_scope": scope, "authority_mode": "LIVE",
+                "currency": "USD", "cost_total_micro_usd": "48000", "evidence_hash": "a" * 64,
+                "provenance": "FAL_BILLING_READBACK",
+            }
+            body = json.dumps(receipt, sort_keys=True, separators=("," , ":"))
+            db.execute(
+                "INSERT INTO claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (request_id, production.EPISODE_ID, production.ENDPOINT, "2026-11", 48000, 0,
+                 "SETTLED", 48000, "FAL_READBACK_V2", scope, f"remote-{request_id}", "LIVE", None),
+            )
+            db.execute(
+                "INSERT INTO settlement_receipts VALUES(?,?,?,?,?)",
+                (request_id, sha256(body.encode()).hexdigest(), 48000, body, "FAL_BILLING_READBACK"),
+            )
+    before = {row[0]: row[1:] for row in sqlite3.connect(ledger_path).execute(
+        "SELECT claims.request_id, claims.actual, receipt_body, receipt_sha256 FROM claims JOIN settlement_receipts USING(request_id)"
+    )}
+    calls = []
+
+    class OfflineLiveProvider:
+        mode = "LIVE"
+        def __init__(self, output, _openapi, _credential): self.output = output
+        async def submit(self, _job, _request_id, checkpoint):
+            calls.append("post"); checkpoint(provider_id="new-remote", partial=self.output)
+            self.output.write_bytes(b"new operation")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    monkeypatch.setattr(canonical_production, "_FixedFalProvider", OfflineLiveProvider)
+    quote, openapi = _fixture_inputs()
+    result = await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+        quote_and_openapi=lambda _credential: _async(quote, openapi),
+        credential_loader=lambda: "hermetic-non-secret-credential",
+    )
+    assert result["status"] == "COMPLETE" and calls == ["post"]
+    with sqlite3.connect(ledger_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 3
+        assert db.execute("SELECT SUM(COALESCE(actual, cap)) FROM claims").fetchone()[0] == 144000
+        after = {row[0]: row[1:] for row in db.execute(
+            "SELECT claims.request_id, claims.actual, receipt_body, receipt_sha256 FROM claims JOIN settlement_receipts USING(request_id)"
+        )}
+    assert {key: after[key] for key in before} == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("claim_kind", ["matching-id-foreign-scope", "operation-different-id", "unexpected-row"])
 async def test_pre_post_empty_ledger_claims_block_before_credentials_quote_or_review(
     tmp_path, monkeypatch, claim_kind
