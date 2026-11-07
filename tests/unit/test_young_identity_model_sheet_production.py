@@ -110,7 +110,12 @@ def _subprocess_recovery_child(root_text: str, phase: str) -> None:
             except TimeoutError:
                 pass
         else:
-            await production._execute_with_composition(quote_and_openapi=lambda _credential: _async(quote, openapi), test_provider_factory=Provider)
+            await production._execute_with_composition(
+                quote_and_openapi=lambda _credential: (_ for _ in ()).throw(
+                    AssertionError("recovery must not refresh quote/OpenAPI")
+                ),
+                test_provider_factory=Provider,
+            )
     asyncio.run(run())
     with sqlite3.connect(root / "ledger" / "standing-budget.sqlite3") as db:
         claims = db.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
@@ -327,27 +332,61 @@ async def test_review_rejection_precedes_credential_execution_ledger_and_provide
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("injection", ["credential", "test_factory", "authority"])
-async def test_direct_execute_prepared_cannot_bypass_protected_composition_or_independent_review(tmp_path, monkeypatch, injection):
-    """The private method cannot be repurposed as a caller-selected admission path."""
+async def test_direct_execute_prepared_rejects_caller_review_capability(tmp_path, monkeypatch):
+    """The method does not retain a caller-controlled review authorization seam."""
     from src.hybrid.young_identity_model_sheet_production import (
-        ProductionAdmissionError,
         YoungIdentityModelSheetProduction,
     )
+
     authority = _qualified_test_root(tmp_path, monkeypatch)
     quote, openapi = _fixture_inputs(); calls = []
-    kwargs = {"credential_loader": lambda: calls.append("credential") or "caller-secret",
-              "test_provider_factory": lambda *_: calls.append("factory")}
-    if injection == "authority":
-        # Even a test factory constructed with a caller-provided authority is
-        # stopped before it can make provider or execution state.
-        factory = YoungIdentityModelSheetProduction._for_test(tmp_path, authority)
-    else:
-        factory = YoungIdentityModelSheetProduction._for_test(tmp_path, authority)
-    with pytest.raises(ProductionAdmissionError, match="independent review"):
-        await factory._execute_prepared(quote=quote, openapi=openapi, **kwargs)
+    factory = YoungIdentityModelSheetProduction._for_test(tmp_path, authority)
+    with pytest.raises(TypeError):
+        await factory._execute_prepared(
+            quote=quote, openapi=openapi,
+            credential_loader=lambda: calls.append("credential") or "caller-secret",
+            test_provider_factory=lambda *_: calls.append("factory"),
+            _review_capability=object(),
+        )
     assert calls == []
     assert not (tmp_path / "execution").exists() and not (tmp_path / "ledger").exists()
+
+
+@pytest.mark.asyncio
+async def test_direct_execute_prepared_runs_protected_review_before_post(tmp_path, monkeypatch):
+    """No caller-supplied receipt/capability can replace the real reviewer."""
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import ProviderResult
+
+    authority = _qualified_test_root(tmp_path, monkeypatch)
+    quote, openapi = _fixture_inputs()
+    calls = []
+    original_review = production.YoungIdentityModelSheetProduction._review_for_execution
+
+    def protected_review(self, reviewed_quote, reviewed_openapi, financial):
+        calls.append("review")
+        return original_review(self, reviewed_quote, reviewed_openapi, financial)
+
+    class Provider:
+        mode = "TEST"
+
+        def __init__(self, output, _schema):
+            self.output = output
+            calls.append("factory")
+
+        async def submit(self, _job, _request_id, checkpoint):
+            assert calls == ["review", "factory"]
+            calls.append("POST")
+            checkpoint(provider_id="reviewed-remote", partial=self.output)
+            self.output.write_bytes(b"reviewed")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    monkeypatch.setattr(production.YoungIdentityModelSheetProduction, "_review_for_execution", protected_review)
+    result = await production.YoungIdentityModelSheetProduction._for_test(
+        tmp_path, authority
+    )._execute_prepared(quote=quote, openapi=openapi, test_provider_factory=Provider)
+    assert result["status"] == "COMPLETE"
+    assert calls == ["review", "factory", "POST"]
 
 
 @pytest.mark.asyncio

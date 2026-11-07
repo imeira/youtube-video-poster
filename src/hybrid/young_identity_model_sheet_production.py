@@ -50,32 +50,6 @@ class ProductionAdmissionError(PermissionError):
     pass
 
 
-_REVIEW_CAPABILITY_TOKEN = object()
-
-
-class _ValidatedReviewCapability:
-    """Non-caller-constructible, composition-owned independent-review proof."""
-
-    __slots__ = (
-        "financial_sha256",
-        "openapi_sha256",
-        "packet_sha256",
-        "quote_sha256",
-        "request_sha256",
-        "run",
-    )
-
-    def __init__(self, token, run, packet_sha256, request_sha256, quote_sha256, openapi_sha256, financial_sha256):
-        if token is not _REVIEW_CAPABILITY_TOKEN:
-            raise ProductionAdmissionError("independent review capability is composition-owned")
-        self.financial_sha256 = financial_sha256
-        self.openapi_sha256 = openapi_sha256
-        self.packet_sha256 = packet_sha256
-        self.quote_sha256 = quote_sha256
-        self.request_sha256 = request_sha256
-        self.run = run
-
-
 def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
 
@@ -292,7 +266,7 @@ class YoungIdentityModelSheetProduction:
                 or not isinstance(post, dict)):
             raise ProductionAdmissionError("OpenAPI endpoint or payload schema drifted")
 
-    def _validated_review_capability(self, run, quote, openapi, financial_source):
+    def _validated_review_run(self, run, quote, openapi, financial_source) -> Path:
         """Read back a reviewer run before it can become an admission proof."""
         from src.hybrid.local_process_review import validate_local_process_review_output
 
@@ -327,9 +301,7 @@ class YoungIdentityModelSheetProduction:
         reviewed_at = receipt["reviewed_at_epoch"]
         if reviewed_at > int(time.time()) or int(time.time()) - reviewed_at > 300:
             raise ProductionAdmissionError("independent review receipt is stale")
-        return _ValidatedReviewCapability(
-            _REVIEW_CAPABILITY_TOKEN, run, packet_sha, request_sha, quote_sha, openapi_sha, financial_sha,
-        )
+        return run
 
     def _review_for_execution(self, quote, openapi, financial_source):
         from src.hybrid.local_process_review import (
@@ -352,29 +324,44 @@ class YoungIdentityModelSheetProduction:
         _write_once(request, {"schema": "jaco-fal-flux3-independent-pre-generation-review-request/2", "kind": "INDEPENDENT_PREGEN_REVIEW_REQUEST", "packet": {"sha256": sha256(packet.read_bytes()).hexdigest()}, "required_exact_bindings": {"request_id": REQUEST_ID, "endpoint": ENDPOINT, "payload_sha256": payload_sha, "approved_canary_maximum_usd": "0.048", "successor_packet_sha256": sha256(packet.read_bytes()).hexdigest()}, "prohibitions": ["NO_FAL_PAID_POST", "NO_RESERVATION", "NO_GATEWAY_OR_OTHER_EP_WRITE", "NO_TEST_AS_LIVE"]})
         policy = build_local_process_review_policy(root=run, packet_path=packet, review_request_path=request, quote_path=quote_path, openapi_path=openapi_path, financial_record_path=finance_path, output_path=run / "review.json", request_id=REQUEST_ID, review_request_sha256=sha256(request.read_bytes()).hexdigest())
         run_local_process_review(policy)
-        return self._validated_review_capability(run, quote, openapi, financial_source)
+        return self._validated_review_run(run, quote, openapi, financial_source)
 
-    async def _execute_prepared(self, *, quote: dict[str, Any], openapi: dict[str, Any], credential_loader=None, test_provider_factory=None, _review_capability=None) -> dict[str, Any]:
+    async def _execute_prepared(self, *, quote: dict[str, Any], openapi: dict[str, Any], credential_loader=None, test_provider_factory=None, _recovery=False) -> dict[str, Any]:
         from src.hybrid.execution import Authorization, Executor, Job, Price
         from src.hybrid.planner import Config
         from src.hybrid.standing_budget import StandingBudgetLedger
         authority, _, preflight = self._authority()
         qualification = self._qualification(authority)
         ledger_path, financial_sha, _financial_source = self._ledger_binding(authority)
-        self._validate_fresh_quote(quote, openapi)
-        # The independent review is the last read-only/pre-execution barrier.
-        # No caller path is authority; only an internal, immediately read-back
-        # capability may cross this boundary.
         execution = self.root / "execution" / OPERATION_ID
-        if not isinstance(_review_capability, _ValidatedReviewCapability):
-            raise ProductionAdmissionError("missing independent review for unprepared execution")
-        revalidated_review = self._validated_review_capability(
-            _review_capability.run, quote, openapi, _financial_source,
-        )
-        if tuple(getattr(_review_capability, name) for name in _ValidatedReviewCapability.__slots__) != tuple(
-            getattr(revalidated_review, name) for name in _ValidatedReviewCapability.__slots__
-        ):
-            raise ProductionAdmissionError("independent review capability changed")
+        if _recovery:
+            # Recovery accepts only the durable proof created by this admission,
+            # never caller data or a fresh quote/reviewer result.
+            packet, packet_sha = _load(execution / "packet.json", "persisted review packet")
+            request, request_sha = _load(execution / "review-request.json", "persisted review request")
+            receipt, _ = _load(execution / "review.json", "persisted review receipt")
+            persisted_quote, quote_sha = _load(execution / "quote.json", "persisted review quote")
+            persisted_openapi, openapi_sha = _load(execution / "openapi.json", "persisted review OpenAPI")
+            financial, financial_sha_proof = _load(execution / "financial-record.json", "persisted financial record")
+            if persisted_quote != quote or persisted_openapi != openapi or financial != _financial_source:
+                raise ProductionAdmissionError("persisted admission inputs changed")
+            from src.hybrid.local_process_review import (
+                validate_local_process_review_output,
+            )
+            try:
+                validate_local_process_review_output(receipt, packet_sha256=packet_sha, review_request_sha256=request_sha, quote_sha256=quote_sha, openapi_sha256=openapi_sha, financial_record_sha256=financial_sha_proof)
+            except ValueError as exc:
+                raise ProductionAdmissionError("persisted review proof is invalid") from exc
+            if packet.get("candidate", {}).get("payload") != preflight["operation"]["payload"] or request.get("packet", {}).get("sha256") != packet_sha:
+                raise ProductionAdmissionError("persisted review binding changed")
+            review_run = None
+        else:
+            self._validate_fresh_quote(quote, openapi)
+            # The admission method itself produces and immediately validates the
+            # review. It never accepts a caller-provided receipt, path, or token.
+            review_run = self._validated_review_run(
+                self._review_for_execution(quote, openapi, _financial_source), quote, openapi, _financial_source,
+            )
         job = Job(OPERATION_ID, authority["executor_category"], qualification["mode"], ENDPOINT, preflight["operation"]["payload"], None, CAP, predecessor=authority["executor_predecessor_request_id"], input_kind="TEXT_TO_IMAGE")
         scope = "TEST_LOCAL_ONLY" if qualification["mode"] == "TEST" else f"{OPERATION_ID}:{authority['policy_sha256']}"; marker_path = execution / "protected-qualification.json"
         def marker_for(bound):
@@ -394,8 +381,8 @@ class YoungIdentityModelSheetProduction:
             executor.prepare_intent(job, auth_scope=scope); claim = ledger.reserve(job.request_id, authority["predecessor_operation_id"] or EPISODE_ID, ENDPOINT, str(CAP), settlement_mode="FAL_READBACK_V2", auth_scope=scope, provider_request_id="UNASSIGNED", authority_mode=qualification["mode"])
             if claim.get("state") != "RESERVED": raise ProductionAdmissionError("canonical reservation rejected")
             executor._change(job.request_id, final_admission_marker=marker_for(job))
-            for name in ("packet.json", "review.json", "quote.json", "openapi.json"):
-                document, _document_sha = _load(_review_capability.run / name, f"review {name}")
+            for name in ("packet.json", "review-request.json", "review.json", "quote.json", "openapi.json", "financial-record.json"):
+                document, _document_sha = _load(review_run / name, f"review {name}")
                 _write_once(execution / name, document)
         if self._test_only:
             if not callable(test_provider_factory): raise ProductionAdmissionError("private test requires fixture transport")
@@ -410,11 +397,19 @@ class YoungIdentityModelSheetProduction:
             provider = OperationFixedFalProvider(execution / "provider-receipt.json", openapi, credential_loader())
         auth = None if qualification["mode"] == "TEST" else Authorization(job.request_id, qualification["authorization"], time.time()+300, CAP)
         price = None if qualification["mode"] == "TEST" else Price(ENDPOINT, job.request_id, CAP, time.time()+300, "fresh-cap-bound-quote")
-        completed = await executor.run(job, provider, authorization=auth, price=price, settlement_checkpoint=lambda lid,rid: ledger.bind_provider_request_id(lid,rid), submit_prepared=True)
+        completed = await executor.run(job, provider, authorization=auth, price=price, settlement_checkpoint=lambda lid,rid: ledger.bind_provider_request_id(lid,rid), submit_prepared=not _recovery)
         return {"operation_id": OPERATION_ID, "status": completed["status"], "request_id": job.request_id, "mode": qualification["mode"]}
 
     async def _execute_with_composition(self, *, quote_and_openapi, credential_loader=None, test_provider_factory=None):
-        authority, _, _ = self._authority(); qualification = self._qualification(authority); _, _, financial = self._ledger_binding(authority)
+        authority, _, _ = self._authority(); qualification = self._qualification(authority); self._ledger_binding(authority)
+        execution = self.root / "execution" / OPERATION_ID
+        if (execution / "executor.sqlite3").is_file():
+            # A durable executor means recovery only: no fresh price/OpenAPI or
+            # reviewer subprocess. Missing/invalid checkpoint state fails in the
+            # executor rather than starting a new admission.
+            quote, _ = _load(execution / "quote.json", "persisted recovery quote")
+            openapi, _ = _load(execution / "openapi.json", "persisted recovery OpenAPI")
+            return await self._execute_prepared(quote=quote, openapi=openapi, credential_loader=credential_loader, test_provider_factory=test_provider_factory, _recovery=True)
         # The first stage above is protected, local, and read-only.  A LIVE
         # credential may now be loaded only to authenticate the GET-only price
         # and OpenAPI collection; it is not retained or passed to execution.
@@ -422,8 +417,7 @@ class YoungIdentityModelSheetProduction:
             credential_loader() if callable(credential_loader) else (_ for _ in ()).throw(ProductionAdmissionError("credential unavailable"))
         )
         quote, openapi = await quote_and_openapi(credential)
-        review_capability = self._review_for_execution(quote, openapi, financial)
-        return await self._execute_prepared(quote=quote, openapi=openapi, credential_loader=(lambda: credential), test_provider_factory=test_provider_factory, _review_capability=review_capability)
+        return await self._execute_prepared(quote=quote, openapi=openapi, credential_loader=(lambda: credential), test_provider_factory=test_provider_factory)
 
     async def execute(self) -> dict[str, Any]:
         import asyncio
