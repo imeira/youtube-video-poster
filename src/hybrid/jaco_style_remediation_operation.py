@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import time
 from decimal import Decimal, InvalidOperation
@@ -36,6 +37,7 @@ FAL_FLUX3_ASPECT_RATIOS = frozenset({
     "auto", "21:9", "2:1", "16:9", "3:2", "7:5", "4:3", "5:4", "1:1",
     "4:5", "3:4", "5:7", "2:3", "9:16", "1:2",
 })
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class OperationAdmissionError(PermissionError):
@@ -65,13 +67,46 @@ def _load(path: Path, label: str) -> tuple[dict[str, Any], str]:
 
 
 def _money(value: object, label: str) -> Decimal:
+    if not isinstance(value, str):
+        raise OperationAdmissionError(f"{label} is invalid")
     try:
-        amount = Decimal(str(value))
+        amount = Decimal(value)
     except (InvalidOperation, ValueError) as exc:
         raise OperationAdmissionError(f"{label} is invalid") from exc
     if not amount.is_finite() or amount < 0:
         raise OperationAdmissionError(f"{label} is invalid")
     return amount
+
+
+def _sha256(value: object) -> bool:
+    """Accept only the serialized SHA-256 representation used by policy files."""
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def _validate_preflight_operation(operation: object) -> dict[str, Any]:
+    """Type-close the entire protected operation before any composition work."""
+    if not isinstance(operation, dict) or set(operation) != {
+        "id", "endpoint", "call_limit", "maximum_usd", "payload",
+    }:
+        raise OperationAdmissionError("closed protected preflight operation required")
+    payload = operation.get("payload")
+    if (operation.get("id") != OPERATION_ID or operation.get("endpoint") != ENDPOINT
+            or type(operation.get("call_limit")) is not int
+            or operation["call_limit"] != 1
+            or not isinstance(operation.get("maximum_usd"), str)
+            or _money(operation["maximum_usd"], "preflight maximum cost") != NEXT_CAP
+            or not isinstance(payload, dict) or set(payload) != {
+                "prompt", "aspect_ratio", "resolution", "output_format",
+                "enable_prompt_expansion", "safety_tolerance",
+            }
+            or not isinstance(payload.get("prompt"), str) or not payload["prompt"].strip()
+            or payload.get("aspect_ratio") != "16:9" or payload.get("resolution") != "1k"
+            or payload.get("output_format") != "png"
+            or type(payload.get("enable_prompt_expansion")) is not bool
+            or type(payload.get("safety_tolerance")) is not int
+            or payload["safety_tolerance"] != 2):
+        raise OperationAdmissionError("protected preflight payload or numeric type changed")
+    return operation
 
 
 def _write_once(path: Path, body: dict[str, Any]) -> Path:
@@ -122,11 +157,10 @@ def probe_deployment_contract() -> dict[str, str]:
             or preflight.get("schema") != "jaco-episode-operation-preflight/v1"
             or preflight.get("status") != "VALIDATED_PRE_DISPATCH_BLOCKED_MISSING_OPERATION_AUTHORIZATION"
             or preflight.get("episode_id") != EPISODE_ID
-            or preflight.get("operation", {}).get("id") != OPERATION_ID
-            or preflight["operation"].get("endpoint") != ENDPOINT
-            or preflight["operation"].get("call_limit") != 1):
+            ):
         raise OperationAdmissionError("protected successor preflight contract changed")
-    geometry = _validate_geometry(preflight["operation"].get("payload"))
+    operation = _validate_preflight_operation(preflight.get("operation"))
+    geometry = _validate_geometry(operation["payload"])
     if (policy.get("schema") != "jaco-standing-episode-operation-policy/v1"
             or policy.get("status") != "ACTIVE_FOR_DERIVATION_REQUIRES_INDEPENDENT_OPERATION_REVIEW"
             or policy.get("episode_id") != EPISODE_ID
@@ -183,12 +217,15 @@ class OperationAdmissionFactory:
             raise OperationAdmissionError("caller-selected policy or preflight is forbidden")
         policy, policy_sha = _load(policy_path, "protected standing policy")
         preflight, preflight_sha = _load(preflight_path, "protected successor preflight")
-        if authority.get("policy_sha256") != policy_sha or authority.get("preflight_sha256") != preflight_sha:
+        if (not _sha256(authority.get("policy_sha256"))
+                or not _sha256(authority.get("preflight_sha256"))
+                or authority.get("policy_sha256") != policy_sha
+                or authority.get("preflight_sha256") != preflight_sha):
             raise OperationAdmissionError("protected policy or preflight hash changed")
         if (preflight.get("schema") != "jaco-episode-operation-preflight/v1" or preflight.get("episode_id") != EPISODE_ID
-                or preflight.get("request_id") != REQUEST_ID or preflight.get("operation", {}).get("id") != OPERATION_ID
-                or preflight["operation"].get("endpoint") != ENDPOINT or preflight["operation"].get("call_limit") != 1):
+                or preflight.get("request_id") != REQUEST_ID):
             raise OperationAdmissionError("preflight does not bind successor operation")
+        _validate_preflight_operation(preflight.get("operation"))
         consent = policy.get("canonical_consent", {})
         if (policy.get("episode_id") != EPISODE_ID or consent.get("session_id") != "local-712d007e4f3efba4d8c6cfc52f947e69023fed6f445a54206a6c3ede9b317fbb"
                 or consent.get("consent_message_id") != 147620 or consent.get("prompt_message_id") != 147618):
@@ -264,7 +301,13 @@ class OperationAdmissionFactory:
         }
         test_required = required | {"consent_fixture"}
         is_test_fixture = contract.get("mode") == "TEST"
-        if (digest != binding["sha256"]
+        digest_fields = (
+            "policy_sha256", "preflight_sha256", "ci_digest_sha256",
+            "execution_code_sha256", "operation_policy_sha256", "financial_policy_sha256",
+        )
+        if (not _sha256(binding.get("sha256"))
+                or any(not _sha256(contract.get(field)) for field in digest_fields)
+                or digest != binding["sha256"]
                 or set(contract) != (test_required if is_test_fixture else required)
                 or contract.get("schema") != (
                     "jaco-test-deployment-qualification/v2" if is_test_fixture
@@ -278,8 +321,6 @@ class OperationAdmissionFactory:
                 or contract.get("mode") not in {"TEST", "LIVE"}
                 or contract.get("review_packet_schema") != "jaco-fal-flux3-successor-benchmark/3"
                 or contract.get("reviewer") != "LOCAL_PROCESS_REVIEW_AUTOMATED_V1"
-                or not isinstance(contract.get("ci_digest_sha256"), str)
-                or len(contract["ci_digest_sha256"]) != 64
                 or contract.get("execution_code_sha256") != _sha_path(Path(__file__))
                 or contract.get("authorization") != (
                     "TEST_FIXTURE_CONSENT_ONLY" if is_test_fixture
@@ -312,13 +353,17 @@ class OperationAdmissionFactory:
         if operation_policy_sha != authority.get("policy_sha256"):
             raise OperationAdmissionError("operation policy binding changed")
         financial_binding = ledger_binding["financial_source"]
-        if not isinstance(financial_binding, dict) or set(financial_binding) != {"path", "sha256"}:
+        if (not _sha256(operation_policy_sha)
+                or not isinstance(financial_binding, dict)
+                or set(financial_binding) != {"path", "sha256"}
+                or not _sha256(financial_binding.get("sha256"))):
             raise OperationAdmissionError("canonical financial source binding is required")
         financial_path = Path(financial_binding["path"]).resolve()
         expected_financial_path = (self.root / FINANCIAL_SOURCE_PATH.name).resolve()
         financial_source, financial_sha = _load(financial_path, "canonical financial source")
         financial_policy_sha = ledger_binding["financial_policy_sha256"]
-        if (financial_path != expected_financial_path
+        if (not _sha256(financial_policy_sha)
+                or financial_path != expected_financial_path
                 or financial_sha != financial_binding["sha256"]
                 or financial_sha != financial_policy_sha
                 or not _financial_source_is_canonical(financial_source)):
@@ -423,11 +468,17 @@ class OperationAdmissionFactory:
     async def _execute_with_composition(
         self, *, quote_and_openapi, credential_loader, test_provider_factory=None
     ) -> dict[str, Any]:
-        """Qualify the pinned root before credential resolution or remote reads."""
+        """Qualify the pinned root; durable resume never repeats fresh-input reads."""
         authority, _policy, _preflight = self._authority()
         qualification = self._qualification(authority)
         self._canonical_ledger_binding(authority)
-        quote, openapi = await quote_and_openapi()
+        execution_db = self.root / "execution" / OPERATION_ID / "executor.sqlite3"
+        if execution_db.exists():
+            # Executor's durable state selects its recovery/readback route.  A
+            # resume must not recreate the fresh quote/OpenAPI factory path.
+            quote, openapi = {}, {}
+        else:
+            quote, openapi = await quote_and_openapi()
         if qualification["mode"] == "TEST":
             if not self._test_only or not callable(test_provider_factory):
                 raise OperationAdmissionError("TEST execution requires private fixture transport")
