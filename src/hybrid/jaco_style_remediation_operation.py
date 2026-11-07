@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path("C:/HermesStudio/production/jaco-flux3")
-AUTHORITY_PATH = ROOT / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.authority.v1.json"
+AUTHORITY_PATH = ROOT / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.authority.v2.json"
 POLICY_PATH = ROOT / "standing-policy" / "JACO_GENESIS28_STANDING_OPERATION_POLICY.v1.json"
 OPERATION_ID = "JACO_GEN28_STYLE_REMEDIATION_001"
 EPISODE_ID = "JACO_GENESIS28"
@@ -30,6 +30,10 @@ NEXT_CAP = Decimal("0.048000")
 
 class OperationAdmissionError(PermissionError):
     """The protected standing authority cannot admit this operation."""
+
+
+def _sha_path(path: Path) -> str:
+    return sha256(path.read_bytes()).hexdigest()
 
 
 def _canonical(value: object) -> bytes:
@@ -60,7 +64,7 @@ def _money(value: object, label: str) -> Decimal:
     return amount
 
 
-def _write_once(path: Path, body: dict[str, Any]) -> None:
+def _write_once(path: Path, body: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = _canonical(body)
     try:
@@ -73,14 +77,26 @@ def _write_once(path: Path, body: dict[str, Any]) -> None:
         os.fsync(stream.fileno())
     if path.read_bytes() != encoded:
         raise OperationAdmissionError("operation artifact readback mismatch")
+    return path
 
 
 class OperationAdmissionFactory:
     """Binds fresh review inputs to one protected successor operation only."""
 
-    def __init__(self, *, root: Path = ROOT, authority_path: Path = AUTHORITY_PATH) -> None:
-        self.root = Path(root).resolve()
-        self.authority_path = Path(authority_path).resolve()
+    def __init__(self) -> None:
+        """Open only the deployment-pinned production authority."""
+        self.root = ROOT.resolve()
+        self.authority_path = AUTHORITY_PATH.resolve()
+        self._test_only = False
+
+    @classmethod
+    def _for_test(cls, *, root: Path, authority_path: Path) -> OperationAdmissionFactory:
+        """Create an explicitly non-production fixture composition for offline tests."""
+        factory = object.__new__(cls)
+        factory.root = Path(root).resolve()
+        factory.authority_path = Path(authority_path).resolve()
+        factory._test_only = True
+        return factory
 
     def _authority(self) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         authority, _authority_sha = _load(self.authority_path, "protected successor authority")
@@ -161,6 +177,212 @@ class OperationAdmissionFactory:
         authority, _policy, _preflight = self._authority()
         return {"status": authority["status"], "operation_id": OPERATION_ID, "authority_sha256": sha256(self.authority_path.read_bytes()).hexdigest(), "preflight_sha256": authority["preflight_sha256"]}
 
+    def _qualification(self, authority: dict[str, Any]) -> dict[str, Any]:
+        """Open only the authority-pinned deployment contract, never CLI data."""
+        binding = authority.get("deployment_qualification")
+        if not isinstance(binding, dict) or set(binding) != {"path", "sha256"}:
+            raise OperationAdmissionError("protected deployment qualification contract is required")
+        path = Path(binding["path"]).resolve()
+        expected = (self.root / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.qualification.v1.json").resolve()
+        if path != expected:
+            raise OperationAdmissionError("caller-selected deployment qualification is forbidden")
+        contract, digest = _load(path, "protected deployment qualification")
+        required = {
+            "schema", "status", "operation_id", "episode_id", "policy_sha256", "preflight_sha256",
+            "mode", "authorization", "review_packet_schema", "reviewer", "ci_digest_sha256",
+            "execution_code_sha256",
+        }
+        test_required = required | {"consent_fixture"}
+        is_test_fixture = contract.get("mode") == "TEST"
+        if (digest != binding["sha256"]
+                or set(contract) != (test_required if is_test_fixture else required)
+                or contract.get("schema") != (
+                    "jaco-test-deployment-qualification/v1" if is_test_fixture
+                    else "jaco-protected-deployment-qualification/v1"
+                )
+                or contract.get("status") != "QUALIFIED" or contract.get("operation_id") != OPERATION_ID
+                or contract.get("episode_id") != EPISODE_ID or contract.get("policy_sha256") != authority.get("policy_sha256")
+                or contract.get("preflight_sha256") != authority.get("preflight_sha256")
+                or contract.get("mode") not in {"TEST", "LIVE"}
+                or contract.get("review_packet_schema") != "jaco-fal-flux3-successor-benchmark/3"
+                or contract.get("reviewer") != "LOCAL_PROCESS_REVIEW_AUTOMATED_V1"
+                or not isinstance(contract.get("ci_digest_sha256"), str)
+                or len(contract["ci_digest_sha256"]) != 64
+                or contract.get("execution_code_sha256") != _sha_path(Path(__file__))
+                or contract.get("authorization") != (
+                    "TEST_FIXTURE_CONSENT_ONLY" if is_test_fixture
+                    else "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY"
+                )
+                or (is_test_fixture and (
+                    not self._test_only
+                    or not isinstance(contract.get("consent_fixture"), dict)
+                    or contract["consent_fixture"].get("kind") != "TEST_ONLY_CONSENT_FIXTURE"
+                ))
+                or (not is_test_fixture and self._test_only)):
+            raise OperationAdmissionError("invalid protected deployment qualification")
+        return contract
+
+    def _review_for_execution(
+        self, quote: dict[str, Any], openapi: dict[str, Any], financial_source: dict[str, Any]
+    ) -> tuple[dict[str, Any], Path]:
+        from src.hybrid.local_process_review import (
+            build_local_process_review_policy,
+            run_local_process_review,
+        )
+        authority, _policy, preflight = self._authority()
+        self._qualification(authority)
+        payload = preflight["operation"]["payload"]
+        if payload.get("aspect_ratio") != "4:3":
+            raise OperationAdmissionError("protected payload is incompatible with the closed subprocess reviewer")
+        run = self.root / "operation-runs" / f"{OPERATION_ID}-{time.time_ns()}"
+        run.mkdir(parents=True, exist_ok=False)
+        quote_path, openapi_path = run / "quote.json", run / "openapi.json"
+        _write_once(quote_path, quote); _write_once(openapi_path, openapi)
+        finance = _write_once(run / "financial-record.json", financial_source)
+        payload_sha = sha256(_canonical(payload)).hexdigest()
+        packet = _write_once(run / "packet.json", {"schema": "jaco-fal-flux3-successor-benchmark/3", "kind": "BOUNDED_FAL_FLUX3_CANARY_PREGEN_PACKET", "bindings": {"request_id": REQUEST_ID, "endpoint": ENDPOINT, "payload_sha256": payload_sha, "authenticated_price_quote": {"sha256": _sha_path(quote_path), "bytes": quote_path.stat().st_size}, "openapi_snapshot": {"sha256": _sha_path(openapi_path), "bytes": openapi_path.stat().st_size}, "financial_approval": {"sha256": _sha_path(finance), "status": "APPROVED_USD10", "total_episode_cap_usd": "10.00"}}, "candidate": {"call_limit": 1, "single_output": True, "reference_inputs": [], "payload": payload}, "cost": {"approved_canary_maximum_usd": "0.048", "current_authenticated_quote_maximum_usd": "0.048", "actual_billed_amount": "UNKNOWN_UNTIL_PROVIDER_RECEIPT_OR_BILLING_RECONCILIATION"}})
+        request = _write_once(run / "review-request.json", {"schema": "jaco-fal-flux3-independent-pre-generation-review-request/2", "kind": "INDEPENDENT_PREGEN_REVIEW_REQUEST", "packet": {"sha256": _sha_path(packet)}, "required_exact_bindings": {"request_id": REQUEST_ID, "endpoint": ENDPOINT, "payload_sha256": payload_sha, "approved_canary_maximum_usd": "0.048", "successor_packet_sha256": _sha_path(packet)}, "prohibitions": ["NO_FAL_PAID_POST", "NO_RESERVATION", "NO_GATEWAY_OR_OTHER_EP_WRITE", "NO_TEST_AS_LIVE"]})
+        policy = build_local_process_review_policy(root=run, packet_path=packet, review_request_path=request, quote_path=quote_path, openapi_path=openapi_path, financial_record_path=finance, output_path=run / "review.json", request_id=REQUEST_ID, review_request_sha256=_sha_path(request))
+        return run_local_process_review(policy), run
+
+    async def _execute_prepared(
+        self, *, quote: dict[str, Any], openapi: dict[str, Any], credential: str,
+        test_provider_factory=None,
+    ) -> dict[str, Any]:
+        """Composition-only continuation after qualification and fresh inputs."""
+        from src.hybrid.execution import Authorization, Executor, Job, Price
+        from src.hybrid.jaco_flux3_production import _FixedFalProvider
+        from src.hybrid.planner import Config
+        from src.hybrid.standing_budget import StandingBudgetLedger
+        class OperationFixedFalProvider(_FixedFalProvider):
+            def __init__(self, output, schema, key, mode):
+                if mode not in {"TEST", "LIVE"}: raise OperationAdmissionError("qualified provider mode is invalid")
+                super().__init__(output, schema, key); self.mode = mode
+        authority, _policy, preflight = self._authority()
+        qualification = self._qualification(authority)
+        ledger_binding = authority.get("canonical_ledger")
+        if not isinstance(ledger_binding, dict) or set(ledger_binding) != {"path", "policy_sha256", "financial_source"}:
+            raise OperationAdmissionError("canonical shared ledger binding is required")
+        ledger_path = Path(ledger_binding["path"]).resolve()
+        if ledger_path.parent != (self.root / "ledger").resolve() or ledger_binding["policy_sha256"] != authority["policy_sha256"]:
+            raise OperationAdmissionError("per-job ledger reset is forbidden")
+        financial_binding = ledger_binding["financial_source"]
+        if not isinstance(financial_binding, dict) or set(financial_binding) != {"path", "sha256"}:
+            raise OperationAdmissionError("canonical financial source binding is required")
+        financial_path = Path(financial_binding["path"]).resolve()
+        expected_financial_path = (self.root / "ledger" / "financial-record.json").resolve()
+        financial_source, financial_sha = _load(financial_path, "canonical financial source")
+        if (financial_path != expected_financial_path
+                or financial_sha != financial_binding["sha256"]
+                or financial_source != {
+                    "schema": "jaco-factory-financial-reconciliation/1",
+                    "request_hash": REQUEST_ID,
+                    "currency": "USD",
+                    "total_episode_cap": "10.00",
+                    "authorizes_generation": False,
+                }):
+            raise OperationAdmissionError("canonical financial source changed")
+        execution = self.root / "execution" / OPERATION_ID; execution.mkdir(parents=True, exist_ok=True)
+        job = Job(OPERATION_ID, "first", qualification["mode"], ENDPOINT, preflight["operation"]["payload"], None, Decimal("0.048"), input_kind="TEXT_TO_IMAGE")
+        qualification_path = execution / "protected-qualification.json"
+        scope = (
+            "TEST_LOCAL_ONLY" if qualification["mode"] == "TEST"
+            else f"{OPERATION_ID}:{authority['policy_sha256']}"
+        )
+        def verify_marker(bound_job, marker, claim):
+            if (not qualification_path.is_file() or json.loads(qualification_path.read_text(encoding="utf-8")) != qualification
+                    or marker.get("qualification_sha256") != sha256(_canonical(qualification)).hexdigest()
+                    or bound_job.request_id != job.request_id or claim.get("auth_scope") != scope):
+                raise OperationAdmissionError("protected qualification marker changed")
+        # A fresh quote/review can reject (for example, stale or unknown price)
+        # without creating a ledger database or reservation.  Recovery always
+        # reopens the durable executor state and never creates a second review.
+        review_run: Path | None = None
+        if not (execution / "executor.sqlite3").exists():
+            _review, review_run = self._review_for_execution(quote, openapi, financial_source)
+        ledger = StandingBudgetLedger(ledger_path, policy_sha256=authority["policy_sha256"], episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode=qualification["mode"])
+        executor = Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)), standing_ledger=ledger, _jaco_final_admission_verifier=verify_marker, _jaco_production_binding={"kind": "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION", "auth_scope": scope})
+        if executor.inspect(job.request_id) is None:
+            if review_run is None:
+                raise OperationAdmissionError("missing immutable review for unprepared execution")
+            _write_once(qualification_path, qualification)
+            executor.prepare_intent(job, auth_scope=scope)
+            claim = ledger.reserve(job.request_id, EPISODE_ID, ENDPOINT, "0.048", settlement_mode="FAL_READBACK_V2", auth_scope=scope, provider_request_id="UNASSIGNED", authority_mode=qualification["mode"])
+            if claim.get("state") != "RESERVED" or claim.get("reserved_usd") != "0.048000": raise OperationAdmissionError("canonical ledger reservation rejected")
+            executor._change(job.request_id, final_admission_marker={"schema": 2, "kind": "JACO_STYLE_REMEDIATION_QUALIFICATION_MARKER", "qualification_sha256": sha256(_canonical(qualification)).hexdigest(), "request_id": job.request_id, "endpoint": ENDPOINT, "payload_sha256": job.intent_input_sha256, "input_kind": "TEXT_TO_IMAGE", "auth_scope": scope, "reserved_usd": "0.048", "trust_identity": "PROTECTED_DEPLOYMENT_QUALIFICATION"})
+            for name in ("packet.json", "review.json", "quote.json", "openapi.json"): _write_once(execution / name, json.loads((review_run / name).read_text(encoding="utf-8")))
+        schema = json.loads((execution / "openapi.json").read_text(encoding="utf-8"))
+        if qualification["mode"] == "TEST":
+            if not self._test_only or not callable(test_provider_factory):
+                raise OperationAdmissionError("TEST execution requires private fixture transport")
+            provider = test_provider_factory(execution / "provider-receipt.json", schema)
+            if getattr(provider, "mode", None) != "TEST":
+                raise OperationAdmissionError("TEST fixture transport mode mismatch")
+        else:
+            if self._test_only:
+                raise OperationAdmissionError("private fixture composition cannot execute LIVE")
+            provider = OperationFixedFalProvider(execution / "provider-receipt.json", schema, credential, qualification["mode"])
+        auth = None if qualification["mode"] == "TEST" else Authorization(job.request_id, qualification["authorization"], time.time()+300, Decimal("0.048"))
+        price = None if qualification["mode"] == "TEST" else Price(ENDPOINT, job.request_id, Decimal("0.048"), time.time()+300, "protected-fresh-quote")
+        completed = await executor.run(job, provider, authorization=auth, price=price, settlement_checkpoint=lambda local_id, remote_id: ledger.bind_provider_request_id(local_id, remote_id), submit_prepared=True)
+        return {"operation_id": OPERATION_ID, "status": completed["status"], "request_id": job.request_id, "mode": qualification["mode"]}
+
+    async def _execute_with_composition(
+        self, *, quote_and_openapi, credential_loader, test_provider_factory=None
+    ) -> dict[str, Any]:
+        """Qualify the pinned root before credential resolution or remote reads."""
+        authority, _policy, _preflight = self._authority()
+        qualification = self._qualification(authority)
+        quote, openapi = await quote_and_openapi()
+        if qualification["mode"] == "TEST":
+            if not self._test_only or not callable(test_provider_factory):
+                raise OperationAdmissionError("TEST execution requires private fixture transport")
+            credential = ""
+        else:
+            credential = credential_loader()
+        return await self._execute_prepared(
+            quote=quote,
+            openapi=openapi,
+            credential=credential,
+            test_provider_factory=test_provider_factory,
+        )
+
+    async def execute(self) -> dict[str, Any]:
+        """Run the fixed production composition; callers cannot supply authority inputs."""
+        import asyncio
+
+        from src.hybrid.fal_get_only_preflight import (
+            resolve_default_fal_credential,
+        )
+        from src.hybrid.jaco_flux3_production import (
+            _FAL_OPENAPI_URL,
+            _current_price_snapshot,
+            _get_json,
+            _official_openapi_endpoint,
+        )
+
+        credential: str | None = None
+
+        async def quote_and_openapi() -> tuple[dict[str, Any], dict[str, Any]]:
+            nonlocal credential
+            credential, _presence = resolve_default_fal_credential()
+            quote, openapi = await asyncio.gather(
+                _current_price_snapshot(credential),
+                asyncio.to_thread(_get_json, _FAL_OPENAPI_URL),
+            )
+            _official_openapi_endpoint(openapi)
+            return quote, openapi
+
+        def resolved_credential() -> str:
+            if credential is None:
+                raise OperationAdmissionError("credential resolution did not complete")
+            return credential
+
+        return await self._execute_with_composition(
+            quote_and_openapi=quote_and_openapi,
+            credential_loader=resolved_credential,
+        )
+
     async def fresh_review(self) -> dict[str, Any]:
         """Fetch only the fixed authenticated quote/OpenAPI, then seal a new packet.
 
@@ -193,7 +415,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.operation != OPERATION_ID:
         raise OperationAdmissionError("fixed approved operation selection required")
     if args.execute:
-        raise OperationAdmissionError("parent review and CI admission are required before reservation or provider POST")
+        import asyncio
+
+        # ``execute`` validates the pinned authority and qualification before it
+        # resolves a credential or starts either remote read.
+        print(json.dumps(asyncio.run(OperationAdmissionFactory().execute()), sort_keys=True))
+        return 0
     if args.verify == args.fresh_review:
         raise OperationAdmissionError("select exactly one of --verify or --fresh-review")
     factory = OperationAdmissionFactory()
