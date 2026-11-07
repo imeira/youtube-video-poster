@@ -287,7 +287,11 @@ async def _recover_after_settlement(snapshot: _Snapshot) -> dict:
         row = holder["executor"].inspect(job.request_id)
         verifier.verify_completion(row, row.get("settlement_binding"), claim)
     executor = Executor(snapshot.execution / "executor.sqlite3", Config(limit=Decimal(10)),
-                        standing_ledger=ledger, _jaco_final_admission_verifier=complete_verifier)
+                        standing_ledger=ledger, _jaco_final_admission_verifier=complete_verifier,
+                        _jaco_production_binding={
+                            "kind": "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION",
+                            "auth_scope": f"{OPERATION_ID}:{authority['policy_sha256']}",
+                        })
     holder["executor"] = executor
     job = __import__("src.hybrid.execution", fromlist=["Job"]).Job(
         OPERATION_ID, authority["executor_category"], "LIVE", preflight["operation"]["endpoint"],

@@ -7,6 +7,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
@@ -196,30 +197,45 @@ async def test_authenticated_offline_readback_writes_one_canonical_receipt_and_r
         assert db.execute("SELECT COUNT(*) FROM settlement_receipts").fetchone()[0] == 1
 
 
+
 @pytest.mark.asyncio
-async def test_settled_receipt_completes_quarantined_result_without_second_billing_get(tmp_path):
-    """The real executor closes a submitted job from durable settlement and bytes."""
+async def test_direct_executor_cannot_complete_copied_settlement_in_submitted_or_complete_state(tmp_path):
+    """Copied valid job, ledger, and receipt data cannot mint completion authority."""
     from src.hybrid.billing_reconciler import FalLedgerSettlementService
 
     class AuthenticatedOfflineFixture(LoopbackFalBillingFixture):
         authority = "TRANSPORT_AUTHENTICATED_FAL_READBACK"
 
+    assert tmp_path.resolve() != Path("C:/HermesStudio/production").resolve()
     executor, job, _ = await _bound_receipt(tmp_path)
     ledger = executor._standing_ledger
-    fixture = AuthenticatedOfflineFixture(pricing_pages=[], billing_pages=[
-        {"billing_events": [_event(job.request_id, job.endpoint)], "next_cursor": None, "has_more": False},
-    ])
-    service = FalLedgerSettlementService(ledger, executor, FalBillingConsumer(fixture), clock=lambda: END)
+    fixture = AuthenticatedOfflineFixture(
+        pricing_pages=[],
+        billing_pages=[{"billing_events": [_event(job.request_id, job.endpoint)], "next_cursor": None, "has_more": False}],
+    )
+    service = FalLedgerSettlementService(
+        ledger,
+        executor,
+        FalBillingConsumer(fixture),
+        clock=lambda: END,
+    )
     await service.reconcile(job.request_id, start=START, end=END)
-    result = tmp_path / "quarantine.png"
-    result.write_bytes(b"durable media bytes")
+    assert len(fixture.billing_queries) == 1
+    assert fixture.pricing_queries == []
+    media = tmp_path / "copied-valid-quarantine.png"
+    media.write_bytes(b"durable media bytes")
+
     executor._change(job.request_id, status="SUBMITTED")
+    submitted_before = executor.inspect(job.request_id)
+    with pytest.raises(PermissionError, match="protected completion admission"):
+        executor.complete_settled_recovery(job, media)
+    assert executor.inspect(job.request_id) == submitted_before
 
-    first = executor.complete_settled_recovery(job, result)
-    second = executor.complete_settled_recovery(job, result)
-
-    assert first["status"] == second["status"] == "COMPLETE"
-    assert first["result_sha256"] == sha256(result.read_bytes()).hexdigest()
+    executor._change(job.request_id, status="COMPLETE", result=str(media), result_sha256=sha256(media.read_bytes()).hexdigest())
+    complete_before = executor.inspect(job.request_id)
+    with pytest.raises(PermissionError, match="protected completion admission"):
+        executor.complete_settled_recovery(job, media)
+    assert executor.inspect(job.request_id) == complete_before
     assert ledger.verified_settlement_receipt(job.request_id)["claim"]["state"] == "SETTLED"
 
 

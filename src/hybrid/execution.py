@@ -1018,13 +1018,9 @@ class Executor:
         if not isinstance(row, dict):
             raise TypeError("durable executor receipt is unavailable")
         media_sha256 = sha256(result)
-        if row.get("status") == "COMPLETE":
-            self._verify_receipt(row)
-            if row.get("result_sha256") != media_sha256:
-                raise ValueError("completed receipt media hash changed")
-            return row
-        if row.get("status") != "SUBMITTED":
-            raise PermissionError("only a durable submitted request may complete from settlement")
+        # Completion is an authority boundary, including idempotent COMPLETE
+        # replays. Do not let a caller-selected ledger plus copied receipt skip
+        # the protected composition that admitted this operation.
         binding = row.get("settlement_binding")
         if (
             not isinstance(binding, dict)
@@ -1052,8 +1048,22 @@ class Executor:
         actual = money(claim.get("actual_usd"))
         if actual > job.cost:
             raise PermissionError("settled actual exceeds submitted maximum")
-        if self._jaco_final_admission_verifier is not None:
-            self._jaco_final_admission_verifier(job, row.get("final_admission_marker"), claim)
+        production_binding = self._jaco_production_binding
+        if production_binding != {
+            "kind": "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION",
+            "auth_scope": binding.get("auth_scope"),
+        }:
+            raise PermissionError("protected completion admission is required")
+        if self._jaco_final_admission_verifier is None:
+            raise PermissionError("protected completion admission is required")
+        self._jaco_final_admission_verifier(job, row.get("final_admission_marker"), claim)
+        if row.get("status") == "COMPLETE":
+            self._verify_receipt(row)
+            if row.get("result_sha256") != media_sha256:
+                raise ValueError("completed receipt media hash changed")
+            return row
+        if row.get("status") != "SUBMITTED":
+            raise PermissionError("only a durable submitted request may complete from settlement")
         self._change(job.request_id, status="COMPLETE", result=str(result), result_sha256=media_sha256,
                      charged=str(actual), actual_cost=str(actual), cache_hit=False)
         return self.inspect(job.request_id)
