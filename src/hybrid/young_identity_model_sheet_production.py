@@ -40,11 +40,18 @@ EXPECTED_PAYLOAD = {
         "Evaluation-only Genesis 28 young-adult Jacó identity model sheet in one 16:9 PNG. "
         "Exactly three views of the same single character: (1) front head-and-shoulders, eyes open, "
         "neutral expression; (2) three-quarter head-and-shoulders, eyes open; (3) standing full-body "
-        "neutral pose with readable hair, mantle, tunic, sandals, and silhouette."
+        "neutral pose with readable hair, mantle, tunic, sandals, and silhouette. Preserve the bound "
+        "Genesis 28 packet characterization: dark wavy shoulder-length hair, short neat brown beard and "
+        "moustache, kind observant brown eyes, cream linen tunic, muted dusty-blue wool mantle, leather "
+        "sandals. Use only the bound EP8 F001 approved raster and manifest as style/palette-reference "
+        "evidence; no unbound gallery substitute. Child-safe rounded 3D family-feature rendering; no text, "
+        "labels, logo, watermark, extra people, duplicate identity, angels, stairway, sleeping pose, closed "
+        "eyes, photorealism, modern objects, distorted limbs, or extra fingers."
     ),
     "aspect_ratio": "16:9", "resolution": "1k", "output_format": "png",
     "enable_prompt_expansion": False, "safety_tolerance": 2,
 }
+APPROVED_RICH_PAYLOAD_SHA256 = "9895f4551a8a59b5380e952f3b0f156e7b4ef34ee36e5dbdd60274ec3ecbb6ec"
 
 
 class ProductionAdmissionError(PermissionError):
@@ -156,6 +163,11 @@ def _canonical_v1_consent(policy: dict[str, Any]) -> dict[str, Any]:
         raise ProductionAdmissionError("v1 canonical consent changed")
     _digest(consent["consent_literal_utf8_sha256"], "v1 consent literal hash")
     _digest(consent["prompt_utf8_sha256"], "v1 consent prompt hash")
+    try:
+        from src.hybrid.jaco_flux3_production import _validate_canonical_v1_transcript
+        _validate_canonical_v1_transcript(consent)
+    except PermissionError as exc:
+        raise ProductionAdmissionError("canonical transcript provenance rejected") from exc
     return consent
 
 
@@ -174,6 +186,31 @@ def _source_evidence(preflight: dict[str, Any]) -> None:
             raise ProductionAdmissionError(f"{name} evidence is unavailable") from exc
         if len(raw) != descriptor["bytes"] or sha256(raw).hexdigest() != descriptor["sha256"]:
             raise ProductionAdmissionError(f"{name} evidence changed")
+
+
+def _three_view_payload(payload: object, payload_sha256: object) -> None:
+    """Require the reviewed rich three-view payload without shortening its prompt."""
+    payload = _exact(payload, set(EXPECTED_PAYLOAD), "three-view payload")
+    if (not isinstance(payload["prompt"], str)
+            or payload["aspect_ratio"] != "16:9"
+            or payload["resolution"] != "1k"
+            or payload["output_format"] != "png"
+            or payload["enable_prompt_expansion"] is not False
+            or type(payload["safety_tolerance"]) is not int
+            or payload["safety_tolerance"] != 2):
+        raise ProductionAdmissionError("three-view payload geometry changed")
+    descriptors = (
+        "Exactly three views of the same single character",
+        "(1) front head-and-shoulders, eyes open, neutral expression",
+        "(2) three-quarter head-and-shoulders, eyes open",
+        "(3) standing full-body neutral pose",
+        "no text, labels, logo, watermark, extra people, duplicate identity",
+    )
+    if any(descriptor not in payload["prompt"] for descriptor in descriptors):
+        raise ProductionAdmissionError("three-view payload design descriptors changed")
+    if (_digest(payload_sha256, "payload hash") != APPROVED_RICH_PAYLOAD_SHA256
+            or sha256(_canonical(payload)).hexdigest() != APPROVED_RICH_PAYLOAD_SHA256):
+        raise ProductionAdmissionError("approved rich three-views payload required")
 
 
 def _validate_v1_policy(policy: dict[str, Any]) -> None:
@@ -239,6 +276,8 @@ class YoungIdentityModelSheetProduction:
             _validate_v1_policy(policy)
             v1_policy = True
         else:
+            if not self._test_only or authority["mode"] != "TEST":
+                raise ProductionAdmissionError("legacy v2 chain is TEST-only")
             _exact(policy, {"schema", "status", "episode_id", "canonical_consent", "financial_baseline"}, "standing policy")
             if policy["schema"] != "jaco-standing-episode-operation-policy/v2" or policy["status"] != "ACTIVE_FOR_DERIVATION_REQUIRES_INDEPENDENT_OPERATION_REVIEW" or policy["episode_id"] != EPISODE_ID: raise ProductionAdmissionError("standing policy changed")
             consent = _canonical_consent(policy)
@@ -255,14 +294,13 @@ class YoungIdentityModelSheetProduction:
         else:
             _exact(preflight, preflight_fields, "preflight")
         if preflight["schema"] not in {"jaco-episode-operation-preflight/v2", "jaco-episode-operation-preflight/v3"} or preflight["status"] != "VALIDATED_PRE_DISPATCH_BLOCKED_MISSING_OPERATION_AUTHORIZATION" or preflight["episode_id"] != EPISODE_ID or preflight["request_id"] != REQUEST_ID or preflight["replay_prohibition"] is not True: raise ProductionAdmissionError("preflight binding changed")
+        if not self._test_only and (not v1_policy or preflight["schema"] != "jaco-episode-operation-preflight/v3" or authority["mode"] != "LIVE"):
+            raise ProductionAdmissionError("production requires v1 policy, v3 preflight, and LIVE mode")
         operation = _exact(preflight["operation"], {"id", "kind", "endpoint", "call_limit", "maximum_usd", "payload", "payload_sha256"}, "operation")
         if operation["id"] != OPERATION_ID or operation["kind"] != "MODEL_SHEET_THREE_VIEW" or operation["endpoint"] != ENDPOINT or type(operation["call_limit"]) is not int or operation["call_limit"] != 1: raise ProductionAdmissionError("preflight operation binding changed")
         payload = operation.get("payload")
         expected_payload_sha = operation.get("payload_sha256")
-        if (payload != EXPECTED_PAYLOAD
-                or _digest(expected_payload_sha, "payload hash") != expected_payload_sha
-                or expected_payload_sha != sha256(_canonical(EXPECTED_PAYLOAD)).hexdigest()):
-            raise ProductionAdmissionError("exact three-views payload required")
+        _three_view_payload(payload, expected_payload_sha)
         if _money(operation["maximum_usd"], "operation cap") != CAP or _money(authority["maximum_next_cost_usd"], "authority cap") != CAP: raise ProductionAdmissionError("cap binding changed")
         # v2 transcript provenance binds its independent sources directly.  The
         # complete v1 policy is itself hash-bound by authority and its v3
@@ -298,6 +336,8 @@ class YoungIdentityModelSheetProduction:
                 or (is_test and (not self._test_only or q.get("consent_fixture", {}).get("kind") != "TEST_ONLY_CONSENT_FIXTURE"))
                 or (not is_test and self._test_only)):
             raise ProductionAdmissionError("invalid protected qualification")
+        if q["schema"] == "jaco-test-deployment-qualification/v2" and (not self._test_only or q["mode"] != "TEST"):
+            raise ProductionAdmissionError("legacy v2 qualification is TEST-only")
         return q
 
     def _ledger_binding(self, authority: dict[str, Any]) -> tuple[Path, str, dict[str, Any]]:

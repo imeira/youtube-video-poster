@@ -80,6 +80,18 @@ def _actual_v1_policy_three_view_root(root, monkeypatch):
     })
     financial_sha = sha256(financial.read_bytes()).hexdigest()
     monkeypatch.setattr(production, "FINANCIAL_SHA256", financial_sha)
+    prompt_content = (
+        '{"responses": [{"question": "Posso registrar uma autorização operacional permanente para gerar e corrigir os ativos de Jacó dentro do teto TOTAL já aprovado de US$ 10, incluindo o US$ 0,048 já gasto? Cada chamada continuará exigindo preço máximo verificável, reserva, revisão independente e QA, sem repetir chamadas ambíguas. Suas aprovações rotineiras continuarão sendo thumbnail e vídeo final; publicação exigirá ordem separada. Isso substitui a limitação atual de autorizar apenas uma imagem de teste.", "choices_offered": ["Autorizar execução dentro dos US$ 10", "Autorizar só mais uma imagem de US$ 0,048", "Manter apenas trabalho sem novas cobranças"], "status": "unanswered", "user_response": null}], "outcome": "timed_out", "notice": "[user did not respond within 60m]"}'
+    )
+    state_db = root / "canonical-state.sqlite3"
+    with sqlite3.connect(state_db) as database:
+        database.execute("CREATE TABLE messages (id INTEGER, session_id TEXT, role TEXT, content TEXT)")
+        database.executemany("INSERT INTO messages VALUES (?, ?, ?, ?)", [
+            (147618, "local-712d007e4f3efba4d8c6cfc52f947e69023fed6f445a54206a6c3ede9b317fbb", "tool", prompt_content),
+            (147620, "local-712d007e4f3efba4d8c6cfc52f947e69023fed6f445a54206a6c3ede9b317fbb", "user", "autorizo"),
+        ])
+    canonical = __import__("src.hybrid.jaco_flux3_production", fromlist=["x"])
+    monkeypatch.setattr(canonical, "_CANONICAL_STATE_DB", state_db)
     evidence = {}
     for name, body in {
         "canonical_script_packet": b"sanitized script packet",
@@ -91,16 +103,9 @@ def _actual_v1_policy_three_view_root(root, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body)
         evidence[name] = {"path": str(path), "sha256": sha256(body).hexdigest(), "bytes": len(body)}
-    payload = {
-        "prompt": (
-            "Evaluation-only Genesis 28 young-adult Jacó identity model sheet in one 16:9 PNG. "
-            "Exactly three views of the same single character: (1) front head-and-shoulders, eyes open, "
-            "neutral expression; (2) three-quarter head-and-shoulders, eyes open; (3) standing full-body "
-            "neutral pose with readable hair, mantle, tunic, sandals, and silhouette."
-        ),
-        "aspect_ratio": "16:9", "enable_prompt_expansion": False,
-        "output_format": "png", "resolution": "1k", "safety_tolerance": 2,
-    }
+    # This is the byte-faithful reviewed payload; only external evidence paths
+    # are sanitized into this temporary, hermetic fixture root.
+    payload = json.loads(json.dumps(production.EXPECTED_PAYLOAD))
     preflight = _write(root / "preflight" / production.PREFLIGHT_PATH.name, {
         "schema": "jaco-episode-operation-preflight/v3",
         "status": "VALIDATED_PRE_DISPATCH_BLOCKED_MISSING_OPERATION_AUTHORIZATION",
@@ -116,11 +121,11 @@ def _actual_v1_policy_three_view_root(root, monkeypatch):
         "status": "ACTIVE_FOR_DERIVATION_REQUIRES_INDEPENDENT_OPERATION_REVIEW",
         "episode_id": production.EPISODE_ID, "root_request_id": production.REQUEST_ID,
         "trust_derivation": "CANONICAL_USER_TRANSCRIPT_PLUS_TRUSTED_LOCAL_OPERATOR",
-        "canonical_consent": {"session_id": "sanitized-session", "consent_message_id": 51,
-                               "consent_role": "user", "prompt_message_id": 50, "prompt_role": "tool",
+        "canonical_consent": {"session_id": "local-712d007e4f3efba4d8c6cfc52f947e69023fed6f445a54206a6c3ede9b317fbb", "consent_message_id": 147620,
+                               "consent_role": "user", "prompt_message_id": 147618, "prompt_role": "tool",
                                "consent_literal_utf8_bytes": 8,
-                               "consent_literal_utf8_sha256": "a" * 64,
-                               "prompt_utf8_bytes": 9, "prompt_utf8_sha256": "b" * 64},
+                               "consent_literal_utf8_sha256": "f54d0bf3c6c609d5e7f93d348d4332364fdee0edc1592ea2a30137ba31ead0e1",
+                               "prompt_utf8_bytes": 802, "prompt_utf8_sha256": "50b8aa006942c74cdc25d08ecfe9855c6349e6d2ca8d812b1472c1c2f2f5b44e"},
         "allowed_operation_class": {"kind": "QUALIFIED_JACO_EPISODE_ASSET_GENERATION_OR_QUALITY_REMEDIATION",
                                     "input_kind": "TEXT_TO_IMAGE", "providers": [production.ENDPOINT],
                                     "max_calls_per_operation": 1,
@@ -157,6 +162,123 @@ def test_actual_v1_contract_accepts_requested_three_views_and_bound_evidence(tmp
         "canonical_script_packet", "ep8_f001_manifest", "ep8_f001_raster", "ep8_f001_palette"
     }
     assert bound["policy_sha256"] == __import__("hashlib").sha256(Path(bound["policy_path"]).read_bytes()).hexdigest()
+
+
+def test_actual_rich_v3_candidate_payload_is_admitted_before_qualification(tmp_path, monkeypatch):
+    """The reviewed candidate's exact rich prompt is not reduced to a fixture."""
+    from hashlib import sha256
+
+    from src.hybrid.young_identity_model_sheet_production import (
+        APPROVED_RICH_PAYLOAD_SHA256,
+        ProductionAdmissionError,
+        YoungIdentityModelSheetProduction,
+        _canonical,
+    )
+
+    authority_path = _actual_v1_policy_three_view_root(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text())
+    preflight_path = Path(authority["preflight_path"])
+    preflight = json.loads(preflight_path.read_text())
+    payload = preflight["operation"]["payload"]
+    payload["prompt"] = (
+        "Evaluation-only Genesis 28 young-adult Jacó identity model sheet in one 16:9 PNG. "
+        "Exactly three views of the same single character: (1) front head-and-shoulders, eyes open, "
+        "neutral expression; (2) three-quarter head-and-shoulders, eyes open; (3) standing full-body "
+        "neutral pose with readable hair, mantle, tunic, sandals, and silhouette. Preserve the bound "
+        "Genesis 28 packet characterization: dark wavy shoulder-length hair, short neat brown beard and "
+        "moustache, kind observant brown eyes, cream linen tunic, muted dusty-blue wool mantle, leather "
+        "sandals. Use only the bound EP8 F001 approved raster and manifest as style/palette-reference "
+        "evidence; no unbound gallery substitute. Child-safe rounded 3D family-feature rendering; no text, "
+        "labels, logo, watermark, extra people, duplicate identity, angels, stairway, sleeping pose, closed "
+        "eyes, photorealism, modern objects, distorted limbs, or extra fingers."
+    )
+    preflight["operation"]["payload_sha256"] = sha256(_canonical(payload)).hexdigest()
+    assert preflight["operation"]["payload_sha256"] == APPROVED_RICH_PAYLOAD_SHA256
+    _write(preflight_path, preflight)
+    authority["preflight_sha256"] = sha256(preflight_path.read_bytes()).hexdigest()
+    _write(authority_path, authority)
+
+    factory = YoungIdentityModelSheetProduction._for_test(tmp_path, authority_path)
+    bound, _, admitted = factory._authority()
+    assert admitted["operation"]["payload"] == payload
+    Path(bound["deployment_qualification"]["path"]).unlink()
+    with pytest.raises(ProductionAdmissionError, match="protected qualification is not strict readable JSON"):
+        factory._qualification(bound)
+
+
+def test_v1_consent_with_correct_shape_but_wrong_canonical_transcript_rejects_first(tmp_path, monkeypatch):
+    """v1 descriptors are checked against canonical content, not accepted as hashes."""
+    from hashlib import sha256
+
+    from src.hybrid.young_identity_model_sheet_production import (
+        ProductionAdmissionError,
+        YoungIdentityModelSheetProduction,
+    )
+
+    authority_path = _actual_v1_policy_three_view_root(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text())
+    policy_path = Path(authority["policy_path"])
+    policy = json.loads(policy_path.read_text())
+    consent = policy["canonical_consent"]
+    consent.update({
+        "session_id": "actual-v1-session",
+        "prompt_message_id": 147618,
+        "consent_message_id": 147620,
+        "prompt_utf8_bytes": 802,
+        "prompt_utf8_sha256": "50b8aa006942c74cdc25d08ecfe9855c6349e6d2ca8d812b1472c1c2f2f5b44e",
+        "consent_literal_utf8_bytes": 8,
+        "consent_literal_utf8_sha256": "f54d0bf3c6c609d5e7f93d348d4332364fdee0edc1592ea2a30137ba31ead0e1",
+    })
+    state_db = tmp_path / "canonical-state.sqlite3"
+    with sqlite3.connect(state_db) as database:
+        database.execute("DELETE FROM messages")
+        database.executemany("INSERT INTO messages VALUES (?, ?, ?, ?)", [
+            (147618, "actual-v1-session", "tool", "wrong full prompt"),
+            (147620, "actual-v1-session", "user", "autorizo"),
+        ])
+    canonical = __import__("src.hybrid.jaco_flux3_production", fromlist=["x"])
+    monkeypatch.setattr(canonical, "_CANONICAL_STATE_DB", state_db)
+    _write(policy_path, policy)
+    authority["policy_sha256"] = sha256(policy_path.read_bytes()).hexdigest()
+    _write(authority_path, authority)
+
+    with pytest.raises(ProductionAdmissionError, match="canonical transcript provenance rejected"):
+        YoungIdentityModelSheetProduction._for_test(tmp_path, authority_path)._authority()
+    assert not (tmp_path / "ledger").exists()
+    assert not (tmp_path / "execution").exists()
+
+
+def test_legacy_v2_chain_is_private_test_only_and_never_live(tmp_path, monkeypatch):
+    """A valid legacy fixture cannot become a public TEST or LIVE admission."""
+    from hashlib import sha256
+
+    import src.hybrid.young_identity_model_sheet_production as production
+
+    authority_path = _qualified_test_root(tmp_path, monkeypatch)
+    private = production.YoungIdentityModelSheetProduction._for_test(tmp_path, authority_path)
+    authority, _, _ = private._authority()
+    assert private._qualification(authority)["mode"] == "TEST"
+
+    monkeypatch.setattr(production, "ROOT", tmp_path)
+    monkeypatch.setattr(production, "AUTHORITY_PATH", authority_path)
+    with pytest.raises(production.ProductionAdmissionError, match="legacy v2 chain is TEST-only"):
+        production.YoungIdentityModelSheetProduction()._authority()
+
+    authority = json.loads(authority_path.read_text())
+    qualification_path = Path(authority["deployment_qualification"]["path"])
+    qualification = json.loads(qualification_path.read_text())
+    authority["mode"] = "LIVE"
+    qualification.update({
+        "schema": "jaco-protected-deployment-qualification/v2",
+        "mode": "LIVE",
+        "authorization": "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY",
+    })
+    del qualification["consent_fixture"]
+    _write(qualification_path, qualification)
+    authority["deployment_qualification"]["sha256"] = sha256(qualification_path.read_bytes()).hexdigest()
+    _write(authority_path, authority)
+    with pytest.raises(production.ProductionAdmissionError, match="legacy v2 chain is TEST-only"):
+        production.YoungIdentityModelSheetProduction._for_test(tmp_path, authority_path)._authority()
 
 
 def test_v1_contract_reports_missing_qualification_after_schema_validation(tmp_path, monkeypatch):

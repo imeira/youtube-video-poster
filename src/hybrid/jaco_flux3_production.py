@@ -121,6 +121,40 @@ def _validate_canonical_transcript(provenance: dict[str, Any]) -> None:
             raise ProductionCompositionError("canonical transcript content or role does not match provenance")
 
 
+def _validate_canonical_v1_transcript(consent: dict[str, Any]) -> None:
+    """Verify the v1 tool prompt and user consent from the canonical DB read-only."""
+    expected = (
+        ("prompt_message_id", "prompt_role", "prompt_utf8_bytes", "prompt_utf8_sha256"),
+        ("consent_message_id", "consent_role", "consent_literal_utf8_bytes", "consent_literal_utf8_sha256"),
+    )
+    try:
+        database = sqlite3.connect(f"file:{_CANONICAL_STATE_DB.as_posix()}?mode=ro", uri=True)
+        try:
+            rows = {
+                row[0]: row[1:]
+                for row in database.execute(
+                    "SELECT id, session_id, role, content FROM messages WHERE id IN (?, ?)",
+                    (consent["prompt_message_id"], consent["consent_message_id"]),
+                ).fetchall()
+            }
+        finally:
+            database.close()
+    except sqlite3.Error as exc:
+        raise ProductionCompositionError("canonical transcript is unavailable") from exc
+    if len(rows) != 2:
+        raise ProductionCompositionError("canonical transcript records are incomplete")
+    for id_key, role_key, bytes_key, sha_key in expected:
+        message_id = consent[id_key]
+        row = rows.get(message_id)
+        if (type(message_id) is not int or row is None):
+            raise ProductionCompositionError("canonical transcript records are incomplete")
+        session_id, role, content = row
+        if (session_id != consent["session_id"] or role != consent[role_key]
+                or not isinstance(content, str) or len(content.encode("utf-8")) != consent[bytes_key]
+                or sha256(content.encode("utf-8")).hexdigest() != consent[sha_key]):
+            raise ProductionCompositionError("canonical transcript content or role does not match provenance")
+
+
 def _validate_mandate(root: Path) -> dict[str, Any]:
     """Load the fixed local mandate; no caller-selected root or fake signer.
 
