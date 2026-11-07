@@ -299,6 +299,7 @@ def test_model_sheet_v3_billing_verifier_requires_exact_qualified_bindings(tmp_p
     verifier.verify(receipt, binding, claim)
     for mutate in (
         lambda r, b, c: b.__setitem__("provider_request_id", "forged"),
+        lambda r, b, c: r["input_contract"].__setitem__("schema", True),
         lambda r, b, c: r["input_contract"].__setitem__("payload_sha256", "f" * 64),
         lambda r, b, c: r["final_admission_marker"].__setitem__("auth_scope", "prefix:" + policy_sha),
         lambda r, b, c: c.__setitem__("reserved_usd", "0.047000"),

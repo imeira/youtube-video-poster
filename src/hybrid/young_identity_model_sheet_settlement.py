@@ -39,6 +39,22 @@ class _Snapshot:
     submission_at: datetime
 
 
+@dataclass(frozen=True)
+class _LedgerSnapshot:
+    """Read-only, transactional evidence before and after the one billing GET."""
+
+    binding: str
+    claims: tuple[tuple[object, ...], ...]
+    receipts: tuple[tuple[object, ...], ...]
+
+
+_SETTLEMENT_RECEIPT_FIELDS = {
+    "schema", "authority", "local_request_id", "provider_request_id", "endpoint_id",
+    "auth_scope", "authority_mode", "currency", "cost_total_micro_usd", "evidence_hash",
+    "provenance",
+}
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -54,6 +70,103 @@ def _one(path: Path, sql: str, args: tuple[object, ...], label: str):
     if len(rows) != 1:
         raise ProductionAdmissionError(f"durable {label} receipt is unavailable")
     return rows[0]
+
+
+def _readonly_ledger_snapshot(path: Path) -> _LedgerSnapshot:
+    """Capture all canonical rows in one SQLite read transaction, never a writer."""
+    if not path.is_file():
+        raise ProductionAdmissionError("canonical standing ledger is unavailable")
+    try:
+        with sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True) as db:
+            db.execute("BEGIN")
+            binding_rows = db.execute("SELECT binding FROM policy WHERE id=1").fetchall()
+            claims = tuple(db.execute("SELECT * FROM claims ORDER BY request_id").fetchall())
+            receipts = tuple(db.execute(
+                "SELECT request_id, receipt_sha256, actual, receipt_body, provenance "
+                "FROM settlement_receipts ORDER BY request_id"
+            ).fetchall())
+    except (OSError, sqlite3.Error) as exc:
+        raise ProductionAdmissionError("canonical standing ledger is unavailable") from exc
+    if len(binding_rows) != 1 or not isinstance(binding_rows[0][0], str):
+        raise ProductionAdmissionError("canonical standing ledger policy is unavailable")
+    return _LedgerSnapshot(binding_rows[0][0], claims, receipts)
+
+
+def _prove_settlement(snapshot: _Snapshot, before: _LedgerSnapshot) -> None:
+    """Treat durable canonical readback, not a service return value, as settlement proof."""
+    after = _readonly_ledger_snapshot(snapshot.ledger_path)
+    try:
+        policy = json.loads(after.binding)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProductionAdmissionError("canonical standing ledger policy changed") from exc
+    if policy.get("mode") != "LIVE" or policy.get("currency") != "USD":
+        raise ProductionAdmissionError("canonical standing ledger policy changed")
+
+    # The protected ledger has exactly two immutable historical settlements.
+    before_claims = {row[0]: row for row in before.claims}
+    before_receipts = {row[0]: row for row in before.receipts}
+    historical_ids = set(before_claims) - {LOCAL_REQUEST_ID}
+    if (
+        len(before_claims) != 3 or len(before_receipts) != 2
+        or len(historical_ids) != 2 or set(before_receipts) != historical_ids
+        or any(row[6] != "SETTLED" or row[7] is None for key, row in before_claims.items() if key != LOCAL_REQUEST_ID)
+    ):
+        raise ProductionAdmissionError("canonical historical settlement snapshot is invalid")
+    after_claims = {row[0]: row for row in after.claims}
+    after_receipts = {row[0]: row for row in after.receipts}
+    if (
+        len(after_claims) != len(after.claims) or len(after_receipts) != len(after.receipts)
+        or set(after_claims) != set(before_claims) or set(after_receipts) != set(before_receipts) | {LOCAL_REQUEST_ID}
+        or any(after_claims[key] != before_claims[key] for key in historical_ids)
+        or any(after_receipts[key] != before_receipts[key] for key in historical_ids)
+    ):
+        raise ProductionAdmissionError("canonical settlement history changed")
+
+    current = after_claims.get(LOCAL_REQUEST_ID)
+    receipt_row = after_receipts.get(LOCAL_REQUEST_ID)
+    if current is None or receipt_row is None or len(after.receipts) != 3:
+        raise ProductionAdmissionError("canonical current settlement receipt is unavailable")
+    # claims columns are the canonical StandingBudgetLedger schema; do not infer from a service result.
+    if (
+        current[6] != "SETTLED" or current[7] is None
+        or current[8] != "FAL_READBACK_V2" or current[10] != REMOTE_REQUEST_ID
+        or current[11] != "LIVE" or receipt_row[4] != "FAL_BILLING_READBACK"
+    ):
+        raise ProductionAdmissionError("canonical current settlement binding mismatch")
+    try:
+        receipt = json.loads(receipt_row[3])
+        canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ProductionAdmissionError("canonical current settlement receipt is invalid") from exc
+    if (
+        not isinstance(receipt, dict) or set(receipt) != _SETTLEMENT_RECEIPT_FIELDS
+        or receipt_row[3] != canonical or receipt_row[1] != sha256(canonical.encode("utf-8")).hexdigest()
+        or receipt.get("schema") != 2 or receipt.get("authority") != "TRANSPORT_AUTHENTICATED_FAL_READBACK"
+        or receipt.get("local_request_id") != LOCAL_REQUEST_ID
+        or receipt.get("provider_request_id") != REMOTE_REQUEST_ID
+        or receipt.get("authority_mode") != "LIVE" or receipt.get("currency") != "USD"
+        or receipt.get("cost_total_micro_usd") != str(current[7])
+        or receipt.get("provenance") != "FAL_BILLING_READBACK"
+    ):
+        raise ProductionAdmissionError("canonical current settlement receipt is invalid")
+    if any(count != 0 for count, in _receipt_counts(snapshot.ledger_path)):
+        raise ProductionAdmissionError("canonical settlement receipt is duplicated or orphaned")
+
+
+def _receipt_counts(path: Path) -> tuple[tuple[int], ...]:
+    """Reject duplicate, orphan, and receipt-less settled rows before recovery."""
+    try:
+        with sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True) as db:
+            db.execute("BEGIN")
+            return tuple(db.execute(
+                "SELECT COUNT(*) FROM ("
+                "SELECT request_id FROM settlement_receipts GROUP BY request_id HAVING COUNT(*) != 1 "
+                "UNION ALL SELECT r.request_id FROM settlement_receipts r LEFT JOIN claims c ON c.request_id=r.request_id WHERE c.request_id IS NULL "
+                "UNION ALL SELECT c.request_id FROM claims c LEFT JOIN settlement_receipts r ON r.request_id=c.request_id WHERE c.state='SETTLED' AND r.request_id IS NULL"
+                ")"
+            ).fetchall())
+    except (OSError, sqlite3.Error) as exc:
+        raise ProductionAdmissionError("canonical standing ledger is unavailable") from exc
 
 
 def _submission_timestamp(path: Path) -> datetime:
@@ -131,6 +244,7 @@ async def _recover_after_settlement(snapshot: _Snapshot) -> dict:
 
 async def reconcile() -> dict:
     snapshot = _readonly_snapshot()
+    before = _readonly_ledger_snapshot(snapshot.ledger_path)
     end = _utc_now()
     if end <= snapshot.submission_at:
         raise ProductionAdmissionError("current UTC end does not cover durable submission")
@@ -138,6 +252,7 @@ async def reconcile() -> dict:
     settled = await _construct_service(snapshot, credential).reconcile(LOCAL_REQUEST_ID, start=snapshot.submission_at, end=end)
     if settled.get("status") != "SETTLED":
         return settled
+    _prove_settlement(snapshot, before)
     return {**settled, "completion": await _recover_after_settlement(snapshot)}
 
 

@@ -41,8 +41,10 @@ def test_reconcile_uses_durable_submission_timestamp_and_current_utc_end(monkeyp
             observed.update(request_id=request_id, start=start, end=end)
             return {"status": "SETTLED"}
 
-    snapshot = SimpleNamespace(submission_at=submitted)
+    snapshot = SimpleNamespace(submission_at=submitted, ledger_path="ignored")
     monkeypatch.setattr(settlement, "_readonly_snapshot", lambda: snapshot)
+    monkeypatch.setattr(settlement, "_readonly_ledger_snapshot", lambda _path: object())
+    monkeypatch.setattr(settlement, "_prove_settlement", lambda _snapshot, _before: None)
     monkeypatch.setattr(settlement, "_construct_service", lambda value, credential: Service())
     monkeypatch.setattr(settlement, "resolve_default_fal_credential", lambda: ("non-secret", "CONFIGURED"))
     monkeypatch.setattr(settlement, "_utc_now", lambda: now)
@@ -75,8 +77,10 @@ def test_settlement_runs_only_existing_get_recovery_and_reports_unknown_completi
             calls.append("billing-get")
             return {"status": "SETTLED", "claim": {"state": "SETTLED"}}
 
-    snapshot = SimpleNamespace(submission_at=submitted)
+    snapshot = SimpleNamespace(submission_at=submitted, ledger_path="ignored")
     monkeypatch.setattr(settlement, "_readonly_snapshot", lambda: snapshot)
+    monkeypatch.setattr(settlement, "_readonly_ledger_snapshot", lambda _path: object())
+    monkeypatch.setattr(settlement, "_prove_settlement", lambda _snapshot, _before: None)
     monkeypatch.setattr(settlement, "_construct_service", lambda value, credential: Service())
     monkeypatch.setattr(settlement, "resolve_default_fal_credential", lambda: ("non-secret", "CONFIGURED"))
     monkeypatch.setattr(settlement, "_utc_now", lambda: now)
@@ -91,6 +95,38 @@ def test_settlement_runs_only_existing_get_recovery_and_reports_unknown_completi
 
     assert calls == ["billing-get", "recovery-get"]
     assert result["completion"] == {"status": "SUBMITTED"}
+
+
+def test_settled_service_return_without_canonical_write_never_reaches_recovery(monkeypatch):
+    """A successful service return is not settlement proof; readback must be durable."""
+    import src.hybrid.young_identity_model_sheet_settlement as settlement
+
+    submitted = datetime(2026, 11, 7, 10, 0, tzinfo=UTC)
+    calls = []
+
+    class Service:
+        async def reconcile(self, *_args, **_kwargs):
+            calls.append("billing-get")
+            return {"status": "SETTLED"}
+
+    snapshot = SimpleNamespace(submission_at=submitted, ledger_path="ignored")
+    monkeypatch.setattr(settlement, "_readonly_snapshot", lambda: snapshot)
+    monkeypatch.setattr(settlement, "_readonly_ledger_snapshot", lambda _path: object())
+    monkeypatch.setattr(settlement, "_construct_service", lambda _value, _credential: Service())
+    monkeypatch.setattr(settlement, "resolve_default_fal_credential", lambda: ("non-secret", "CONFIGURED"))
+    monkeypatch.setattr(settlement, "_utc_now", lambda: submitted + timedelta(minutes=1))
+    monkeypatch.setattr(settlement, "_prove_settlement", lambda _snapshot, _before: (_ for _ in ()).throw(
+        settlement.ProductionAdmissionError("canonical current settlement receipt is unavailable")
+    ))
+
+    async def forbidden_recovery(_snapshot):
+        calls.append("recovery-get")
+        raise AssertionError("recovery must not run")
+
+    monkeypatch.setattr(settlement, "_recover_after_settlement", forbidden_recovery)
+    with pytest.raises(settlement.ProductionAdmissionError, match="canonical"):
+        asyncio.run(settlement.reconcile())
+    assert calls == ["billing-get"]
 
 
 def test_main_rejects_caller_selected_billing_window():

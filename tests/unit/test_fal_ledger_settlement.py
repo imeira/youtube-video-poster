@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -155,6 +156,43 @@ async def test_bound_test_readback_settles_once_and_replay_is_idempotent(tmp_pat
     assert first["status"] == "SETTLED"
     assert first == second
     assert ledger.exposure()["episode_usd"] == {"TEST-EP": "0.045000"}
+
+
+@pytest.mark.asyncio
+async def test_authenticated_offline_readback_writes_one_canonical_receipt_and_replays_idempotently(tmp_path):
+    """Exercise the real service/ledger/consumer boundary without a network or service mock."""
+    from src.hybrid.billing_reconciler import FalLedgerSettlementService
+
+    class AuthenticatedOfflineFixture(LoopbackFalBillingFixture):
+        authority = "TRANSPORT_AUTHENTICATED_FAL_READBACK"
+
+    executor, job, _ = await _bound_receipt(tmp_path)
+    ledger = _ledger(tmp_path)
+    fixture = AuthenticatedOfflineFixture(
+        pricing_pages=[], billing_pages=[
+            {"billing_events": [_event(job.request_id, job.endpoint)], "next_cursor": None, "has_more": False},
+            {"billing_events": [_event(job.request_id, job.endpoint)], "next_cursor": None, "has_more": False},
+        ],
+    )
+    service = FalLedgerSettlementService(
+        ledger, executor, FalBillingConsumer(fixture), clock=lambda: END,
+    )
+    service.reserve_from_executor(job.request_id, episode_id="TEST-EP", quoted_cap_usd=job.cost)
+
+    first = await service.reconcile(job.request_id, start=START, end=END)
+    with ledger._connect() as db:
+        saved = db.execute(
+            "SELECT receipt_sha256, actual, receipt_body FROM settlement_receipts WHERE request_id=?",
+            (job.request_id,),
+        ).fetchone()
+    second = await service.reconcile(job.request_id, start=START, end=END)
+
+    assert first["status"] == second["status"] == "SETTLED"
+    assert first["receipt_sha256"] == saved["receipt_sha256"] == second["receipt_sha256"]
+    assert saved["actual"] == 45_000
+    assert json.loads(saved["receipt_body"])["authority"] == "TRANSPORT_AUTHENTICATED_FAL_READBACK"
+    with ledger._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM settlement_receipts").fetchone()[0] == 1
 
 
 @pytest.mark.asyncio

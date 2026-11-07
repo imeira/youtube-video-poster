@@ -342,7 +342,8 @@ class ModelSheetV3BillingVerifier(JacoFinalAdmissionContractVerifier):
             or not isinstance(operation, dict)
             or operation.get("id") != self._OPERATION
             or operation.get("endpoint") != self._ENDPOINT
-            or operation.get("call_limit") != 1
+            or type(operation.get("call_limit")) is not int
+            or operation["call_limit"] != 1
             or not isinstance(operation.get("payload_sha256"), str)
             or not _HASH.fullmatch(operation["payload_sha256"])
             or qualification.get("schema") != "jaco-protected-deployment-qualification/v3"
@@ -388,7 +389,10 @@ class ModelSheetV3BillingVerifier(JacoFinalAdmissionContractVerifier):
             not isinstance(receipt, dict) or receipt.get("receipt_schema") != 2
             or receipt.get("request_id") != self._LOCAL_ID or receipt.get("scene") != self._OPERATION
             or receipt.get("endpoint") != self._ENDPOINT or receipt.get("mode") != "LIVE"
-            or receipt.get("input_contract") != {"schema": 1, "input_kind": "TEXT_TO_IMAGE", "payload_sha256": operation["payload_sha256"]}
+            or not isinstance(receipt.get("input_contract"), dict)
+            or set(receipt["input_contract"]) != {"schema", "input_kind", "payload_sha256"}
+            or type(receipt["input_contract"].get("schema")) is not int
+            or receipt["input_contract"] != {"schema": 1, "input_kind": "TEXT_TO_IMAGE", "payload_sha256": operation["payload_sha256"]}
             or marker != expected_marker or binding != expected_binding
             or not isinstance(claim, dict) or claim.get("request_id") != self._LOCAL_ID
             or claim.get("episode_id") != "JACO_GENESIS28" or claim.get("provider") != self._ENDPOINT
