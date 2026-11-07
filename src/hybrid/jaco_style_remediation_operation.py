@@ -104,9 +104,13 @@ def _financial_source_is_canonical(source: dict[str, Any]) -> bool:
 
 
 def _validate_geometry(payload: object) -> str:
-    if not isinstance(payload, dict) or payload.get("aspect_ratio") not in FAL_FLUX3_ASPECT_RATIOS:
+    # The immutable preflight is a 16:9 operation.  The provider enum confirms
+    # support; it never grants a caller authority to select another geometry.
+    if not isinstance(payload, dict) or payload.get("aspect_ratio") != "16:9":
+        raise OperationAdmissionError("protected payload geometry drifted")
+    if payload["aspect_ratio"] not in FAL_FLUX3_ASPECT_RATIOS:
         raise OperationAdmissionError("protected payload geometry is unsupported")
-    return str(payload["aspect_ratio"])
+    return "16:9"
 
 
 def probe_deployment_contract() -> dict[str, str]:

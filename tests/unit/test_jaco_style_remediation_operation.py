@@ -92,6 +92,17 @@ def _fixture_openapi() -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def test_protected_successor_rejects_legacy_4_3_geometry_before_review_or_reservation():
+    """The successor, unlike the legacy canary reviewer, is fixed at 16:9."""
+    from src.hybrid.jaco_style_remediation_operation import (
+        OperationAdmissionError,
+        _validate_geometry,
+    )
+
+    with pytest.raises(OperationAdmissionError, match="geometry drifted"):
+        _validate_geometry({"aspect_ratio": "4:3"})
+
+
 def test_operation_factory_makes_fresh_immutable_review_packet_from_fixed_authority(tmp_path):
     from src.hybrid.jaco_style_remediation_operation import OperationAdmissionFactory
 

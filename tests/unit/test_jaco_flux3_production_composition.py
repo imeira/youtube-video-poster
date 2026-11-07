@@ -507,7 +507,11 @@ async def test_actual_fresh_review_is_awaitable_inside_execute_loop_with_only_ht
         DummyCookieJar = staticmethod(lambda: object())
 
     monkeypatch.setitem(sys.modules, "aiohttp", AiohttpBoundary)
-    openapi = {"info": {"x-fal-metadata": {"endpointId": production.ENDPOINT}}, "paths": {}}
+    # Fresh-review transport receives the complete saved official contract, not
+    # a synthetic endpoint-only shape that omits the protected 16:9 enum.
+    openapi = json.loads(
+        next((Path(__file__).parents[1] / "fixtures").glob("*.json")).read_text(encoding="utf-8")
+    )
     monkeypatch.setattr(production.urllib.request, "urlopen", lambda request, timeout: Response(json.dumps(openapi).encode()))
 
     review, run, quote = await factory.fresh_review()
@@ -532,7 +536,7 @@ production._SOURCE_EVIDENCE_ROOT = source
 production._CANONICAL_STATE_DB = state
 fal.DEFAULT_DOTENV_PATH = credential
 class Response:
-    def read(self): return json.dumps({\"info\": {\"x-fal-metadata\": {\"endpointId\": production.ENDPOINT}}, \"paths\": {}}).encode()
+    def read(self): return next(Path("tests/fixtures").glob("*.json")).read_bytes()
     def __enter__(self): return self
     def __exit__(self, *_): return False
 class Content:
@@ -561,8 +565,10 @@ print(json.dumps({\"review\": review[\"output_sha256\"], \"run\": str(run)}))
     completed = subprocess.run(
         [sys.executable, str(script), str(root), str(tmp_path / "TEST_ONLY_NONSECRET_SOURCE_EVIDENCE"),
          str(tmp_path / "TEST_ONLY_NONSECRET_canonical_state.sqlite3"), str(credential_fixture)],
-        cwd=Path.cwd(), capture_output=True, text=True, timeout=30, check=True,
+        cwd=Path.cwd(), env={**os.environ, "PYTHONPATH": str(Path.cwd())},
+        capture_output=True, text=True, timeout=30, check=False,
     )
+    assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
     assert len(result["review"]) == 64
     assert "TEST_ONLY_NONSECRET_PRODUCTION_AUTHORITY" in result["run"]
