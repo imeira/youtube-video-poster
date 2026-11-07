@@ -253,25 +253,27 @@ class OperationAdmissionFactory:
         if not isinstance(binding, dict) or set(binding) != {"path", "sha256"}:
             raise OperationAdmissionError("protected deployment qualification contract is required")
         path = Path(binding["path"]).resolve()
-        expected = (self.root / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.qualification.v1.json").resolve()
+        expected = (self.root / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.qualification.v2.json").resolve()
         if path != expected:
             raise OperationAdmissionError("caller-selected deployment qualification is forbidden")
         contract, digest = _load(path, "protected deployment qualification")
         required = {
             "schema", "status", "operation_id", "episode_id", "policy_sha256", "preflight_sha256",
             "mode", "authorization", "review_packet_schema", "reviewer", "ci_digest_sha256",
-            "execution_code_sha256",
+            "execution_code_sha256", "operation_policy_sha256", "financial_policy_sha256",
         }
         test_required = required | {"consent_fixture"}
         is_test_fixture = contract.get("mode") == "TEST"
         if (digest != binding["sha256"]
                 or set(contract) != (test_required if is_test_fixture else required)
                 or contract.get("schema") != (
-                    "jaco-test-deployment-qualification/v1" if is_test_fixture
-                    else "jaco-protected-deployment-qualification/v1"
+                    "jaco-test-deployment-qualification/v2" if is_test_fixture
+                    else "jaco-protected-deployment-qualification/v2"
                 )
                 or contract.get("status") != "QUALIFIED" or contract.get("operation_id") != OPERATION_ID
                 or contract.get("episode_id") != EPISODE_ID or contract.get("policy_sha256") != authority.get("policy_sha256")
+                or contract.get("operation_policy_sha256") != authority.get("policy_sha256")
+                or contract.get("financial_policy_sha256") != authority.get("canonical_ledger", {}).get("financial_policy_sha256")
                 or contract.get("preflight_sha256") != authority.get("preflight_sha256")
                 or contract.get("mode") not in {"TEST", "LIVE"}
                 or contract.get("review_packet_schema") != "jaco-fal-flux3-successor-benchmark/3"
@@ -291,6 +293,45 @@ class OperationAdmissionFactory:
                 or (not is_test_fixture and self._test_only)):
             raise OperationAdmissionError("invalid protected deployment qualification")
         return contract
+
+    def _canonical_ledger_binding(self, authority: dict[str, Any]) -> tuple[Path, str, dict[str, Any]]:
+        """Read the existing financial ledger binding without initializing it.
+
+        The operation policy binds authorization scope; the financial-source hash
+        binds the immutable ledger row.  They are intentionally distinct.
+        """
+        ledger_binding = authority.get("canonical_ledger")
+        required = {"path", "financial_policy_sha256", "operation_policy_sha256", "financial_source"}
+        if not isinstance(ledger_binding, dict) or set(ledger_binding) != required:
+            raise OperationAdmissionError("canonical shared ledger binding is required")
+        ledger_path = Path(ledger_binding["path"]).resolve()
+        expected_ledger_path = (self.root / "ledger" / LEDGER_PATH.name).resolve()
+        if ledger_path != expected_ledger_path:
+            raise OperationAdmissionError("caller-selected canonical ledger is forbidden")
+        operation_policy_sha = ledger_binding["operation_policy_sha256"]
+        if operation_policy_sha != authority.get("policy_sha256"):
+            raise OperationAdmissionError("operation policy binding changed")
+        financial_binding = ledger_binding["financial_source"]
+        if not isinstance(financial_binding, dict) or set(financial_binding) != {"path", "sha256"}:
+            raise OperationAdmissionError("canonical financial source binding is required")
+        financial_path = Path(financial_binding["path"]).resolve()
+        expected_financial_path = (self.root / FINANCIAL_SOURCE_PATH.name).resolve()
+        financial_source, financial_sha = _load(financial_path, "canonical financial source")
+        financial_policy_sha = ledger_binding["financial_policy_sha256"]
+        if (financial_path != expected_financial_path
+                or financial_sha != financial_binding["sha256"]
+                or financial_sha != financial_policy_sha
+                or not _financial_source_is_canonical(financial_source)):
+            raise OperationAdmissionError("canonical financial source changed")
+        try:
+            with sqlite3.connect(f"file:{ledger_path.as_posix()}?mode=ro", uri=True) as db:
+                row = db.execute("SELECT binding FROM policy WHERE id=1").fetchone()
+                stored = json.loads(row[0]) if row is not None else None
+        except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise OperationAdmissionError("canonical ledger is not readable") from exc
+        if not isinstance(stored, dict) or stored.get("policy_sha256") != financial_policy_sha:
+            raise OperationAdmissionError("canonical ledger does not bind financial source")
+        return ledger_path, financial_policy_sha, financial_source
 
     def _review_for_execution(
         self, quote: dict[str, Any], openapi: dict[str, Any], financial_source: dict[str, Any]
@@ -320,32 +361,11 @@ class OperationAdmissionFactory:
     ) -> dict[str, Any]:
         """Composition-only continuation after qualification and fresh inputs."""
         from src.hybrid.execution import Authorization, Executor, Job, Price
-        from src.hybrid.jaco_flux3_production import _FixedFalProvider
         from src.hybrid.planner import Config
         from src.hybrid.standing_budget import StandingBudgetLedger
-        class OperationFixedFalProvider(_FixedFalProvider):
-            def __init__(self, output, schema, key, mode):
-                if mode not in {"TEST", "LIVE"}: raise OperationAdmissionError("qualified provider mode is invalid")
-                super().__init__(output, schema, key); self.mode = mode
         authority, _policy, preflight = self._authority()
         qualification = self._qualification(authority)
-        ledger_binding = authority.get("canonical_ledger")
-        if not isinstance(ledger_binding, dict) or set(ledger_binding) != {"path", "policy_sha256", "financial_source"}:
-            raise OperationAdmissionError("canonical shared ledger binding is required")
-        ledger_path = Path(ledger_binding["path"]).resolve()
-        expected_ledger_path = (self.root / "ledger" / LEDGER_PATH.name).resolve()
-        if ledger_path != expected_ledger_path or ledger_binding["policy_sha256"] != authority["policy_sha256"]:
-            raise OperationAdmissionError("per-job ledger reset is forbidden")
-        financial_binding = ledger_binding["financial_source"]
-        if not isinstance(financial_binding, dict) or set(financial_binding) != {"path", "sha256"}:
-            raise OperationAdmissionError("canonical financial source binding is required")
-        financial_path = Path(financial_binding["path"]).resolve()
-        expected_financial_path = (self.root / FINANCIAL_SOURCE_PATH.name).resolve()
-        financial_source, financial_sha = _load(financial_path, "canonical financial source")
-        if (financial_path != expected_financial_path
-                or financial_sha != financial_binding["sha256"]
-                or not _financial_source_is_canonical(financial_source)):
-            raise OperationAdmissionError("canonical financial source changed")
+        ledger_path, financial_policy_sha, financial_source = self._canonical_ledger_binding(authority)
         execution = self.root / "execution" / OPERATION_ID; execution.mkdir(parents=True, exist_ok=True)
         job = Job(OPERATION_ID, "first", qualification["mode"], ENDPOINT, preflight["operation"]["payload"], None, Decimal("0.048"), input_kind="TEXT_TO_IMAGE")
         qualification_path = execution / "protected-qualification.json"
@@ -364,7 +384,7 @@ class OperationAdmissionFactory:
         review_run: Path | None = None
         if not (execution / "executor.sqlite3").exists():
             _review, review_run = self._review_for_execution(quote, openapi, financial_source)
-        ledger = StandingBudgetLedger(ledger_path, policy_sha256=authority["policy_sha256"], episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode=qualification["mode"])
+        ledger = StandingBudgetLedger(ledger_path, policy_sha256=financial_policy_sha, episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode=qualification["mode"])
         executor = Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)), standing_ledger=ledger, _jaco_final_admission_verifier=verify_marker, _jaco_production_binding={"kind": "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION", "auth_scope": scope})
         if executor.inspect(job.request_id) is None:
             if review_run is None:
@@ -385,6 +405,15 @@ class OperationAdmissionFactory:
         else:
             if self._test_only:
                 raise OperationAdmissionError("private fixture composition cannot execute LIVE")
+            from src.hybrid.jaco_flux3_production import _FixedFalProvider
+
+            class OperationFixedFalProvider(_FixedFalProvider):
+                def __init__(self, output, schema, key, mode):
+                    if mode not in {"TEST", "LIVE"}:
+                        raise OperationAdmissionError("qualified provider mode is invalid")
+                    super().__init__(output, schema, key)
+                    self.mode = mode
+
             provider = OperationFixedFalProvider(execution / "provider-receipt.json", schema, credential, qualification["mode"])
         auth = None if qualification["mode"] == "TEST" else Authorization(job.request_id, qualification["authorization"], time.time()+300, Decimal("0.048"))
         price = None if qualification["mode"] == "TEST" else Price(ENDPOINT, job.request_id, Decimal("0.048"), time.time()+300, "protected-fresh-quote")
@@ -397,6 +426,7 @@ class OperationAdmissionFactory:
         """Qualify the pinned root before credential resolution or remote reads."""
         authority, _policy, _preflight = self._authority()
         qualification = self._qualification(authority)
+        self._canonical_ledger_binding(authority)
         quote, openapi = await quote_and_openapi()
         if qualification["mode"] == "TEST":
             if not self._test_only or not callable(test_provider_factory):
