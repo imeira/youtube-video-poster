@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import time
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -19,6 +20,9 @@ from typing import Any
 ROOT = Path("C:/HermesStudio/production/jaco-flux3")
 AUTHORITY_PATH = ROOT / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.authority.v2.json"
 POLICY_PATH = ROOT / "standing-policy" / "JACO_GENESIS28_STANDING_OPERATION_POLICY.v1.json"
+PREFLIGHT_PATH = ROOT / "preflight" / "JACO_GEN28_STYLE_REMEDIATION_001.preflight.json"
+LEDGER_PATH = ROOT / "ledger" / "standing-budget.sqlite3"
+FINANCIAL_SOURCE_PATH = ROOT / "financial-record-source.json"
 OPERATION_ID = "JACO_GEN28_STYLE_REMEDIATION_001"
 EPISODE_ID = "JACO_GENESIS28"
 REQUEST_ID = "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9"
@@ -26,6 +30,12 @@ ENDPOINT = "blackforestlabs/flux-3/text-to-image"
 CAP = Decimal("10.000000")
 PRIOR_ACTUAL = Decimal("0.048000")
 NEXT_CAP = Decimal("0.048000")
+APPROVED_PREFLIGHT_SHA256 = "7b4699ce1ad1379984f1c87f45d9c0896fae502cef3c276762bd56f3b230a6e4"
+APPROVED_FINANCIAL_SOURCE_SHA256 = "916e8230db47406db96cbe774b9332c00ed24cf156c66d4d91d11a213b64f50d"
+FAL_FLUX3_ASPECT_RATIOS = frozenset({
+    "auto", "21:9", "2:1", "16:9", "3:2", "7:5", "4:3", "5:4", "1:1",
+    "4:5", "3:4", "5:7", "2:3", "9:16", "1:2",
+})
 
 
 class OperationAdmissionError(PermissionError):
@@ -80,6 +90,67 @@ def _write_once(path: Path, body: dict[str, Any]) -> Path:
     return path
 
 
+def _financial_source_is_canonical(source: dict[str, Any]) -> bool:
+    return source == {
+        "schema": "jaco-factory-financial-reconciliation/1",
+        "request_hash": REQUEST_ID,
+        "revision": "818556d97edb648f",
+        "currency": "USD",
+        "total_episode_cap": "10.00",
+        "status": "APPROVED_USD10",
+        "approval_scope": "FINANCIAL_ONLY",
+        "authorizes_generation": False,
+    }
+
+
+def _validate_geometry(payload: object) -> str:
+    # The immutable preflight is a 16:9 operation.  The provider enum confirms
+    # support; it never grants a caller authority to select another geometry.
+    if not isinstance(payload, dict) or payload.get("aspect_ratio") != "16:9":
+        raise OperationAdmissionError("protected payload geometry drifted")
+    if payload["aspect_ratio"] not in FAL_FLUX3_ASPECT_RATIOS:
+        raise OperationAdmissionError("protected payload geometry is unsupported")
+    return "16:9"
+
+
+def probe_deployment_contract() -> dict[str, str]:
+    """Read only the protected production contract; never create or reserve state."""
+    policy, policy_sha = _load(POLICY_PATH, "protected standing policy")
+    preflight, preflight_sha = _load(PREFLIGHT_PATH, "protected successor preflight")
+    financial_source, financial_sha = _load(FINANCIAL_SOURCE_PATH, "canonical financial source")
+    if (preflight_sha != APPROVED_PREFLIGHT_SHA256
+            or preflight.get("schema") != "jaco-episode-operation-preflight/v1"
+            or preflight.get("status") != "VALIDATED_PRE_DISPATCH_BLOCKED_MISSING_OPERATION_AUTHORIZATION"
+            or preflight.get("episode_id") != EPISODE_ID
+            or preflight.get("operation", {}).get("id") != OPERATION_ID
+            or preflight["operation"].get("endpoint") != ENDPOINT
+            or preflight["operation"].get("call_limit") != 1):
+        raise OperationAdmissionError("protected successor preflight contract changed")
+    geometry = _validate_geometry(preflight["operation"].get("payload"))
+    if (policy.get("schema") != "jaco-standing-episode-operation-policy/v1"
+            or policy.get("status") != "ACTIVE_FOR_DERIVATION_REQUIRES_INDEPENDENT_OPERATION_REVIEW"
+            or policy.get("episode_id") != EPISODE_ID
+            or financial_sha != APPROVED_FINANCIAL_SOURCE_SHA256
+            or not _financial_source_is_canonical(financial_source)):
+        raise OperationAdmissionError("protected policy or financial source changed")
+    try:
+        with sqlite3.connect(f"file:{LEDGER_PATH.as_posix()}?mode=ro", uri=True) as ledger:
+            tables = {row[0] for row in ledger.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    except sqlite3.Error as exc:
+        raise OperationAdmissionError("canonical ledger is not readable") from exc
+    if not {"policy", "claims", "settlement_receipts"}.issubset(tables):
+        raise OperationAdmissionError("canonical ledger schema is incompatible")
+    return {
+        "status": "NEEDS_QUALIFICATION",
+        "operation_id": OPERATION_ID,
+        "policy_sha256": policy_sha,
+        "preflight_sha256": preflight_sha,
+        "financial_source_sha256": financial_sha,
+        "geometry": geometry,
+        "ledger_path": str(LEDGER_PATH),
+    }
+
+
 class OperationAdmissionFactory:
     """Binds fresh review inputs to one protected successor operation only."""
 
@@ -108,7 +179,7 @@ class OperationAdmissionFactory:
             raise OperationAdmissionError("wrong operation scope")
         policy_path = Path(authority.get("policy_path", "")).resolve()
         preflight_path = Path(authority.get("preflight_path", "")).resolve()
-        if policy_path != (self.root / "standing-policy" / POLICY_PATH.name).resolve() or preflight_path != (self.root / "preflight" / "JACO_GEN28_STYLE_REMEDIATION_001.preflight.json").resolve():
+        if policy_path != (self.root / "standing-policy" / POLICY_PATH.name).resolve() or preflight_path != (self.root / "preflight" / PREFLIGHT_PATH.name).resolve():
             raise OperationAdmissionError("caller-selected policy or preflight is forbidden")
         policy, policy_sha = _load(policy_path, "protected standing policy")
         preflight, preflight_sha = _load(preflight_path, "protected successor preflight")
@@ -174,8 +245,7 @@ class OperationAdmissionFactory:
         return {"status": packet["status"], "operation_id": OPERATION_ID, "packet_path": str(packet_path), "packet_sha256": sha256(packet_path.read_bytes()).hexdigest(), "budget": packet["budget"]}
 
     def verify(self) -> dict[str, str]:
-        authority, _policy, _preflight = self._authority()
-        return {"status": authority["status"], "operation_id": OPERATION_ID, "authority_sha256": sha256(self.authority_path.read_bytes()).hexdigest(), "preflight_sha256": authority["preflight_sha256"]}
+        return probe_deployment_contract()
 
     def _qualification(self, authority: dict[str, Any]) -> dict[str, Any]:
         """Open only the authority-pinned deployment contract, never CLI data."""
@@ -232,8 +302,7 @@ class OperationAdmissionFactory:
         authority, _policy, preflight = self._authority()
         self._qualification(authority)
         payload = preflight["operation"]["payload"]
-        if payload.get("aspect_ratio") != "4:3":
-            raise OperationAdmissionError("protected payload is incompatible with the closed subprocess reviewer")
+        _validate_geometry(payload)
         run = self.root / "operation-runs" / f"{OPERATION_ID}-{time.time_ns()}"
         run.mkdir(parents=True, exist_ok=False)
         quote_path, openapi_path = run / "quote.json", run / "openapi.json"
@@ -264,23 +333,18 @@ class OperationAdmissionFactory:
         if not isinstance(ledger_binding, dict) or set(ledger_binding) != {"path", "policy_sha256", "financial_source"}:
             raise OperationAdmissionError("canonical shared ledger binding is required")
         ledger_path = Path(ledger_binding["path"]).resolve()
-        if ledger_path.parent != (self.root / "ledger").resolve() or ledger_binding["policy_sha256"] != authority["policy_sha256"]:
+        expected_ledger_path = (self.root / "ledger" / LEDGER_PATH.name).resolve()
+        if ledger_path != expected_ledger_path or ledger_binding["policy_sha256"] != authority["policy_sha256"]:
             raise OperationAdmissionError("per-job ledger reset is forbidden")
         financial_binding = ledger_binding["financial_source"]
         if not isinstance(financial_binding, dict) or set(financial_binding) != {"path", "sha256"}:
             raise OperationAdmissionError("canonical financial source binding is required")
         financial_path = Path(financial_binding["path"]).resolve()
-        expected_financial_path = (self.root / "ledger" / "financial-record.json").resolve()
+        expected_financial_path = (self.root / FINANCIAL_SOURCE_PATH.name).resolve()
         financial_source, financial_sha = _load(financial_path, "canonical financial source")
         if (financial_path != expected_financial_path
                 or financial_sha != financial_binding["sha256"]
-                or financial_source != {
-                    "schema": "jaco-factory-financial-reconciliation/1",
-                    "request_hash": REQUEST_ID,
-                    "currency": "USD",
-                    "total_episode_cap": "10.00",
-                    "authorizes_generation": False,
-                }):
+                or not _financial_source_is_canonical(financial_source)):
             raise OperationAdmissionError("canonical financial source changed")
         execution = self.root / "execution" / OPERATION_ID; execution.mkdir(parents=True, exist_ok=True)
         job = Job(OPERATION_ID, "first", qualification["mode"], ENDPOINT, preflight["operation"]["payload"], None, Decimal("0.048"), input_kind="TEXT_TO_IMAGE")
