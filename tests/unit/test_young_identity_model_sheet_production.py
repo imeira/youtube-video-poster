@@ -288,6 +288,51 @@ async def test_empty_pre_post_executor_retries_qualified_admission(tmp_path, mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("claim_kind", ["matching-id-foreign-scope", "operation-different-id", "unexpected-row"])
+async def test_pre_post_empty_ledger_claims_block_before_credentials_quote_or_review(
+    tmp_path, monkeypatch, claim_kind
+):
+    """A zero-job executor never makes an existing canonical claim retryable."""
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import Executor, Job
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    authority_path = _qualified_live_root(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    qualification = json.loads(Path(authority["deployment_qualification"]["path"]).read_text())
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)))
+    _write(execution / "protected-qualification.json", qualification)
+    ledger = StandingBudgetLedger(
+        tmp_path / "ledger" / "standing-budget.sqlite3",
+        policy_sha256=authority["canonical_ledger"]["financial_policy_sha256"],
+        episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE",
+    )
+    expected_scope = f"{production.OPERATION_ID}:{authority['policy_sha256']}"
+    expected_id = Job(
+        production.OPERATION_ID, "first", "LIVE", production.ENDPOINT,
+        production.EXPECTED_PAYLOAD, None, Decimal("0.048"), input_kind="TEXT_TO_IMAGE",
+    ).request_id
+    if claim_kind == "matching-id-foreign-scope":
+        request_id, scope, provider = expected_id, "foreign-scope", production.ENDPOINT
+    elif claim_kind == "operation-different-id":
+        request_id, scope, provider = "different-request", expected_scope, production.ENDPOINT
+    else:
+        request_id, scope, provider = "unrelated-request", "unrelated-scope", "other/provider"
+    ledger.reserve(request_id, production.EPISODE_ID, provider, "0.048", settlement_mode="FAL_READBACK_V2", auth_scope=scope, provider_request_id="UNASSIGNED", authority_mode="LIVE")
+    before = (tmp_path / "ledger" / "standing-budget.sqlite3").read_bytes()
+    calls = []
+    with pytest.raises(production.ProductionAdmissionError, match="ambiguous execution checkpoint"):
+        await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+            quote_and_openapi=lambda _credential: calls.append("quote"),
+            credential_loader=lambda: calls.append("credential"),
+        )
+    assert calls == []
+    assert (tmp_path / "ledger" / "standing-budget.sqlite3").read_bytes() == before
+
+
+@pytest.mark.asyncio
 async def test_unknown_executor_checkpoint_blocks_before_quote_or_credential(tmp_path, monkeypatch):
     """A row that cannot prove its exact operation never falls back to retry."""
     import src.hybrid.young_identity_model_sheet_production as production
@@ -453,6 +498,58 @@ def test_v1_contract_reports_missing_qualification_after_schema_validation(tmp_p
     Path(authority["deployment_qualification"]["path"]).unlink()
     with pytest.raises(ProductionAdmissionError, match="protected qualification is not strict readable JSON"):
         factory._qualification(authority)
+
+
+@pytest.mark.parametrize("mutation", [None, "old-code", "new-code", "foreign-operation", "unknown-field"])
+def test_versioned_technical_amendment_preserves_hash_gate(tmp_path, monkeypatch, mutation):
+    """Only an immutable old-to-current code amendment can select v3 qualification."""
+    from hashlib import sha256
+
+    import src.hybrid.young_identity_model_sheet_production as production
+
+    authority_path = _qualified_live_root(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text())
+    prior_path = Path(authority["deployment_qualification"]["path"])
+    prior = json.loads(prior_path.read_text())
+    prior["execution_code_sha256"] = production.PRIOR_QUALIFIED_EXECUTION_SHA256
+    _write(prior_path, prior)
+    prior_sha = sha256(prior_path.read_bytes()).hexdigest()
+    amended = dict(prior)
+    amended.update({
+        "schema": "jaco-protected-deployment-qualification/v3",
+        "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+        "technical_deployment_amendment": {
+            "schema": "jaco-technical-deployment-amendment/v1",
+            "kind": "EXECUTION_CODE_HASH_SUCCESSOR_ONLY",
+            "prior_qualification_path": str(prior_path),
+            "prior_qualification_sha256": prior_sha,
+            "prior_qualification_bytes_sha256": prior_sha,
+            "prior_execution_code_sha256": production.PRIOR_QUALIFIED_EXECUTION_SHA256,
+            "new_execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+            "review_ci_provenance_sha256": prior["ci_digest_sha256"],
+            "operation_policy_sha256": prior["operation_policy_sha256"],
+            "financial_policy_sha256": prior["financial_policy_sha256"],
+            "preflight_sha256": prior["preflight_sha256"],
+        },
+    })
+    if mutation == "old-code":
+        amended["technical_deployment_amendment"]["prior_execution_code_sha256"] = "0" * 64
+    elif mutation == "new-code":
+        amended["technical_deployment_amendment"]["new_execution_code_sha256"] = "1" * 64
+    elif mutation == "foreign-operation":
+        amended["technical_deployment_amendment"]["operation_policy_sha256"] = "2" * 64
+    elif mutation == "unknown-field":
+        amended["technical_deployment_amendment"]["extra"] = True
+    amended_path = tmp_path / "standing-policy" / production.AMENDED_QUALIFICATION_PATH.name
+    _write(amended_path, amended)
+    authority["deployment_qualification"] = {"path": str(amended_path), "sha256": sha256(amended_path.read_bytes()).hexdigest()}
+    _write(authority_path, authority)
+    factory = production.YoungIdentityModelSheetProduction()
+    if mutation is None:
+        assert factory._qualification(authority)["schema"] == "jaco-protected-deployment-qualification/v3"
+    else:
+        with pytest.raises(production.ProductionAdmissionError):
+            factory._qualification(authority)
 
 
 @pytest.mark.parametrize("mutation", ["wrong-views", "missing-reference", "tampered-reference", "foreign-episode", "policy-version", "unknown-schema", "boolean"])
