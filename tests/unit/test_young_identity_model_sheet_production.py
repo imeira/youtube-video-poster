@@ -148,6 +148,319 @@ def _actual_v1_policy_three_view_root(root, monkeypatch):
     return _write(root / "standing-policy" / production.AUTHORITY_PATH.name, authority)
 
 
+def _qualified_live_root(root, monkeypatch):
+    """Install a hermetic v1 LIVE authority through the public fixed-root path."""
+    from hashlib import sha256
+
+    import src.hybrid.young_identity_model_sheet_production as production
+
+    authority_path = _actual_v1_policy_three_view_root(root, monkeypatch)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    qualification_path = Path(authority["deployment_qualification"]["path"])
+    qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
+    authority["mode"] = "LIVE"
+    qualification.update({
+        "schema": "jaco-protected-deployment-qualification/v2",
+        "mode": "LIVE",
+        "authorization": "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY",
+        "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+    })
+    del qualification["consent_fixture"]
+    _write(qualification_path, qualification)
+    authority["deployment_qualification"] = {
+        "path": str(qualification_path),
+        "sha256": sha256(qualification_path.read_bytes()).hexdigest(),
+    }
+    _write(authority_path, authority)
+    monkeypatch.setattr(production, "ROOT", root)
+    monkeypatch.setattr(production, "AUTHORITY_PATH", authority_path)
+    return authority_path
+
+
+@pytest.mark.asyncio
+async def test_public_live_composition_reaches_final_admission_then_recovers_get_only(
+    tmp_path, monkeypatch
+):
+    """A public LIVE Job uses the qualified composition, not a TEST relabel."""
+    import src.hybrid.jaco_flux3_production as canonical_production
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import ProviderResult
+
+    _qualified_live_root(tmp_path, monkeypatch)
+    quote, openapi = _fixture_inputs()
+    calls = []
+
+    class OfflineLiveProvider:
+        mode = "LIVE"
+
+        def __init__(self, output, _openapi, credential):
+            assert credential == "hermetic-non-secret-credential"
+            self.output = output
+            calls.append("provider")
+
+        async def submit(self, _job, _request_id, checkpoint):
+            calls.append("post")
+            checkpoint(provider_id="live-remote-1", partial=self.output)
+            raise TimeoutError("controlled checkpoint crash")
+
+        async def recover(self, _job, _request_id, remote, _partial, _checkpoint):
+            assert remote == "live-remote-1"
+            calls.append("get")
+            self.output.write_bytes(b"recovered-live-result")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    monkeypatch.setattr(canonical_production, "_FixedFalProvider", OfflineLiveProvider)
+
+    async def inputs(credential):
+        assert credential == "hermetic-non-secret-credential"
+        calls.append("quote")
+        return quote, openapi
+
+    factory = production.YoungIdentityModelSheetProduction()
+    with pytest.raises(TimeoutError, match="controlled checkpoint crash"):
+        await factory._execute_with_composition(
+            quote_and_openapi=inputs,
+            credential_loader=lambda: "hermetic-non-secret-credential",
+        )
+    result = await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+        quote_and_openapi=lambda _credential: (_ for _ in ()).throw(
+            AssertionError("recovery must not quote or review")
+        ),
+        credential_loader=lambda: "hermetic-non-secret-credential",
+    )
+
+    assert result["mode"] == "LIVE" and result["status"] == "COMPLETE"
+    assert calls == ["quote", "provider", "post", "provider", "get"]
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    with sqlite3.connect(execution / "executor.sqlite3") as database:
+        row = json.loads(database.execute("SELECT data FROM jobs").fetchone()[0])
+    assert row["status"] == "COMPLETE"
+    assert row["final_admission_marker"]["schema"] == 2
+    assert row["final_admission_marker"]["kind"] == "JACO_FLUX3_FINAL_ADMISSION_MARKER"
+    authority = json.loads(
+        (tmp_path / "standing-policy" / production.AUTHORITY_PATH.name).read_text()
+    )
+    assert row["final_admission_marker"]["auth_scope"] == (
+        f"{production.OPERATION_ID}:{authority['policy_sha256']}"
+    )
+    assert (execution / "review.json").is_file()
+    with sqlite3.connect(tmp_path / "ledger" / "standing-budget.sqlite3") as database:
+        assert database.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_pre_post_executor_retries_qualified_admission(tmp_path, monkeypatch):
+    """An initialized zero-job DB is not an ambiguous remote submission."""
+    import src.hybrid.jaco_flux3_production as canonical_production
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import Executor, ProviderResult
+    from src.hybrid.planner import Config
+
+    _qualified_live_root(tmp_path, monkeypatch)
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)))
+    qualification = json.loads(
+        (tmp_path / "standing-policy" / production.QUALIFICATION_PATH.name).read_text()
+    )
+    _write(execution / "protected-qualification.json", qualification)
+    quote, openapi = _fixture_inputs()
+    calls = []
+
+    class OfflineLiveProvider:
+        mode = "LIVE"
+
+        def __init__(self, output, _openapi, _credential):
+            self.output = output
+
+        async def submit(self, _job, _request_id, checkpoint):
+            calls.append("post")
+            checkpoint(provider_id="pre-post-retry", partial=self.output)
+            self.output.write_bytes(b"single retry")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    monkeypatch.setattr(canonical_production, "_FixedFalProvider", OfflineLiveProvider)
+    result = await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+        quote_and_openapi=lambda _credential: _async(quote, openapi),
+        credential_loader=lambda: "hermetic-non-secret-credential",
+    )
+    assert result["status"] == "COMPLETE"
+    assert calls == ["post"]
+
+
+@pytest.mark.asyncio
+async def test_pre_post_admits_two_bound_settled_live_history_and_preserves_cumulative_budget(
+    tmp_path, monkeypatch
+):
+    """Two prior FAL SETTLED receipts are history, not a fresh-operation claim."""
+    from hashlib import sha256
+
+    import src.hybrid.jaco_flux3_production as canonical_production
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import Executor, ProviderResult
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    authority_path = _qualified_live_root(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text())
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)))
+    qualification = json.loads(Path(authority["deployment_qualification"]["path"]).read_text())
+    _write(execution / "protected-qualification.json", qualification)
+    ledger_path = tmp_path / "ledger" / "standing-budget.sqlite3"
+    StandingBudgetLedger(
+        ledger_path, policy_sha256=authority["canonical_ledger"]["financial_policy_sha256"],
+        episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE",
+    )
+    # Sanitized byte-faithful copies of the two protected production settled
+    # claims.  The scope is a complete authenticated identifier, not a label.
+    histories = (
+        ("7f19aab26d71464a9bc257f4f566d2c6cb642aab0bc55864bad8dcbaeab0ae47",
+         "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170"),
+        ("27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052",
+         "JACO_GEN28_STYLE_REMEDIATION_001:46bb52a78057088ef1030ed77f54dd4e4dc671aa67576c0074939389bb947e11"),
+    )
+    with sqlite3.connect(ledger_path) as db:
+        for request_id, scope in histories:
+            receipt = {
+                "schema": 2, "authority": "TRANSPORT_AUTHENTICATED_FAL_READBACK",
+                "local_request_id": request_id, "provider_request_id": f"remote-{request_id}",
+                "endpoint_id": production.ENDPOINT, "auth_scope": scope, "authority_mode": "LIVE",
+                "currency": "USD", "cost_total_micro_usd": "48000", "evidence_hash": "a" * 64,
+                "provenance": "FAL_BILLING_READBACK",
+            }
+            body = json.dumps(receipt, sort_keys=True, separators=("," , ":"))
+            db.execute(
+                "INSERT INTO claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (request_id, production.EPISODE_ID, production.ENDPOINT, "2026-11", 48000, 0,
+                 "SETTLED", 48000, "FAL_READBACK_V2", scope, f"remote-{request_id}", "LIVE", None),
+            )
+            db.execute(
+                "INSERT INTO settlement_receipts VALUES(?,?,?,?,?)",
+                (request_id, sha256(body.encode()).hexdigest(), 48000, body, "FAL_BILLING_READBACK"),
+            )
+    before = {row[0]: row[1:] for row in sqlite3.connect(ledger_path).execute(
+        "SELECT claims.request_id, claims.actual, receipt_body, receipt_sha256 FROM claims JOIN settlement_receipts USING(request_id)"
+    )}
+    calls = []
+
+    class OfflineLiveProvider:
+        mode = "LIVE"
+        def __init__(self, output, _openapi, _credential): self.output = output
+        async def submit(self, _job, _request_id, checkpoint):
+            calls.append("post"); checkpoint(provider_id="new-remote", partial=self.output)
+            self.output.write_bytes(b"new operation")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    monkeypatch.setattr(canonical_production, "_FixedFalProvider", OfflineLiveProvider)
+    quote, openapi = _fixture_inputs()
+    result = await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+        quote_and_openapi=lambda _credential: _async(quote, openapi),
+        credential_loader=lambda: "hermetic-non-secret-credential",
+    )
+    assert result["status"] == "COMPLETE" and calls == ["post"]
+    with sqlite3.connect(ledger_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 3
+        assert db.execute("SELECT SUM(COALESCE(actual, cap)) FROM claims").fetchone()[0] == 144000
+        after = {row[0]: row[1:] for row in db.execute(
+            "SELECT claims.request_id, claims.actual, receipt_body, receipt_sha256 FROM claims JOIN settlement_receipts USING(request_id)"
+        )}
+    assert {key: after[key] for key in before} == before
+
+
+@pytest.mark.parametrize("scope", [
+    "JACO_FLUX3_FINAL_ADMISSION",
+    "JACO_GEN28_STYLE_REMEDIATION_001",
+    "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170 ",
+    "JACO_FLUX3_FINAL_ADMISSION:A32871D181A22A45291A526C29934ABF3FA2A9AEA17F30CF881832DD8CEBF170",
+    "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf171",
+])
+def test_historical_scope_classifier_rejects_nonexact_scope_forms(scope):
+    """No trim, case-fold, prefix, or arbitrary digest compatibility path."""
+    from src.hybrid.young_identity_model_sheet_production import (
+        _HISTORICAL_SETTLED_CLAIMS,
+    )
+
+    assert scope not in _HISTORICAL_SETTLED_CLAIMS
+
+
+def test_historical_scope_classifier_binds_each_exact_scope_to_its_request():
+    from src.hybrid.young_identity_model_sheet_production import (
+        _HISTORICAL_SETTLED_CLAIMS,
+    )
+
+    assert _HISTORICAL_SETTLED_CLAIMS == {
+        "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170":
+            "7f19aab26d71464a9bc257f4f566d2c6cb642aab0bc55864bad8dcbaeab0ae47",
+        "JACO_GEN28_STYLE_REMEDIATION_001:46bb52a78057088ef1030ed77f54dd4e4dc671aa67576c0074939389bb947e11":
+            "27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim_kind", ["matching-id-foreign-scope", "operation-different-id", "unexpected-row"])
+async def test_pre_post_empty_ledger_claims_block_before_credentials_quote_or_review(
+    tmp_path, monkeypatch, claim_kind
+):
+    """A zero-job executor never makes an existing canonical claim retryable."""
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import Executor, Job
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    authority_path = _qualified_live_root(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    qualification = json.loads(Path(authority["deployment_qualification"]["path"]).read_text())
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)))
+    _write(execution / "protected-qualification.json", qualification)
+    ledger = StandingBudgetLedger(
+        tmp_path / "ledger" / "standing-budget.sqlite3",
+        policy_sha256=authority["canonical_ledger"]["financial_policy_sha256"],
+        episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE",
+    )
+    expected_scope = f"{production.OPERATION_ID}:{authority['policy_sha256']}"
+    expected_id = Job(
+        production.OPERATION_ID, "first", "LIVE", production.ENDPOINT,
+        production.EXPECTED_PAYLOAD, None, Decimal("0.048"), input_kind="TEXT_TO_IMAGE",
+    ).request_id
+    if claim_kind == "matching-id-foreign-scope":
+        request_id, scope, provider = expected_id, "foreign-scope", production.ENDPOINT
+    elif claim_kind == "operation-different-id":
+        request_id, scope, provider = "different-request", expected_scope, production.ENDPOINT
+    else:
+        request_id, scope, provider = "unrelated-request", "unrelated-scope", "other/provider"
+    ledger.reserve(request_id, production.EPISODE_ID, provider, "0.048", settlement_mode="FAL_READBACK_V2", auth_scope=scope, provider_request_id="UNASSIGNED", authority_mode="LIVE")
+    before = (tmp_path / "ledger" / "standing-budget.sqlite3").read_bytes()
+    calls = []
+    with pytest.raises(production.ProductionAdmissionError, match="ambiguous execution checkpoint"):
+        await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+            quote_and_openapi=lambda _credential: calls.append("quote"),
+            credential_loader=lambda: calls.append("credential"),
+        )
+    assert calls == []
+    assert (tmp_path / "ledger" / "standing-budget.sqlite3").read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_unknown_executor_checkpoint_blocks_before_quote_or_credential(tmp_path, monkeypatch):
+    """A row that cannot prove its exact operation never falls back to retry."""
+    import src.hybrid.young_identity_model_sheet_production as production
+
+    _qualified_live_root(tmp_path, monkeypatch)
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    execution.mkdir(parents=True)
+    with sqlite3.connect(execution / "executor.sqlite3") as database:
+        database.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        database.execute("INSERT INTO jobs VALUES (?, ?)", ("foreign", "{}"))
+    calls = []
+    with pytest.raises(production.ProductionAdmissionError, match="ambiguous execution checkpoint"):
+        await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+            quote_and_openapi=lambda _credential: calls.append("quote"),
+            credential_loader=lambda: calls.append("credential"),
+        )
+    assert calls == []
+
+
 def test_actual_v1_contract_accepts_requested_three_views_and_bound_evidence(tmp_path, monkeypatch):
     """The merged validator must admit the actual v1 policy contract without a v2 rewrite."""
     from src.hybrid.young_identity_model_sheet_production import (
@@ -296,6 +609,58 @@ def test_v1_contract_reports_missing_qualification_after_schema_validation(tmp_p
         factory._qualification(authority)
 
 
+@pytest.mark.parametrize("mutation", [None, "old-code", "new-code", "foreign-operation", "unknown-field"])
+def test_versioned_technical_amendment_preserves_hash_gate(tmp_path, monkeypatch, mutation):
+    """Only an immutable old-to-current code amendment can select v3 qualification."""
+    from hashlib import sha256
+
+    import src.hybrid.young_identity_model_sheet_production as production
+
+    authority_path = _qualified_live_root(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text())
+    prior_path = Path(authority["deployment_qualification"]["path"])
+    prior = json.loads(prior_path.read_text())
+    prior["execution_code_sha256"] = production.PRIOR_QUALIFIED_EXECUTION_SHA256
+    _write(prior_path, prior)
+    prior_sha = sha256(prior_path.read_bytes()).hexdigest()
+    amended = dict(prior)
+    amended.update({
+        "schema": "jaco-protected-deployment-qualification/v3",
+        "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+        "technical_deployment_amendment": {
+            "schema": "jaco-technical-deployment-amendment/v1",
+            "kind": "EXECUTION_CODE_HASH_SUCCESSOR_ONLY",
+            "prior_qualification_path": str(prior_path),
+            "prior_qualification_sha256": prior_sha,
+            "prior_qualification_bytes_sha256": prior_sha,
+            "prior_execution_code_sha256": production.PRIOR_QUALIFIED_EXECUTION_SHA256,
+            "new_execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+            "review_ci_provenance_sha256": prior["ci_digest_sha256"],
+            "operation_policy_sha256": prior["operation_policy_sha256"],
+            "financial_policy_sha256": prior["financial_policy_sha256"],
+            "preflight_sha256": prior["preflight_sha256"],
+        },
+    })
+    if mutation == "old-code":
+        amended["technical_deployment_amendment"]["prior_execution_code_sha256"] = "0" * 64
+    elif mutation == "new-code":
+        amended["technical_deployment_amendment"]["new_execution_code_sha256"] = "1" * 64
+    elif mutation == "foreign-operation":
+        amended["technical_deployment_amendment"]["operation_policy_sha256"] = "2" * 64
+    elif mutation == "unknown-field":
+        amended["technical_deployment_amendment"]["extra"] = True
+    amended_path = tmp_path / "standing-policy" / production.AMENDED_QUALIFICATION_PATH.name
+    _write(amended_path, amended)
+    authority["deployment_qualification"] = {"path": str(amended_path), "sha256": sha256(amended_path.read_bytes()).hexdigest()}
+    _write(authority_path, authority)
+    factory = production.YoungIdentityModelSheetProduction()
+    if mutation is None:
+        assert factory._qualification(authority)["schema"] == "jaco-protected-deployment-qualification/v3"
+    else:
+        with pytest.raises(production.ProductionAdmissionError):
+            factory._qualification(authority)
+
+
 @pytest.mark.parametrize("mutation", ["wrong-views", "missing-reference", "tampered-reference", "foreign-episode", "policy-version", "unknown-schema", "boolean"])
 def test_actual_v1_contract_rejects_nonweakening_regressions(tmp_path, monkeypatch, mutation):
     from src.hybrid.young_identity_model_sheet_production import (
@@ -376,6 +741,159 @@ def _subprocess_recovery_child(root_text: str, phase: str) -> None:
     with sqlite3.connect(root / "ledger" / "standing-budget.sqlite3") as db:
         claims = db.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
     print(json.dumps({"phase": phase, **counts, "claims": claims}))
+
+
+def _amended_live_recovery_child(root_text: str, phase: str) -> None:
+    """Exercise the public LIVE route from disk-only v3 amendment state."""
+    from hashlib import sha256
+
+    import src.hybrid.jaco_flux3_production as canonical_production
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import Executor, ProviderResult
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    root = Path(root_text)
+    counts_path = root / "live-transport-counts.json"
+    counts = json.loads(counts_path.read_text()) if counts_path.exists() else {"POST": 0, "GET": 0}
+    if phase == "submit":
+        authority_path = _qualified_live_root(root, _ChildMonkeyPatch())
+        authority = json.loads(authority_path.read_text(encoding="utf-8"))
+        prior_path = Path(authority["deployment_qualification"]["path"])
+        prior = json.loads(prior_path.read_text(encoding="utf-8"))
+        prior["execution_code_sha256"] = production.PRIOR_QUALIFIED_EXECUTION_SHA256
+        _write(prior_path, prior)
+        prior_bytes, prior_sha = prior_path.read_bytes(), sha256(prior_path.read_bytes()).hexdigest()
+        amended = dict(prior)
+        amended.update({
+            "schema": "jaco-protected-deployment-qualification/v3",
+            "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+            "technical_deployment_amendment": {
+                "schema": "jaco-technical-deployment-amendment/v1",
+                "kind": "EXECUTION_CODE_HASH_SUCCESSOR_ONLY",
+                "prior_qualification_path": str(prior_path),
+                "prior_qualification_sha256": prior_sha,
+                "prior_qualification_bytes_sha256": prior_sha,
+                "prior_execution_code_sha256": production.PRIOR_QUALIFIED_EXECUTION_SHA256,
+                "new_execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+                "review_ci_provenance_sha256": prior["ci_digest_sha256"],
+                "operation_policy_sha256": prior["operation_policy_sha256"],
+                "financial_policy_sha256": prior["financial_policy_sha256"],
+                "preflight_sha256": prior["preflight_sha256"],
+            },
+        })
+        amended_path = root / "standing-policy" / production.AMENDED_QUALIFICATION_PATH.name
+        _write(amended_path, amended)
+        authority["deployment_qualification"] = {
+            "path": str(amended_path), "sha256": sha256(amended_path.read_bytes()).hexdigest(),
+        }
+        _write(authority_path, authority)
+        execution = root / "execution" / production.OPERATION_ID
+        Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)))
+        _write(execution / "protected-qualification.json", prior)
+        ledger_path = root / "ledger" / "standing-budget.sqlite3"
+        StandingBudgetLedger(
+            ledger_path, policy_sha256=authority["canonical_ledger"]["financial_policy_sha256"],
+            episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE",
+        )
+        histories = (
+            ("7f19aab26d71464a9bc257f4f566d2c6cb642aab0bc55864bad8dcbaeab0ae47",
+             "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170"),
+            ("27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052",
+             "JACO_GEN28_STYLE_REMEDIATION_001:46bb52a78057088ef1030ed77f54dd4e4dc671aa67576c0074939389bb947e11"),
+        )
+        with sqlite3.connect(ledger_path) as db:
+            for request_id, scope in histories:
+                receipt = {
+                    "schema": 2, "authority": "TRANSPORT_AUTHENTICATED_FAL_READBACK",
+                    "local_request_id": request_id, "provider_request_id": f"remote-{request_id}",
+                    "endpoint_id": production.ENDPOINT, "auth_scope": scope, "authority_mode": "LIVE",
+                    "currency": "USD", "cost_total_micro_usd": "48000", "evidence_hash": "a" * 64,
+                    "provenance": "FAL_BILLING_READBACK",
+                }
+                body = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+                db.execute("INSERT INTO claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                    request_id, production.EPISODE_ID, production.ENDPOINT, "2026-11", 48000, 0,
+                    "SETTLED", 48000, "FAL_READBACK_V2", scope, f"remote-{request_id}", "LIVE", None,
+                ))
+                db.execute("INSERT INTO settlement_receipts VALUES(?,?,?,?,?)", (
+                    request_id, sha256(body.encode()).hexdigest(), 48000, body, "FAL_BILLING_READBACK",
+                ))
+        old_receipts = {
+            row[0]: {"body": row[1], "sha256": row[2]}
+            for row in sqlite3.connect(ledger_path).execute(
+                "SELECT request_id, receipt_body, receipt_sha256 FROM settlement_receipts"
+            )
+        }
+        (root / "amended-live-before.json").write_text(json.dumps({
+            "old_marker": prior_bytes.hex(), "old_marker_sha256": prior_sha,
+            "old_receipts": old_receipts,
+        }, sort_keys=True), encoding="utf-8")
+    else:
+        authority_path = root / "standing-policy" / production.AUTHORITY_PATH.name
+        production.ROOT, production.AUTHORITY_PATH = root, authority_path
+        production.FINANCIAL_SHA256 = sha256((root / "financial-record-source.json").read_bytes()).hexdigest()
+        canonical_production._CANONICAL_STATE_DB = root / "canonical-state.sqlite3"
+
+    class OfflineLiveProvider:
+        mode = "LIVE"
+
+        def __init__(self, output, _openapi, _credential):
+            self.output = output
+
+        async def submit(self, _job, _request_id, checkpoint):
+            counts["POST"] += 1; counts_path.write_text(json.dumps(counts), encoding="utf-8")
+            checkpoint(provider_id="amended-live-remote-1", partial=self.output)
+            raise TimeoutError("controlled LIVE crash after durable remote checkpoint")
+
+        async def recover(self, _job, _request_id, remote, _partial, _checkpoint):
+            assert remote == "amended-live-remote-1"
+            counts["GET"] += 1; counts_path.write_text(json.dumps(counts), encoding="utf-8")
+            self.output.write_bytes(b"recovered without resubmission")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    canonical_production._FixedFalProvider = OfflineLiveProvider
+    quote, openapi = _fixture_inputs()
+    if phase == "submit":
+        async def quote_and_openapi(_credential):
+            return quote, openapi
+    else:
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("recovery must not call quote, OpenAPI, or review")
+        quote_and_openapi = forbidden
+        production.YoungIdentityModelSheetProduction._review_for_execution = forbidden
+
+    try:
+        result = asyncio.run(production.YoungIdentityModelSheetProduction()._execute_with_composition(
+            quote_and_openapi=quote_and_openapi,
+            credential_loader=lambda: "offline-non-secret-credential",
+        ))
+    except TimeoutError:
+        if phase != "submit":
+            raise
+        result = {"status": "CHECKPOINTED"}
+    ledger_path = root / "ledger" / "standing-budget.sqlite3"
+    execution = root / "execution" / production.OPERATION_ID
+    with sqlite3.connect(ledger_path) as db:
+        claims = db.execute(
+            "SELECT request_id, state, actual, cap, provider_request_id FROM claims ORDER BY request_id"
+        ).fetchall()
+        receipts = {
+            row[0]: {"body": row[1], "sha256": row[2]}
+            for row in db.execute("SELECT request_id, receipt_body, receipt_sha256 FROM settlement_receipts")
+        }
+    journal = json.loads(sqlite3.connect(execution / "executor.sqlite3").execute(
+        "SELECT data FROM jobs"
+    ).fetchone()[0])
+    snapshot = json.loads((root / "amended-live-before.json").read_text(encoding="utf-8"))
+    print(json.dumps({
+        "phase": phase, "result": result["status"], "counts": counts, "claims": claims,
+        "receipts": receipts, "old_marker_hex": (execution / "protected-qualification.json").read_bytes().hex(),
+        "old_marker_sha256": sha256((execution / "protected-qualification.json").read_bytes()).hexdigest(),
+        "new_marker_sha256": sha256((execution / "protected-qualification.v3.json").read_bytes()).hexdigest(),
+        "selected_marker_sha256": json.loads((execution / "protected-qualification.selection.v1.json").read_text())["selected_marker_sha256"],
+        "journal": journal, "before": snapshot,
+    }, sort_keys=True))
 
 
 async def _async(*values):
@@ -778,6 +1296,42 @@ def test_controlled_python_child_recovers_existing_executor_and_ledger_with_get_
     second = subprocess.run([*command, "recover"], text=True, capture_output=True, check=False, timeout=45)
     assert second.returncode == 0, second.stderr
     assert json.loads(second.stdout) == {"phase": "recover", "posts": 1, "gets": 1, "claims": 1}
+
+
+def test_public_live_v3_amendment_recovers_in_fresh_process_without_second_reservation_or_post(tmp_path):
+    """A real LIVE admission keeps v2 history immutable and recovers GET-only."""
+    module = "tests.unit.test_young_identity_model_sheet_production"
+    command = [
+        sys.executable, "-c",
+        f"from {module} import _amended_live_recovery_child as f; import sys; f(sys.argv[1], sys.argv[2])",
+        str(tmp_path),
+    ]
+    first = subprocess.run([*command, "submit"], text=True, capture_output=True, check=False, timeout=60)
+    assert first.returncode == 0, first.stderr
+    submitted = json.loads(first.stdout)
+    assert submitted["result"] == "CHECKPOINTED"
+    assert submitted["counts"] == {"POST": 1, "GET": 0}
+    assert len(submitted["claims"]) == 3
+    assert sum((row[2] if row[2] is not None else row[3]) for row in submitted["claims"]) == 144000
+    assert submitted["old_marker_hex"] == submitted["before"]["old_marker"]
+    assert submitted["old_marker_sha256"] == submitted["before"]["old_marker_sha256"]
+    assert submitted["receipts"] == submitted["before"]["old_receipts"]
+
+    second = subprocess.run([*command, "recover"], text=True, capture_output=True, check=False, timeout=60)
+    assert second.returncode == 0, second.stderr
+    recovered = json.loads(second.stdout)
+    assert recovered["result"] == "COMPLETE"
+    assert recovered["counts"] == {"POST": 1, "GET": 1}
+    assert len(recovered["claims"]) == 3
+    assert sum((row[2] if row[2] is not None else row[3]) for row in recovered["claims"]) == 144000
+    assert recovered["receipts"] == recovered["before"]["old_receipts"]
+    assert recovered["old_marker_hex"] == recovered["before"]["old_marker"]
+    assert recovered["old_marker_sha256"] == recovered["before"]["old_marker_sha256"]
+    assert recovered["new_marker_sha256"] == recovered["selected_marker_sha256"]
+    current = next(row for row in recovered["claims"] if row[0] not in recovered["receipts"])
+    assert current[1:] == ["RESERVED", None, 48000, "amended-live-remote-1"]
+    assert recovered["journal"]["status"] == "COMPLETE"
+    assert recovered["journal"]["provider_id"] == "amended-live-remote-1"
 
 
 @pytest.mark.asyncio

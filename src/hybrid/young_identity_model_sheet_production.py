@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -32,9 +33,22 @@ POLICY_PATH = ROOT / "standing-policy" / "JACO_GENESIS28_STANDING_OPERATION_POLI
 PREFLIGHT_PATH = ROOT / "preflight" / f"{OPERATION_ID}.preflight.json"
 AUTHORITY_PATH = ROOT / "standing-policy" / f"{OPERATION_ID}.authority.v2.json"
 QUALIFICATION_PATH = ROOT / "standing-policy" / f"{OPERATION_ID}.qualification.v2.json"
+AMENDED_QUALIFICATION_PATH = ROOT / "standing-policy" / f"{OPERATION_ID}.qualification.v3.json"
+PRIOR_QUALIFIED_EXECUTION_SHA256 = "f701cb1b1d296238ab00708bb92ad131ca7a5665d237382d47205c6f00d3b6f1"
 LEDGER_PATH = ROOT / "ledger" / "standing-budget.sqlite3"
 FINANCIAL_SOURCE_PATH = ROOT / "financial-record-source.json"
 CAP = Decimal("0.048")
+# The historical ledger is an immutable, protected artifact.  These are complete
+# scope identities bound to the exact local request IDs in its canonical
+# receipts; labels, prefixes, and caller-normalized strings are never authority.
+_HISTORICAL_SETTLED_CLAIMS = {
+    "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170": (
+        "7f19aab26d71464a9bc257f4f566d2c6cb642aab0bc55864bad8dcbaeab0ae47"
+    ),
+    "JACO_GEN28_STYLE_REMEDIATION_001:46bb52a78057088ef1030ed77f54dd4e4dc671aa67576c0074939389bb947e11": (
+        "27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052"
+    ),
+}
 EXPECTED_PAYLOAD = {
     "prompt": (
         "Evaluation-only Genesis 28 young-adult Jacó identity model sheet in one 16:9 PNG. "
@@ -315,13 +329,23 @@ class YoungIdentityModelSheetProduction:
         if not isinstance(binding, dict) or set(binding) != {"path", "sha256"}: raise ProductionAdmissionError("protected qualification required")
         _digest(binding["sha256"], "qualification hash")
         path = _safe_path(Path(binding["path"]), "qualification path")
-        if path != (self.root / "standing-policy" / QUALIFICATION_PATH.name).resolve(): raise ProductionAdmissionError("caller-selected qualification")
+        permitted = {
+            (self.root / "standing-policy" / QUALIFICATION_PATH.name).resolve(),
+            (self.root / "standing-policy" / AMENDED_QUALIFICATION_PATH.name).resolve(),
+        }
+        if path not in permitted: raise ProductionAdmissionError("caller-selected qualification")
         q, digest = _load(path, "protected qualification")
         required = {"schema", "status", "operation_id", "episode_id", "policy_sha256", "preflight_sha256", "mode", "authorization", "review_packet_schema", "reviewer", "ci_digest_sha256", "execution_code_sha256", "operation_policy_sha256", "financial_policy_sha256"}
         test_required = required | {"consent_fixture"}; is_test = q.get("mode") == "TEST"
-        if (set(q) != (test_required if is_test else required)
+        amended = path.name == AMENDED_QUALIFICATION_PATH.name
+        required_fields = (test_required if is_test else required) | ({"technical_deployment_amendment"} if amended else set())
+        if (set(q) != required_fields
                 or digest != binding["sha256"]
-                or q.get("schema") != ("jaco-test-deployment-qualification/v2" if is_test else "jaco-protected-deployment-qualification/v2")
+                or q.get("schema") != (
+                    "jaco-test-deployment-qualification/v3" if amended and is_test else
+                    "jaco-protected-deployment-qualification/v3" if amended else
+                    "jaco-test-deployment-qualification/v2" if is_test else "jaco-protected-deployment-qualification/v2"
+                )
                 or q.get("status") != "QUALIFIED" or q.get("mode") not in {"TEST", "LIVE"}
                 or q.get("operation_id") != OPERATION_ID or q.get("episode_id") != EPISODE_ID
                 or q.get("policy_sha256") != authority["policy_sha256"]
@@ -336,6 +360,31 @@ class YoungIdentityModelSheetProduction:
                 or (is_test and (not self._test_only or q.get("consent_fixture", {}).get("kind") != "TEST_ONLY_CONSENT_FIXTURE"))
                 or (not is_test and self._test_only)):
             raise ProductionAdmissionError("invalid protected qualification")
+        if amended:
+            amendment = _exact(q["technical_deployment_amendment"], {
+                "schema", "kind", "prior_qualification_path", "prior_qualification_sha256",
+                "prior_qualification_bytes_sha256", "prior_execution_code_sha256",
+                "new_execution_code_sha256", "review_ci_provenance_sha256",
+                "operation_policy_sha256", "financial_policy_sha256", "preflight_sha256",
+            }, "technical deployment amendment")
+            prior_path = _safe_path(Path(amendment["prior_qualification_path"]), "prior qualification path")
+            if prior_path != (self.root / "standing-policy" / QUALIFICATION_PATH.name).resolve():
+                raise ProductionAdmissionError("technical amendment prior qualification changed")
+            prior, prior_sha = _load(prior_path, "prior protected qualification")
+            for field in ("prior_qualification_sha256", "prior_qualification_bytes_sha256", "prior_execution_code_sha256", "new_execution_code_sha256", "review_ci_provenance_sha256", "operation_policy_sha256", "financial_policy_sha256", "preflight_sha256"):
+                _digest(amendment[field], f"technical amendment {field}")
+            if (amendment["schema"] != "jaco-technical-deployment-amendment/v1"
+                    or amendment["kind"] != "EXECUTION_CODE_HASH_SUCCESSOR_ONLY"
+                    or amendment["prior_qualification_sha256"] != prior_sha
+                    or amendment["prior_qualification_bytes_sha256"] != prior_sha
+                    or amendment["prior_execution_code_sha256"] != PRIOR_QUALIFIED_EXECUTION_SHA256
+                    or amendment["new_execution_code_sha256"] != q["execution_code_sha256"]
+                    or amendment["review_ci_provenance_sha256"] != q["ci_digest_sha256"]
+                    or amendment["operation_policy_sha256"] != q["operation_policy_sha256"]
+                    or amendment["financial_policy_sha256"] != q["financial_policy_sha256"]
+                    or amendment["preflight_sha256"] != q["preflight_sha256"]
+                    or prior.get("execution_code_sha256") != PRIOR_QUALIFIED_EXECUTION_SHA256):
+                raise ProductionAdmissionError("technical deployment amendment changed")
         if q["schema"] == "jaco-test-deployment-qualification/v2" and (not self._test_only or q["mode"] != "TEST"):
             raise ProductionAdmissionError("legacy v2 qualification is TEST-only")
         return q
@@ -488,7 +537,10 @@ class YoungIdentityModelSheetProduction:
                 self._review_for_execution(quote, openapi, _financial_source), quote, openapi, _financial_source,
             )
         job = Job(OPERATION_ID, authority["executor_category"], qualification["mode"], ENDPOINT, preflight["operation"]["payload"], None, CAP, predecessor=authority["executor_predecessor_request_id"], input_kind="TEXT_TO_IMAGE")
-        scope = "TEST_LOCAL_ONLY" if qualification["mode"] == "TEST" else f"{OPERATION_ID}:{authority['policy_sha256']}"; marker_path = execution / "protected-qualification.json"
+        scope = "TEST_LOCAL_ONLY" if qualification["mode"] == "TEST" else f"{OPERATION_ID}:{authority['policy_sha256']}"
+        amended = "technical_deployment_amendment" in qualification
+        marker_path = execution / ("protected-qualification.v3.json" if amended else "protected-qualification.json")
+        selection_path = execution / "protected-qualification.selection.v1.json"
         def marker_for(bound):
             return {"schema": 2, "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER", "receipt_path": str(marker_path), "receipt_sha256": sha256(marker_path.read_bytes()).hexdigest(), "request_id": bound.request_id, "endpoint": ENDPOINT, "payload_sha256": bound.intent_input_sha256, "input_kind": "TEXT_TO_IMAGE", "auth_scope": scope, "reserved_usd": "0.048", "trust_identity": "YOUNG_IDENTITY_MODEL_SHEET_PROTECTED_QUALIFICATION"}
         def verify(bound, marker, claim):
@@ -500,9 +552,28 @@ class YoungIdentityModelSheetProduction:
                 raise ProductionAdmissionError("durable qualification marker changed")
         execution.mkdir(parents=True, exist_ok=True)
         ledger = StandingBudgetLedger(ledger_path, policy_sha256=financial_sha, episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode=qualification["mode"])
-        executor = Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)), standing_ledger=ledger, _jaco_final_admission_verifier=verify, _jaco_production_binding={"kind":"YOUNG_IDENTITY_MODEL_SHEET_PRODUCTION", "auth_scope":scope})
+        executor = Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)), standing_ledger=ledger, _jaco_final_admission_verifier=verify, _jaco_production_binding={"kind":"JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION", "auth_scope":scope})
         if executor.inspect(job.request_id) is None:
-            _write_once(marker_path, qualification)
+            if marker_path.exists():
+                persisted_marker, _ = _load(marker_path, "pre-POST qualification marker")
+                if persisted_marker != qualification:
+                    raise ProductionAdmissionError("pre-POST qualification marker changed")
+            else:
+                _write_once(marker_path, qualification)
+            if amended:
+                selection = {
+                    "schema": 1, "kind": "JACO_TECHNICAL_QUALIFICATION_SELECTION",
+                    "prior_marker_path": str(execution / "protected-qualification.json"),
+                    "prior_marker_sha256": qualification["technical_deployment_amendment"]["prior_qualification_bytes_sha256"],
+                    "selected_marker_path": str(marker_path),
+                    "selected_marker_sha256": sha256(marker_path.read_bytes()).hexdigest(),
+                }
+                if selection_path.exists():
+                    persisted_selection, _ = _load(selection_path, "qualification selection")
+                    if persisted_selection != selection:
+                        raise ProductionAdmissionError("pre-POST qualification selection changed")
+                else:
+                    _write_once(selection_path, selection)
             executor.prepare_intent(job, auth_scope=scope); claim = ledger.reserve(job.request_id, authority["predecessor_operation_id"] or EPISODE_ID, ENDPOINT, str(CAP), settlement_mode="FAL_READBACK_V2", auth_scope=scope, provider_request_id="UNASSIGNED", authority_mode=qualification["mode"])
             if claim.get("state") != "RESERVED": raise ProductionAdmissionError("canonical reservation rejected")
             executor._change(job.request_id, final_admission_marker=marker_for(job))
@@ -525,10 +596,173 @@ class YoungIdentityModelSheetProduction:
         completed = await executor.run(job, provider, authorization=auth, price=price, settlement_checkpoint=lambda lid,rid: ledger.bind_provider_request_id(lid,rid), submit_prepared=not _recovery)
         return {"operation_id": OPERATION_ID, "status": completed["status"], "request_id": job.request_id, "mode": qualification["mode"]}
 
+    def _execution_phase(self, execution: Path) -> str:
+        """Classify durable executor state without opening a write connection.
+
+        An initialized database with no jobs is the only pre-POST state that may
+        restart admission.  Every row-bearing or malformed database is recovery
+        or ambiguous; neither can fall back into a fresh quote/review/POST.
+        """
+        database_path = execution / "executor.sqlite3"
+        if not database_path.exists():
+            if execution.exists() and any(execution.iterdir()):
+                raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+            return "ABSENT"
+        try:
+            with sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True) as database:
+                rows = database.execute("SELECT id, data FROM jobs").fetchall()
+        except (sqlite3.Error, OSError) as exc:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
+        if not rows:
+            allowed = {
+                "executor.sqlite3", "executor.sqlite3-shm", "executor.sqlite3-wal",
+                ".executor.sqlite3.init.lock", "protected-qualification.json",
+                "protected-qualification.v3.json", "protected-qualification.selection.v1.json",
+            }
+            unexpected = {
+                path.name for path in execution.iterdir()
+                if path.name not in allowed
+                and not (path.name == "executor.locks" and path.is_dir() and not any(path.iterdir()))
+            }
+            if unexpected:
+                raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+            return "PRE_POST_EMPTY"
+        if len(rows) != 1:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+        try:
+            row = json.loads(rows[0][1])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
+        if (
+            not isinstance(row, dict)
+            or row.get("request_id") != rows[0][0]
+            or row.get("scene") != OPERATION_ID
+            or row.get("endpoint") != ENDPOINT
+            or row.get("status") not in {"PREPARED", "SUBMITTING", "SUBMITTED", "COMPLETE", "OVERRUN"}
+        ):
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+        return "RECOVERY"
+
+    def _pre_post_ledger_snapshot(
+        self, ledger_path: Path, financial_sha: str, mode: str, request_id: str, scope: str
+    ) -> None:
+        """Read the canonical ledger without initializing or mutating it.
+
+        A zero-job executor may restart only over a fully authenticated,
+        bounded historical SETTLED baseline.  Current-operation claims and any
+        pending/unknown or malformed historical row remain ambiguous.
+        """
+        if not ledger_path.exists():
+            return
+        expected_policy = {
+            "schema": 1, "policy_sha256": financial_sha, "mode": mode,
+            "currency": "USD", "authority": "direct", "episode": 10_000_000,
+            "month": 10_000_000, "experiment": 10_000_000,
+        }
+        try:
+            uri = f"file:{ledger_path.as_posix()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as database:
+                policy_rows = database.execute("SELECT binding FROM policy").fetchall()
+                claim_rows = database.execute(
+                    "SELECT request_id, episode_id, provider, month, cap, experiment, state, actual, "
+                    "settlement_mode, auth_scope, provider_request_id, authority_mode "
+                    "FROM claims"
+                ).fetchall()
+                receipt_rows = database.execute(
+                    "SELECT request_id, receipt_sha256, actual, receipt_body, provenance "
+                    "FROM settlement_receipts"
+                ).fetchall()
+        except (sqlite3.Error, OSError) as exc:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
+        try:
+            if len(policy_rows) != 1 or json.loads(policy_rows[0][0], object_pairs_hook=_no_duplicates) != expected_policy:
+                raise ValueError("ledger policy metadata changed")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
+        try:
+            from src.hybrid.standing_budget import (
+                _units,
+                validate_canonical_settlement_receipt,
+            )
+
+            receipts = {row[0]: row[1:] for row in receipt_rows}
+            if len(receipts) != len(receipt_rows):
+                raise ValueError("duplicate receipt rows")
+            settled_total = 0
+            for row in claim_rows:
+                (row_request_id, episode_id, provider, month, cap, experiment, state, actual,
+                 settlement_mode, row_scope, provider_request_id, row_mode) = row
+                # Any claim bound to this operation, whether by deterministic
+                # request identity or authorization scope, crossed admission.
+                if row_request_id == request_id or row_scope == scope:
+                    raise ValueError("current operation already claimed")
+                if (not all(isinstance(value, str) and value and len(value) <= 512 for value in
+                            (row_request_id, episode_id, provider, month, settlement_mode, row_scope,
+                             provider_request_id, row_mode))
+                        or type(cap) is not int or type(actual) is not int or type(experiment) is not int):
+                    raise ValueError("claim financial metadata is malformed")
+                if (episode_id != EPISODE_ID or provider != ENDPOINT or not re.fullmatch(r"20[0-9]{2}-(0[1-9]|1[0-2])", month)
+                        or cap != _units(CAP) or actual != _units(CAP) or experiment not in {0, 1}
+                        or state != "SETTLED" or settlement_mode != "FAL_READBACK_V2"
+                        or _HISTORICAL_SETTLED_CLAIMS.get(row_scope) != row_request_id
+                        or provider_request_id == "UNASSIGNED"
+                        or row_mode != "LIVE"):
+                    raise ValueError("claim is not bounded settled history")
+                receipt_row = receipts.pop(row_request_id, None)
+                if receipt_row is None:
+                    raise ValueError("settled claim lacks receipt")
+                receipt_sha, receipt_actual, receipt_body, provenance = receipt_row
+                receipt, parsed_actual, parsed_sha = validate_canonical_settlement_receipt(receipt_body)
+                if (type(receipt_actual) is not int or receipt_actual != actual or receipt_sha != parsed_sha
+                        or provenance != "FAL_BILLING_READBACK" or parsed_actual != actual
+                        or receipt["authority"] != "TRANSPORT_AUTHENTICATED_FAL_READBACK"
+                        or (receipt["local_request_id"], receipt["provider_request_id"], receipt["endpoint_id"],
+                            receipt["auth_scope"], receipt["authority_mode"]) !=
+                           (row_request_id, provider_request_id, provider, row_scope, row_mode)):
+                    raise ValueError("settlement receipt does not bind history")
+                settled_total += actual
+            if receipts or settled_total + _units(CAP) > expected_policy["episode"]:
+                raise ValueError("historical cumulative budget is invalid")
+        except (TypeError, ValueError, sqlite3.Error) as exc:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
+
+    def _pre_post_marker_snapshot(self, execution: Path, qualification: dict[str, Any]) -> None:
+        """Allow a versioned marker only when its immutable predecessor survives."""
+        if "technical_deployment_amendment" not in qualification:
+            return
+        amendment = qualification["technical_deployment_amendment"]
+        old_marker = execution / "protected-qualification.json"
+        new_marker = execution / "protected-qualification.v3.json"
+        pointer = execution / "protected-qualification.selection.v1.json"
+        if not old_marker.is_file() or new_marker.exists() or pointer.exists():
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+        prior, prior_sha = _load(old_marker, "prior protected qualification marker")
+        if prior_sha != amendment["prior_qualification_bytes_sha256"]:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+        # The on-disk old marker remains in place.  The later v3 marker and
+        # selector are write-once successors; neither path is replaced.
+        if prior.get("execution_code_sha256") != amendment["prior_execution_code_sha256"]:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+
     async def _execute_with_composition(self, *, quote_and_openapi, credential_loader=None, test_provider_factory=None):
-        authority, _, _ = self._authority(); qualification = self._qualification(authority); self._ledger_binding(authority)
+        authority, _, preflight = self._authority(); qualification = self._qualification(authority)
+        ledger_path, financial_sha, _ = self._ledger_binding(authority)
         execution = self.root / "execution" / OPERATION_ID
-        if (execution / "executor.sqlite3").is_file():
+        phase = self._execution_phase(execution)
+        if phase == "PRE_POST_EMPTY":
+            # Constructing the immutable Job is pure; its request ID is the
+            # exact identity that any canonical reservation would have used.
+            from src.hybrid.execution import Job
+
+            expected_id = Job(
+                OPERATION_ID, authority["executor_category"], qualification["mode"], ENDPOINT,
+                preflight["operation"]["payload"], None, CAP,
+                predecessor=authority["executor_predecessor_request_id"], input_kind="TEXT_TO_IMAGE",
+            ).request_id
+            scope = "TEST_LOCAL_ONLY" if qualification["mode"] == "TEST" else f"{OPERATION_ID}:{authority['policy_sha256']}"
+            self._pre_post_ledger_snapshot(ledger_path, financial_sha, qualification["mode"], expected_id, scope)
+            self._pre_post_marker_snapshot(execution, qualification)
+        if phase == "RECOVERY":
             # A durable executor means recovery only: no fresh price/OpenAPI or
             # reviewer subprocess. Missing/invalid checkpoint state fails in the
             # executor rather than starting a new admission.

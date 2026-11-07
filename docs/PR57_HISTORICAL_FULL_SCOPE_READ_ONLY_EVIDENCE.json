@@ -1,0 +1,25 @@
+{
+  "schema": "pr57-historical-full-scope-read-only-evidence/v1",
+  "execution_phase": "PRE_POST_EMPTY",
+  "financial_policy_sha256": "916e8230db47406db96cbe774b9332c00ed24cf156c66d4d91d11a213b64f50d",
+  "execution_code_sha256": "6b7c4aeb15e1bcee528e69905a52c04182fa686d82915d84dd8f536171c66d12",
+  "historical_claim_count": 2,
+  "historical_receipt_count": 2,
+  "accepted_historical_scopes": [
+    "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170",
+    "JACO_GEN28_STYLE_REMEDIATION_001:46bb52a78057088ef1030ed77f54dd4e4dc671aa67576c0074939389bb947e11"
+  ],
+  "ledger_sha256_before": "8f9ef0d209ecd0a3a9b0bb39e982112929443cbc01099b0ebe30d54bfdfda12b",
+  "ledger_sha256_after": "8f9ef0d209ecd0a3a9b0bb39e982112929443cbc01099b0ebe30d54bfdfda12b",
+  "ledger_bytes_unchanged": true,
+  "probe": "YoungIdentityModelSheetProduction._pre_post_ledger_snapshot",
+  "external_actions": {
+    "credentials": 0,
+    "quotes": 0,
+    "reviews": 0,
+    "reservations": 0,
+    "provider_gets": 0,
+    "provider_posts": 0,
+    "ledger_writes": 0
+  }
+}
