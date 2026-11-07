@@ -129,6 +129,32 @@ def test_settled_service_return_without_canonical_write_never_reaches_recovery(m
     assert calls == ["billing-get"]
 
 
+
+def test_verified_settled_replay_has_no_credential_or_billing_transport(monkeypatch):
+    """A canonical SETTLED replay is local completion recovery, never a new GET."""
+    import src.hybrid.young_identity_model_sheet_settlement as settlement
+
+    submitted = datetime(2026, 11, 7, 10, 0, tzinfo=UTC)
+    snapshot = SimpleNamespace(submission_at=submitted, ledger_path="ignored", already_settled=True)
+    calls = []
+    monkeypatch.setattr(settlement, "_readonly_snapshot", lambda: snapshot)
+    monkeypatch.setattr(settlement, "_readonly_ledger_snapshot", lambda _path: object())
+    monkeypatch.setattr(settlement, "_prove_settlement", lambda _snapshot, _before: calls.append("proof"))
+    monkeypatch.setattr(settlement, "resolve_default_fal_credential", lambda: calls.append("credential"))
+    monkeypatch.setattr(settlement, "_construct_service", lambda *_: calls.append("service"))
+
+    async def recover(_snapshot):
+        calls.append("recovery")
+        return {"status": "COMPLETE", "result_sha256": "a" * 64}
+
+    monkeypatch.setattr(settlement, "_recover_after_settlement", recover)
+    result = asyncio.run(settlement.reconcile())
+
+    assert result["status"] == "SETTLED"
+    assert result["completion"]["status"] == "COMPLETE"
+    assert calls == ["proof", "recovery"]
+
+
 def test_main_rejects_caller_selected_billing_window():
     import src.hybrid.young_identity_model_sheet_settlement as settlement
 

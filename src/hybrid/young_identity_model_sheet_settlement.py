@@ -28,6 +28,12 @@ from src.hybrid.young_identity_model_sheet_production import (
 
 LOCAL_REQUEST_ID = "c81bec2124005d306d2f843ac7b5d5c747feb254d090610582d79099f0535cc1"
 REMOTE_REQUEST_ID = "01a1b7bf-ef29-77c1-ad38-5214baa197de"
+# This companion is for one already-generated operation only.  These are not
+# caller-supplied attestations: reconciliation accepts only the raw raster and
+# canonical settlement evidence recorded by the protected v3 qualification.
+APPROVED_QUARANTINED_PNG_SHA256 = "5ebe417dd1b7b7d05b9eba9fd0ae5bb7f63e926b6d9946897c2b20a1d0b51933"
+APPROVED_SETTLEMENT_RECEIPT_SHA256 = "4745428d97cf3de5d2b7bcd7056c5575362acba1ce82d25d2bf7c3e747e7be99"
+APPROVED_EXECUTION_CODE_SHA256 = "6b7c4aeb15e1bcee528e69905a52c04182fa686d82915d84dd8f536171c66d12"
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,7 @@ class _Snapshot:
     financial_sha256: str
     execution: Path
     submission_at: datetime
+    already_settled: bool
 
 
 @dataclass(frozen=True)
@@ -106,25 +113,37 @@ def _prove_settlement(snapshot: _Snapshot, before: _LedgerSnapshot) -> None:
     before_claims = {row[0]: row for row in before.claims}
     before_receipts = {row[0]: row for row in before.receipts}
     historical_ids = set(before_claims) - {LOCAL_REQUEST_ID}
+    current_before = before_claims.get(LOCAL_REQUEST_ID)
+    current_was_settled = current_before is not None and current_before[6] == "SETTLED"
+    expected_before_receipts = historical_ids | ({LOCAL_REQUEST_ID} if current_was_settled else set())
     if (
-        len(before_claims) != 3 or len(before_receipts) != 2
-        or len(historical_ids) != 2 or set(before_receipts) != historical_ids
+        len(before_claims) != 3 or len(historical_ids) != 2
+        or set(before_receipts) != expected_before_receipts
+        or len(before_receipts) != (3 if current_was_settled else 2)
         or any(row[6] != "SETTLED" or row[7] is None for key, row in before_claims.items() if key != LOCAL_REQUEST_ID)
+        or (current_before is None or current_before[6] not in {"RESERVED", "SETTLED"})
+        or (current_was_settled and current_before[7] is None)
     ):
         raise ProductionAdmissionError("canonical historical settlement snapshot is invalid")
     after_claims = {row[0]: row for row in after.claims}
     after_receipts = {row[0]: row for row in after.receipts}
     if (
         len(after_claims) != len(after.claims) or len(after_receipts) != len(after.receipts)
-        or set(after_claims) != set(before_claims) or set(after_receipts) != set(before_receipts) | {LOCAL_REQUEST_ID}
+        or set(after_claims) != set(before_claims)
+        or set(after_receipts) != historical_ids | {LOCAL_REQUEST_ID}
+        or len(after.receipts) != 3
         or any(after_claims[key] != before_claims[key] for key in historical_ids)
         or any(after_receipts[key] != before_receipts[key] for key in historical_ids)
+        or (current_was_settled and (
+            after_claims[LOCAL_REQUEST_ID] != current_before
+            or after_receipts.get(LOCAL_REQUEST_ID) != before_receipts.get(LOCAL_REQUEST_ID)
+        ))
     ):
         raise ProductionAdmissionError("canonical settlement history changed")
 
     current = after_claims.get(LOCAL_REQUEST_ID)
     receipt_row = after_receipts.get(LOCAL_REQUEST_ID)
-    if current is None or receipt_row is None or len(after.receipts) != 3:
+    if current is None or receipt_row is None or sum(row[7] for row in after_claims.values()) != 144_000:
         raise ProductionAdmissionError("canonical current settlement receipt is unavailable")
     # claims columns are the canonical StandingBudgetLedger schema; do not infer from a service result.
     if (
@@ -141,6 +160,7 @@ def _prove_settlement(snapshot: _Snapshot, before: _LedgerSnapshot) -> None:
     if (
         not isinstance(receipt, dict) or set(receipt) != _SETTLEMENT_RECEIPT_FIELDS
         or receipt_row[3] != canonical or receipt_row[1] != sha256(canonical.encode("utf-8")).hexdigest()
+        or receipt_row[1] != APPROVED_SETTLEMENT_RECEIPT_SHA256
         or receipt.get("schema") != 2 or receipt.get("authority") != "TRANSPORT_AUTHENTICATED_FAL_READBACK"
         or receipt.get("local_request_id") != LOCAL_REQUEST_ID
         or receipt.get("provider_request_id") != REMOTE_REQUEST_ID
@@ -185,13 +205,16 @@ def _submission_timestamp(path: Path) -> datetime:
 
 def _verifier(factory, authority, execution):
     production = __import__("src.hybrid.young_identity_model_sheet_production", fromlist=["x"])
+    execution_code_sha256 = sha256(Path(production.__file__).read_bytes()).hexdigest()
+    if execution_code_sha256 != APPROVED_EXECUTION_CODE_SHA256:
+        raise ProductionAdmissionError("protected source-code qualification changed")
     return ModelSheetV3BillingVerifier(
         root=factory.root, execution_root=execution, authority_path=factory.authority_path,
         policy_path=Path(authority["policy_path"]), preflight_path=Path(authority["preflight_path"]),
         qualification_path=Path(authority["deployment_qualification"]["path"]),
         financial_source_path=factory.root / "financial-record-source.json",
         authority_sha256=sha256(factory.authority_path.read_bytes()).hexdigest(),
-        execution_code_sha256=sha256(Path(production.__file__).read_bytes()).hexdigest(),
+        execution_code_sha256=execution_code_sha256,
     )
 
 
@@ -219,10 +242,18 @@ def _readonly_snapshot() -> _Snapshot:
              "settlement_mode": claim_row[6], "auth_scope": claim_row[7], "provider_request_id": claim_row[8],
              "authority_mode": claim_row[9], "currency": "USD"}
     try:
-        _verifier(factory, authority, execution).verify(receipt, receipt.get("settlement_binding"), claim)
+        verifier = _verifier(factory, authority, execution)
+        if claim["state"] == "RESERVED":
+            verifier.verify(receipt, receipt.get("settlement_binding"), claim)
+        elif claim["state"] != "SETTLED":
+            raise ProductionAdmissionError("durable model-sheet claim is not reserved or settled")
     except Exception as exc:
         raise ProductionAdmissionError("durable model-sheet settlement contract changed") from exc
-    return _Snapshot(factory, ledger_path, financial_sha, execution, _submission_timestamp(execution / "provider-receipt.recovery.json"))
+    return _Snapshot(
+        factory, ledger_path, financial_sha, execution,
+        _submission_timestamp(execution / "provider-receipt.recovery.json"),
+        claim["state"] == "SETTLED",
+    )
 
 
 def _construct_service(snapshot: _Snapshot, credential: str) -> FalLedgerSettlementService:
@@ -243,7 +274,10 @@ async def _recover_after_settlement(snapshot: _Snapshot) -> dict:
         media_sha256 = sha256(media.read_bytes()).hexdigest()
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise ProductionAdmissionError("durable quarantined model-sheet media is unavailable") from exc
-    if provider_receipt != {"sha256": media_sha256, "kind": "PNG_RESULT", "actual_billed_amount": "UNKNOWN_UNTIL_BILLING_RECONCILIATION"}:
+    if (
+        media_sha256 != APPROVED_QUARANTINED_PNG_SHA256
+        or provider_receipt != {"sha256": media_sha256, "kind": "PNG_RESULT", "actual_billed_amount": "UNKNOWN_UNTIL_BILLING_RECONCILIATION"}
+    ):
         raise ProductionAdmissionError("durable quarantined model-sheet media changed")
     ledger = StandingBudgetLedger(snapshot.ledger_path, policy_sha256=snapshot.financial_sha256,
                                   episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE")
@@ -268,6 +302,16 @@ async def _recover_after_settlement(snapshot: _Snapshot) -> dict:
 async def reconcile() -> dict:
     snapshot = _readonly_snapshot()
     before = _readonly_ledger_snapshot(snapshot.ledger_path)
+    # A pre-existing SETTLED row is a GET-only replay only after reopening and
+    # proving its canonical receipt/history.  It must not resolve credentials,
+    # construct transport, quote, reserve, or issue HTTP.
+    if getattr(snapshot, "already_settled", False):
+        _prove_settlement(snapshot, before)
+        return {
+            "request_id": LOCAL_REQUEST_ID,
+            "status": "SETTLED",
+            "completion": await _recover_after_settlement(snapshot),
+        }
     end = _utc_now()
     if end <= snapshot.submission_at:
         raise ProductionAdmissionError("current UTC end does not cover durable submission")
