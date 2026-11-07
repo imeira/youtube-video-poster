@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -500,9 +501,14 @@ class YoungIdentityModelSheetProduction:
                 raise ProductionAdmissionError("durable qualification marker changed")
         execution.mkdir(parents=True, exist_ok=True)
         ledger = StandingBudgetLedger(ledger_path, policy_sha256=financial_sha, episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode=qualification["mode"])
-        executor = Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)), standing_ledger=ledger, _jaco_final_admission_verifier=verify, _jaco_production_binding={"kind":"YOUNG_IDENTITY_MODEL_SHEET_PRODUCTION", "auth_scope":scope})
+        executor = Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)), standing_ledger=ledger, _jaco_final_admission_verifier=verify, _jaco_production_binding={"kind":"JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION", "auth_scope":scope})
         if executor.inspect(job.request_id) is None:
-            _write_once(marker_path, qualification)
+            if marker_path.exists():
+                persisted_marker, _ = _load(marker_path, "pre-POST qualification marker")
+                if persisted_marker != qualification:
+                    raise ProductionAdmissionError("pre-POST qualification marker changed")
+            else:
+                _write_once(marker_path, qualification)
             executor.prepare_intent(job, auth_scope=scope); claim = ledger.reserve(job.request_id, authority["predecessor_operation_id"] or EPISODE_ID, ENDPOINT, str(CAP), settlement_mode="FAL_READBACK_V2", auth_scope=scope, provider_request_id="UNASSIGNED", authority_mode=qualification["mode"])
             if claim.get("state") != "RESERVED": raise ProductionAdmissionError("canonical reservation rejected")
             executor._change(job.request_id, final_admission_marker=marker_for(job))
@@ -525,10 +531,57 @@ class YoungIdentityModelSheetProduction:
         completed = await executor.run(job, provider, authorization=auth, price=price, settlement_checkpoint=lambda lid,rid: ledger.bind_provider_request_id(lid,rid), submit_prepared=not _recovery)
         return {"operation_id": OPERATION_ID, "status": completed["status"], "request_id": job.request_id, "mode": qualification["mode"]}
 
+    def _execution_phase(self, execution: Path) -> str:
+        """Classify durable executor state without opening a write connection.
+
+        An initialized database with no jobs is the only pre-POST state that may
+        restart admission.  Every row-bearing or malformed database is recovery
+        or ambiguous; neither can fall back into a fresh quote/review/POST.
+        """
+        database_path = execution / "executor.sqlite3"
+        if not database_path.exists():
+            if execution.exists() and any(execution.iterdir()):
+                raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+            return "ABSENT"
+        try:
+            with sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True) as database:
+                rows = database.execute("SELECT id, data FROM jobs").fetchall()
+        except (sqlite3.Error, OSError) as exc:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
+        if not rows:
+            allowed = {
+                "executor.sqlite3", "executor.sqlite3-shm", "executor.sqlite3-wal",
+                ".executor.sqlite3.init.lock", "protected-qualification.json",
+            }
+            unexpected = {
+                path.name for path in execution.iterdir()
+                if path.name not in allowed
+                and not (path.name == "executor.locks" and path.is_dir() and not any(path.iterdir()))
+            }
+            if unexpected:
+                raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+            return "PRE_POST_EMPTY"
+        if len(rows) != 1:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+        try:
+            row = json.loads(rows[0][1])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry") from exc
+        if (
+            not isinstance(row, dict)
+            or row.get("request_id") != rows[0][0]
+            or row.get("scene") != OPERATION_ID
+            or row.get("endpoint") != ENDPOINT
+            or row.get("status") not in {"PREPARED", "SUBMITTING", "SUBMITTED", "COMPLETE", "OVERRUN"}
+        ):
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+        return "RECOVERY"
+
     async def _execute_with_composition(self, *, quote_and_openapi, credential_loader=None, test_provider_factory=None):
         authority, _, _ = self._authority(); qualification = self._qualification(authority); self._ledger_binding(authority)
         execution = self.root / "execution" / OPERATION_ID
-        if (execution / "executor.sqlite3").is_file():
+        phase = self._execution_phase(execution)
+        if phase == "RECOVERY":
             # A durable executor means recovery only: no fresh price/OpenAPI or
             # reviewer subprocess. Missing/invalid checkpoint state fails in the
             # executor rather than starting a new admission.

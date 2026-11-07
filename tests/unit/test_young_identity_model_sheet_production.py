@@ -148,6 +148,165 @@ def _actual_v1_policy_three_view_root(root, monkeypatch):
     return _write(root / "standing-policy" / production.AUTHORITY_PATH.name, authority)
 
 
+def _qualified_live_root(root, monkeypatch):
+    """Install a hermetic v1 LIVE authority through the public fixed-root path."""
+    from hashlib import sha256
+
+    import src.hybrid.young_identity_model_sheet_production as production
+
+    authority_path = _actual_v1_policy_three_view_root(root, monkeypatch)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    qualification_path = Path(authority["deployment_qualification"]["path"])
+    qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
+    authority["mode"] = "LIVE"
+    qualification.update({
+        "schema": "jaco-protected-deployment-qualification/v2",
+        "mode": "LIVE",
+        "authorization": "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY",
+        "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+    })
+    del qualification["consent_fixture"]
+    _write(qualification_path, qualification)
+    authority["deployment_qualification"] = {
+        "path": str(qualification_path),
+        "sha256": sha256(qualification_path.read_bytes()).hexdigest(),
+    }
+    _write(authority_path, authority)
+    monkeypatch.setattr(production, "ROOT", root)
+    monkeypatch.setattr(production, "AUTHORITY_PATH", authority_path)
+    return authority_path
+
+
+@pytest.mark.asyncio
+async def test_public_live_composition_reaches_final_admission_then_recovers_get_only(
+    tmp_path, monkeypatch
+):
+    """A public LIVE Job uses the qualified composition, not a TEST relabel."""
+    import src.hybrid.jaco_flux3_production as canonical_production
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import ProviderResult
+
+    _qualified_live_root(tmp_path, monkeypatch)
+    quote, openapi = _fixture_inputs()
+    calls = []
+
+    class OfflineLiveProvider:
+        mode = "LIVE"
+
+        def __init__(self, output, _openapi, credential):
+            assert credential == "hermetic-non-secret-credential"
+            self.output = output
+            calls.append("provider")
+
+        async def submit(self, _job, _request_id, checkpoint):
+            calls.append("post")
+            checkpoint(provider_id="live-remote-1", partial=self.output)
+            raise TimeoutError("controlled checkpoint crash")
+
+        async def recover(self, _job, _request_id, remote, _partial, _checkpoint):
+            assert remote == "live-remote-1"
+            calls.append("get")
+            self.output.write_bytes(b"recovered-live-result")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    monkeypatch.setattr(canonical_production, "_FixedFalProvider", OfflineLiveProvider)
+
+    async def inputs(credential):
+        assert credential == "hermetic-non-secret-credential"
+        calls.append("quote")
+        return quote, openapi
+
+    factory = production.YoungIdentityModelSheetProduction()
+    with pytest.raises(TimeoutError, match="controlled checkpoint crash"):
+        await factory._execute_with_composition(
+            quote_and_openapi=inputs,
+            credential_loader=lambda: "hermetic-non-secret-credential",
+        )
+    result = await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+        quote_and_openapi=lambda _credential: (_ for _ in ()).throw(
+            AssertionError("recovery must not quote or review")
+        ),
+        credential_loader=lambda: "hermetic-non-secret-credential",
+    )
+
+    assert result["mode"] == "LIVE" and result["status"] == "COMPLETE"
+    assert calls == ["quote", "provider", "post", "provider", "get"]
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    with sqlite3.connect(execution / "executor.sqlite3") as database:
+        row = json.loads(database.execute("SELECT data FROM jobs").fetchone()[0])
+    assert row["status"] == "COMPLETE"
+    assert row["final_admission_marker"]["schema"] == 2
+    assert row["final_admission_marker"]["kind"] == "JACO_FLUX3_FINAL_ADMISSION_MARKER"
+    authority = json.loads(
+        (tmp_path / "standing-policy" / production.AUTHORITY_PATH.name).read_text()
+    )
+    assert row["final_admission_marker"]["auth_scope"] == (
+        f"{production.OPERATION_ID}:{authority['policy_sha256']}"
+    )
+    assert (execution / "review.json").is_file()
+    with sqlite3.connect(tmp_path / "ledger" / "standing-budget.sqlite3") as database:
+        assert database.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_pre_post_executor_retries_qualified_admission(tmp_path, monkeypatch):
+    """An initialized zero-job DB is not an ambiguous remote submission."""
+    import src.hybrid.jaco_flux3_production as canonical_production
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import Executor, ProviderResult
+    from src.hybrid.planner import Config
+
+    _qualified_live_root(tmp_path, monkeypatch)
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)))
+    qualification = json.loads(
+        (tmp_path / "standing-policy" / production.QUALIFICATION_PATH.name).read_text()
+    )
+    _write(execution / "protected-qualification.json", qualification)
+    quote, openapi = _fixture_inputs()
+    calls = []
+
+    class OfflineLiveProvider:
+        mode = "LIVE"
+
+        def __init__(self, output, _openapi, _credential):
+            self.output = output
+
+        async def submit(self, _job, _request_id, checkpoint):
+            calls.append("post")
+            checkpoint(provider_id="pre-post-retry", partial=self.output)
+            self.output.write_bytes(b"single retry")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    monkeypatch.setattr(canonical_production, "_FixedFalProvider", OfflineLiveProvider)
+    result = await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+        quote_and_openapi=lambda _credential: _async(quote, openapi),
+        credential_loader=lambda: "hermetic-non-secret-credential",
+    )
+    assert result["status"] == "COMPLETE"
+    assert calls == ["post"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_executor_checkpoint_blocks_before_quote_or_credential(tmp_path, monkeypatch):
+    """A row that cannot prove its exact operation never falls back to retry."""
+    import src.hybrid.young_identity_model_sheet_production as production
+
+    _qualified_live_root(tmp_path, monkeypatch)
+    execution = tmp_path / "execution" / production.OPERATION_ID
+    execution.mkdir(parents=True)
+    with sqlite3.connect(execution / "executor.sqlite3") as database:
+        database.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        database.execute("INSERT INTO jobs VALUES (?, ?)", ("foreign", "{}"))
+    calls = []
+    with pytest.raises(production.ProductionAdmissionError, match="ambiguous execution checkpoint"):
+        await production.YoungIdentityModelSheetProduction()._execute_with_composition(
+            quote_and_openapi=lambda _credential: calls.append("quote"),
+            credential_loader=lambda: calls.append("credential"),
+        )
+    assert calls == []
+
+
 def test_actual_v1_contract_accepts_requested_three_views_and_bound_evidence(tmp_path, monkeypatch):
     """The merged validator must admit the actual v1 policy contract without a v2 rewrite."""
     from src.hybrid.young_identity_model_sheet_production import (
