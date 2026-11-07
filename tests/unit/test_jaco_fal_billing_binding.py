@@ -239,3 +239,72 @@ def test_jaco_contract_verifier_admits_only_the_typed_style_remediation_successo
         mutation(r, b, c)
         with pytest.raises(Exception, match="final-admission"):
             verifier.verify(r, b, c)
+
+
+def test_model_sheet_v3_billing_verifier_requires_exact_qualified_bindings(tmp_path):
+    """The completed model sheet may settle only with its exact v3 contract."""
+    from src.hybrid.billing_reconciler import (
+        ModelSheetV3BillingVerifier,
+        SettlementDenied,
+    )
+
+    operation = "JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001"
+    local_id = "c81bec2124005d306d2f843ac7b5d5c747feb254d090610582d79099f0535cc1"
+    remote_id = "01a1b7bf-ef29-77c1-ad38-5214baa197de"
+    endpoint = ENDPOINT
+    policy_sha, financial_sha, payload_sha = "4" * 64, "9" * 64, "e" * 64
+    policy = {"schema": "jaco-standing-episode-operation-policy/v1", "episode_id": "JACO_GENESIS28"}
+    policy_path = tmp_path / "policy.json"; policy_sha = _write(policy_path, policy)
+    preflight = {"schema": "jaco-episode-operation-preflight/v3", "episode_id": "JACO_GENESIS28",
+                 "operation": {"id": operation, "endpoint": endpoint, "call_limit": 1,
+                               "payload_sha256": payload_sha}}
+    preflight_path = tmp_path / "preflight.json"; preflight_sha = _write(preflight_path, preflight)
+    financial_path = tmp_path / "financial.json"; financial_sha = _write(financial_path, {"currency": "USD"})
+    qualification = {
+        "schema": "jaco-protected-deployment-qualification/v3", "status": "QUALIFIED",
+        "operation_id": operation, "episode_id": "JACO_GENESIS28", "mode": "LIVE",
+        "authorization": "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY", "policy_sha256": policy_sha,
+        "operation_policy_sha256": policy_sha, "financial_policy_sha256": financial_sha,
+        "preflight_sha256": preflight_sha, "execution_code_sha256": "c" * 64,
+        "technical_deployment_amendment": {"schema": "jaco-technical-deployment-amendment/v1"},
+    }
+    qualification_path = tmp_path / "qualification.v3.json"; qualification_sha = _write(qualification_path, qualification)
+    authority = {"schema": "jaco-derived-operation-authority/v2", "status": "READY_FOR_INDEPENDENT_PARENT_REVIEW_NO_RESERVATION_NO_POST",
+                 "operation_id": operation, "episode_id": "JACO_GENESIS28", "policy_path": str(policy_path),
+                 "policy_sha256": policy_sha, "preflight_path": str(preflight_path), "preflight_sha256": preflight_sha,
+                 "canonical_ledger": {"financial_policy_sha256": financial_sha,
+                                      "financial_source": {"path": str(financial_path), "sha256": financial_sha}},
+                 "deployment_qualification": {"path": str(qualification_path), "sha256": qualification_sha}}
+    authority_path = tmp_path / "authority.json"; authority_sha = _write(authority_path, authority)
+    execution = tmp_path / "execution"; execution.mkdir()
+    marker_path = execution / "protected-qualification.v3.json"; _write(marker_path, qualification)
+    scope = f"{operation}:{policy_sha}"
+    marker = {"schema": 2, "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER", "receipt_path": str(marker_path),
+              "receipt_sha256": qualification_sha, "request_id": local_id, "endpoint": endpoint,
+              "payload_sha256": payload_sha, "input_kind": "TEXT_TO_IMAGE", "auth_scope": scope,
+              "reserved_usd": "0.048", "trust_identity": "YOUNG_IDENTITY_MODEL_SHEET_PROTECTED_QUALIFICATION"}
+    receipt = {"receipt_schema": 2, "request_id": local_id, "scene": operation, "endpoint": endpoint,
+               "mode": "LIVE", "input_contract": {"schema": 1, "input_kind": "TEXT_TO_IMAGE", "payload_sha256": payload_sha},
+               "final_admission_marker": marker}
+    binding = {"schema": 2, "local_request_id": local_id, "provider_request_id": remote_id,
+               "endpoint_id": endpoint, "auth_scope": scope, "authority_mode": "LIVE"}
+    claim = {"request_id": local_id, "episode_id": "JACO_GENESIS28", "provider": endpoint,
+             "reserved_usd": "0.048000", "state": "RESERVED", "actual_usd": None,
+             "settlement_mode": "FAL_READBACK_V2", "auth_scope": scope,
+             "provider_request_id": remote_id, "authority_mode": "LIVE", "currency": "USD"}
+    verifier = ModelSheetV3BillingVerifier(root=tmp_path, execution_root=execution,
+        authority_path=authority_path, policy_path=policy_path, preflight_path=preflight_path,
+        qualification_path=qualification_path, financial_source_path=financial_path,
+        authority_sha256=authority_sha, execution_code_sha256="c" * 64)
+    verifier.verify(receipt, binding, claim)
+    for mutate in (
+        lambda r, b, c: b.__setitem__("provider_request_id", "forged"),
+        lambda r, b, c: r["input_contract"].__setitem__("payload_sha256", "f" * 64),
+        lambda r, b, c: r["final_admission_marker"].__setitem__("auth_scope", "prefix:" + policy_sha),
+        lambda r, b, c: c.__setitem__("reserved_usd", "0.047000"),
+        lambda r, b, c: c.__setitem__("currency", "EUR"),
+    ):
+        r, b, c = deepcopy(receipt), deepcopy(binding), deepcopy(claim)
+        mutate(r, b, c)
+        with pytest.raises(SettlementDenied, match="model-sheet"):
+            verifier.verify(r, b, c)

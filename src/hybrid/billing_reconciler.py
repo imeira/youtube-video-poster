@@ -280,6 +280,126 @@ class JacoFinalAdmissionContractVerifier:
         return scope == self.scope()
 
 
+class ModelSheetV3BillingVerifier(JacoFinalAdmissionContractVerifier):
+    """Typed, fixed-scope verifier for the completed three-view model sheet.
+
+    The production companion passes only protected paths and the already
+    validated deployment-code hash.  This class has no fallback to labels,
+    prefixes, or a generic LIVE authorization field.
+    """
+
+    _OPERATION = "JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001"
+    _LOCAL_ID = "c81bec2124005d306d2f843ac7b5d5c747feb254d090610582d79099f0535cc1"
+    _REMOTE_ID = "01a1b7bf-ef29-77c1-ad38-5214baa197de"
+    _ENDPOINT = "blackforestlabs/flux-3/text-to-image"
+
+    def __init__(self, *, root, execution_root, authority_path, policy_path,
+                 preflight_path, qualification_path, financial_source_path,
+                 authority_sha256: str, execution_code_sha256: str) -> None:
+        super().__init__(root=root, execution_root=execution_root)
+        from pathlib import Path
+
+        self.authority_path = Path(authority_path).resolve()
+        self.policy_path = Path(policy_path).resolve()
+        self.preflight_path = Path(preflight_path).resolve()
+        self.qualification_path = Path(qualification_path).resolve()
+        self.financial_source_path = Path(financial_source_path).resolve()
+        if (not isinstance(authority_sha256, str) or not _HASH.fullmatch(authority_sha256)
+                or not isinstance(execution_code_sha256, str) or not _HASH.fullmatch(execution_code_sha256)):
+            raise TypeError("model-sheet contract hashes must be lower-case SHA-256")
+        self.authority_sha256 = authority_sha256
+        self.execution_code_sha256 = execution_code_sha256
+
+    def _contract(self) -> tuple[dict, dict, dict, dict, str]:
+        authority, authority_sha = self._document(self.authority_path, "model-sheet authority")
+        policy, policy_sha = self._document(self.policy_path, "model-sheet policy")
+        preflight, preflight_sha = self._document(self.preflight_path, "model-sheet preflight")
+        qualification, qualification_sha = self._document(self.qualification_path, "model-sheet qualification")
+        _financial, financial_sha = self._document(self.financial_source_path, "model-sheet financial source")
+        ledger = authority.get("canonical_ledger")
+        deployment = authority.get("deployment_qualification")
+        operation = preflight.get("operation") if isinstance(preflight, dict) else None
+        amendment = qualification.get("technical_deployment_amendment") if isinstance(qualification, dict) else None
+        if (
+            authority_sha != self.authority_sha256
+            or authority.get("schema") != "jaco-derived-operation-authority/v2"
+            or authority.get("status") != "READY_FOR_INDEPENDENT_PARENT_REVIEW_NO_RESERVATION_NO_POST"
+            or authority.get("operation_id") != self._OPERATION
+            or authority.get("episode_id") != "JACO_GENESIS28"
+            or authority.get("policy_path") != str(self.policy_path)
+            or authority.get("policy_sha256") != policy_sha
+            or authority.get("preflight_path") != str(self.preflight_path)
+            or authority.get("preflight_sha256") != preflight_sha
+            or not isinstance(ledger, dict)
+            or ledger.get("financial_policy_sha256") != financial_sha
+            or ledger.get("financial_source") != {"path": str(self.financial_source_path), "sha256": financial_sha}
+            or not isinstance(deployment, dict)
+            or deployment != {"path": str(self.qualification_path), "sha256": qualification_sha}
+            or policy.get("schema") != "jaco-standing-episode-operation-policy/v1"
+            or policy.get("episode_id") != "JACO_GENESIS28"
+            or preflight.get("schema") != "jaco-episode-operation-preflight/v3"
+            or preflight.get("episode_id") != "JACO_GENESIS28"
+            or not isinstance(operation, dict)
+            or operation.get("id") != self._OPERATION
+            or operation.get("endpoint") != self._ENDPOINT
+            or operation.get("call_limit") != 1
+            or not isinstance(operation.get("payload_sha256"), str)
+            or not _HASH.fullmatch(operation["payload_sha256"])
+            or qualification.get("schema") != "jaco-protected-deployment-qualification/v3"
+            or qualification.get("status") != "QUALIFIED"
+            or qualification.get("operation_id") != self._OPERATION
+            or qualification.get("episode_id") != "JACO_GENESIS28"
+            or qualification.get("mode") != "LIVE"
+            or qualification.get("authorization") != "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY"
+            or qualification.get("policy_sha256") != policy_sha
+            or qualification.get("operation_policy_sha256") != policy_sha
+            or qualification.get("financial_policy_sha256") != financial_sha
+            or qualification.get("preflight_sha256") != preflight_sha
+            or qualification.get("execution_code_sha256") != self.execution_code_sha256
+            or not isinstance(amendment, dict)
+            or amendment.get("schema") != "jaco-technical-deployment-amendment/v1"
+        ):
+            raise SettlementDenied("model-sheet protected contract is invalid")
+        return authority, preflight, qualification, operation, qualification_sha
+
+    def matches_scope(self, scope: object) -> bool:
+        if not isinstance(scope, str):
+            return False
+        authority, _preflight, _qualification, _operation, _qualification_sha = self._contract()
+        return scope == f"{self._OPERATION}:{authority['policy_sha256']}"
+
+    def verify(self, receipt: dict, binding: dict, claim: dict) -> None:
+        authority, _preflight, _qualification, operation, qualification_sha = self._contract()
+        scope = f"{self._OPERATION}:{authority['policy_sha256']}"
+        marker = receipt.get("final_admission_marker") if isinstance(receipt, dict) else None
+        expected_marker = {
+            "schema": 2, "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER",
+            "receipt_path": str((self.execution_root / "protected-qualification.v3.json").resolve()),
+            "receipt_sha256": qualification_sha, "request_id": self._LOCAL_ID,
+            "endpoint": self._ENDPOINT, "payload_sha256": operation["payload_sha256"],
+            "input_kind": "TEXT_TO_IMAGE", "auth_scope": scope,
+            "reserved_usd": "0.048",
+            "trust_identity": "YOUNG_IDENTITY_MODEL_SHEET_PROTECTED_QUALIFICATION",
+        }
+        expected_binding = {"schema": 2, "local_request_id": self._LOCAL_ID,
+                            "provider_request_id": self._REMOTE_ID, "endpoint_id": self._ENDPOINT,
+                            "auth_scope": scope, "authority_mode": "LIVE"}
+        if (
+            not isinstance(receipt, dict) or receipt.get("receipt_schema") != 2
+            or receipt.get("request_id") != self._LOCAL_ID or receipt.get("scene") != self._OPERATION
+            or receipt.get("endpoint") != self._ENDPOINT or receipt.get("mode") != "LIVE"
+            or receipt.get("input_contract") != {"schema": 1, "input_kind": "TEXT_TO_IMAGE", "payload_sha256": operation["payload_sha256"]}
+            or marker != expected_marker or binding != expected_binding
+            or not isinstance(claim, dict) or claim.get("request_id") != self._LOCAL_ID
+            or claim.get("episode_id") != "JACO_GENESIS28" or claim.get("provider") != self._ENDPOINT
+            or claim.get("reserved_usd") != "0.048000" or claim.get("state") != "RESERVED"
+            or claim.get("actual_usd") is not None or claim.get("settlement_mode") != "FAL_READBACK_V2"
+            or claim.get("auth_scope") != scope or claim.get("provider_request_id") != self._REMOTE_ID
+            or claim.get("authority_mode") != "LIVE" or claim.get("currency", "USD") != "USD"
+        ):
+            raise SettlementDenied("model-sheet v3 settlement binding mismatch")
+
+
 def _canonical_hash(document: dict) -> str:
     return sha256(
         json.dumps(
