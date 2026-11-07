@@ -234,12 +234,35 @@ def _construct_service(snapshot: _Snapshot, credential: str) -> FalLedgerSettlem
 
 
 async def _recover_after_settlement(snapshot: _Snapshot) -> dict:
-    """Delegate completion solely to the pre-existing public GET-only recovery path."""
-    result = await snapshot.factory._execute_with_composition(
-        quote_and_openapi=lambda _credential: (_ for _ in ()).throw(ProductionAdmissionError("recovery must not quote, review, or POST")),
-        credential_loader=lambda: resolve_default_fal_credential()[0],
+    """Complete from canonical settlement and quarantined bytes; no provider call."""
+    authority, _policy, preflight = snapshot.factory._authority()
+    receipt_path = snapshot.execution / "provider-receipt.json"
+    media = snapshot.execution / "provider-receipt.quarantine.png"
+    try:
+        provider_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        media_sha256 = sha256(media.read_bytes()).hexdigest()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ProductionAdmissionError("durable quarantined model-sheet media is unavailable") from exc
+    if provider_receipt != {"sha256": media_sha256, "kind": "PNG_RESULT", "actual_billed_amount": "UNKNOWN_UNTIL_BILLING_RECONCILIATION"}:
+        raise ProductionAdmissionError("durable quarantined model-sheet media changed")
+    ledger = StandingBudgetLedger(snapshot.ledger_path, policy_sha256=snapshot.financial_sha256,
+                                  episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE")
+    verifier = _verifier(snapshot.factory, authority, snapshot.execution)
+    holder = {}
+    def complete_verifier(job, _marker, claim):
+        row = holder["executor"].inspect(job.request_id)
+        verifier.verify_completion(row, row.get("settlement_binding"), claim)
+    executor = Executor(snapshot.execution / "executor.sqlite3", Config(limit=Decimal(10)),
+                        standing_ledger=ledger, _jaco_final_admission_verifier=complete_verifier)
+    holder["executor"] = executor
+    job = __import__("src.hybrid.execution", fromlist=["Job"]).Job(
+        OPERATION_ID, authority["executor_category"], "LIVE", preflight["operation"]["endpoint"],
+        preflight["operation"]["payload"], None, Decimal("0.048"),
+        predecessor=authority["executor_predecessor_request_id"], input_kind="TEXT_TO_IMAGE",
     )
-    return {"status": result.get("status"), "request_id": result.get("request_id")}
+    completed = executor.complete_settled_recovery(job, media)
+    return {"status": completed["status"], "request_id": completed["request_id"],
+            "result_sha256": completed["result_sha256"]}
 
 
 async def reconcile() -> dict:

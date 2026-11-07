@@ -6,6 +6,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 
 import pytest
 
@@ -196,6 +197,33 @@ async def test_authenticated_offline_readback_writes_one_canonical_receipt_and_r
 
 
 @pytest.mark.asyncio
+async def test_settled_receipt_completes_quarantined_result_without_second_billing_get(tmp_path):
+    """The real executor closes a submitted job from durable settlement and bytes."""
+    from src.hybrid.billing_reconciler import FalLedgerSettlementService
+
+    class AuthenticatedOfflineFixture(LoopbackFalBillingFixture):
+        authority = "TRANSPORT_AUTHENTICATED_FAL_READBACK"
+
+    executor, job, _ = await _bound_receipt(tmp_path)
+    ledger = executor._standing_ledger
+    fixture = AuthenticatedOfflineFixture(pricing_pages=[], billing_pages=[
+        {"billing_events": [_event(job.request_id, job.endpoint)], "next_cursor": None, "has_more": False},
+    ])
+    service = FalLedgerSettlementService(ledger, executor, FalBillingConsumer(fixture), clock=lambda: END)
+    await service.reconcile(job.request_id, start=START, end=END)
+    result = tmp_path / "quarantine.png"
+    result.write_bytes(b"durable media bytes")
+    executor._change(job.request_id, status="SUBMITTED")
+
+    first = executor.complete_settled_recovery(job, result)
+    second = executor.complete_settled_recovery(job, result)
+
+    assert first["status"] == second["status"] == "COMPLETE"
+    assert first["result_sha256"] == sha256(result.read_bytes()).hexdigest()
+    assert ledger.verified_settlement_receipt(job.request_id)["claim"]["state"] == "SETTLED"
+
+
+@pytest.mark.asyncio
 async def test_same_billed_event_with_different_utc_windows_keeps_one_canonical_settlement_receipt(tmp_path):
     from src.hybrid.billing_reconciler import FalLedgerSettlementService
 
@@ -301,8 +329,8 @@ async def test_inexact_money_or_stale_window_marks_claim_unknown_without_settlem
         clock=lambda: END + timedelta(seconds=301),
     ).reconcile(job.request_id, start=START, end=END)
     assert result["status"] == "SETTLED"
-    # estimate metadata is non-authoritative; the fresh readback total settled.
-    assert stale["status"] == "UNKNOWN"
+    # Existing canonical settlement is read locally and never triggers another billing GET.
+    assert stale["status"] == "SETTLED"
     assert ledger.exposure()["episode_usd"] == {"TEST-EP": "0.045001"}
 
 

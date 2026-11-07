@@ -1006,6 +1006,58 @@ class Executor:
                 row["failure_code"] = failure_code
             self._put(db, row)
 
+    def complete_settled_recovery(self, job: Job, result_path: Path):
+        """Complete a submitted job from canonical settlement and durable media only."""
+        if not isinstance(job, Job):
+            raise TypeError("durable Job is required")
+        self._validate_input_contract(job)
+        result = Path(result_path).resolve()
+        if not result.is_file():
+            raise ValueError("durable recovered media is unavailable")
+        row = self.inspect(job.request_id)
+        if not isinstance(row, dict):
+            raise TypeError("durable executor receipt is unavailable")
+        media_sha256 = sha256(result)
+        if row.get("status") == "COMPLETE":
+            self._verify_receipt(row)
+            if row.get("result_sha256") != media_sha256:
+                raise ValueError("completed receipt media hash changed")
+            return row
+        if row.get("status") != "SUBMITTED":
+            raise PermissionError("only a durable submitted request may complete from settlement")
+        binding = row.get("settlement_binding")
+        if (
+            not isinstance(binding, dict)
+            or binding.get("local_request_id") != job.request_id
+            or binding.get("endpoint_id") != job.endpoint
+            or binding.get("authority_mode") != job.mode
+            or binding.get("provider_request_id") != row.get("provider_id")
+            or row.get("input_contract") != {"schema": 1, "input_kind": job.input_kind, "payload_sha256": job.intent_input_sha256}
+        ):
+            raise PermissionError("submitted receipt does not bind recovered media request")
+        ledger = self._standing_ledger
+        if ledger is None or not callable(getattr(ledger, "verified_settlement_receipt", None)):
+            raise PermissionError("canonical standing-ledger settlement is required")
+        settled = ledger.verified_settlement_receipt(job.request_id)
+        claim, receipt = settled["claim"], settled["receipt"]
+        if (
+            receipt.get("local_request_id") != job.request_id
+            or receipt.get("provider_request_id") != binding["provider_request_id"]
+            or receipt.get("endpoint_id") != job.endpoint
+            or receipt.get("auth_scope") != binding.get("auth_scope")
+            or receipt.get("authority_mode") != job.mode
+            or claim.get("state") != "SETTLED"
+        ):
+            raise PermissionError("canonical settlement does not bind submitted request")
+        actual = money(claim.get("actual_usd"))
+        if actual > job.cost:
+            raise PermissionError("settled actual exceeds submitted maximum")
+        if self._jaco_final_admission_verifier is not None:
+            self._jaco_final_admission_verifier(job, row.get("final_admission_marker"), claim)
+        self._change(job.request_id, status="COMPLETE", result=str(result), result_sha256=media_sha256,
+                     charged=str(actual), actual_cost=str(actual), cache_hit=False)
+        return self.inspect(job.request_id)
+
     async def run(
         self,
         job: Job,
