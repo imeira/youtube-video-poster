@@ -32,8 +32,14 @@ first gate.
 | Executor marker | schema `2`, kind `JACO_FLUX3_FINAL_ADMISSION_MARKER`, authority receipt path/hash, request ID, endpoint, payload hash, `TEXT_TO_IMAGE`, scope, reserved amount, trust identity |
 
 The sequence is protected read-only binding, authenticated GET-only quote/OpenAPI
-fetch when LIVE requires it, independent review receipt, then prepare intent,
-canonical reserve, immutable marker, and `Executor.run(submit_prepared=True)`.
+fetch when LIVE requires it, then composition creates a fresh-process review run
+under its fixed root. It immediately reads the receipt back with the typed local
+review validator and revalidates the receipt, packet, request, quote, OpenAPI,
+financial record, endpoint, payload and freshness bindings immediately before
+prepare intent. `_execute_prepared` has no caller-supplied review path or boolean:
+only that composition-owned validated capability can cross the admission boundary.
+It is then prepare intent, canonical reserve, immutable marker, and
+`Executor.run(submit_prepared=True)`.
 No provider POST is permitted until the reviews have completed. A checkpointed remote ID is bound to
 the existing claim; a fresh process calls provider recovery only. Optional
 TEST settlement takes an existing `FalBillingConsumer` and exact UTC window,

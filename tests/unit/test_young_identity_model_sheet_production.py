@@ -350,6 +350,58 @@ async def test_direct_execute_prepared_cannot_bypass_protected_composition_or_in
     assert not (tmp_path / "execution").exists() and not (tmp_path / "ledger").exists()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attack", [
+    "forged", "foreign-valid", "tampered-packet", "stale", "wrong-mode", "symlink", "missing-review",
+])
+async def test_caller_review_run_never_admits_or_creates_state(tmp_path, monkeypatch, attack):
+    """Only composition-owned review evidence may cross the admission boundary."""
+    from src.hybrid.young_identity_model_sheet_production import YoungIdentityModelSheetProduction
+
+    authority = _qualified_test_root(tmp_path, monkeypatch)
+    quote, openapi = _fixture_inputs()
+    review = tmp_path / "caller-review"
+    review.mkdir()
+    for name, value in {
+        "packet.json": {}, "review.json": {"forged": True},
+        "quote.json": quote, "openapi.json": openapi,
+    }.items():
+        _write(review / name, value)
+    if attack == "foreign-valid":
+        # A receipt from a different operation is still caller-controlled.
+        _write(review / "review.json", {"verdict": "PASS", "request_id": "foreign"})
+    elif attack == "tampered-packet":
+        _write(review / "packet.json", {"payload": "tampered"})
+    elif attack == "stale":
+        _write(review / "review.json", {"reviewed_at_epoch": 0})
+    elif attack == "wrong-mode":
+        _write(review / "review.json", {"mode": "LIVE"})
+    elif attack == "symlink":
+        target = review / "packet-target.json"
+        _write(target, {})
+        (review / "packet.json").unlink()
+        try:
+            (review / "packet.json").symlink_to(target)
+        except OSError:
+            pytest.skip("symlink setup unavailable")
+    elif attack == "missing-review":
+        (review / "review.json").unlink()
+
+    calls = []
+    class Provider:
+        mode = "TEST"
+        def __init__(self, output, _openapi): self.output = output; calls.append("factory")
+        async def submit(self, *_args): calls.append("POST")
+
+    with pytest.raises(TypeError):
+        await YoungIdentityModelSheetProduction._for_test(tmp_path, authority)._execute_prepared(
+            quote=quote, openapi=openapi, test_provider_factory=Provider, review_run=review,
+        )
+    assert calls == []
+    assert not (tmp_path / "execution").exists()
+    assert not (tmp_path / "ledger" / "standing-budget.sqlite3").exists()
+
+
 def test_openapi_payload_drift_and_boolean_quote_are_rejected(tmp_path, monkeypatch):
     from src.hybrid.young_identity_model_sheet_production import (
         ProductionAdmissionError,
