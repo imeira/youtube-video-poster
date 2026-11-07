@@ -208,6 +208,31 @@ def test_test_qualification_is_rejected_outside_private_fixture_composition(tmp_
         factory._qualification(factory._authority()[0])
 
 
+def test_configured_live_entrypoint_accepts_a_valid_live_qualification_without_provisioning(tmp_path):
+    """Qualification is closed, not an unconditional rejection of LIVE mode."""
+    from src.hybrid.jaco_style_remediation_operation import OperationAdmissionFactory
+
+    authority_path = _qualified_test_authority(tmp_path)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    qualification_path = Path(authority["deployment_qualification"]["path"])
+    qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
+    qualification.update({
+        "schema": "jaco-protected-deployment-qualification/v2",
+        "mode": "LIVE",
+        "authorization": "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY",
+    })
+    del qualification["consent_fixture"]
+    _write(qualification_path, qualification)
+    authority["deployment_qualification"]["sha256"] = _sha(qualification_path)
+    _write(authority_path, authority)
+
+    factory = OperationAdmissionFactory._for_test(root=tmp_path, authority_path=authority_path)
+    factory._test_only = False  # model the configured production entrypoint
+    assert factory._qualification(factory._authority()[0])["mode"] == "LIVE"
+    assert not (tmp_path / "execution").exists()
+    assert not (tmp_path / "operation-runs").exists()
+
+
 @pytest.mark.asyncio
 async def test_execution_rejects_forged_current_financial_source_before_review_or_reservation(tmp_path):
     from src.hybrid.jaco_style_remediation_operation import (

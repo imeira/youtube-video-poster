@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -95,6 +96,47 @@ async def test_closed_manifest_executes_once_and_reopens_durable_evidence(tmp_pa
     assert first["status"] == second["status"] == "COMPLETE"
     assert json.loads((tmp_path / "provider-audit.json").read_text()) == {"submits": 1, "gets": 0}
     assert composition.audit()["claims"] == 1
+
+
+@pytest.mark.asyncio
+async def test_closed_manifest_settles_checkpointed_test_claim_with_existing_fake_billing_consumer(tmp_path):
+    """The composition settles its one recovered Executor claim through GET-only billing."""
+    from src.hybrid.execution import ProviderResult
+    from src.hybrid.fal_billing import FalBillingConsumer, LoopbackFalBillingFixture
+    from src.hybrid.young_identity_model_sheet_composition import (
+        YoungIdentityModelSheetComposition,
+    )
+
+    authority = _fixture(tmp_path)
+    now = datetime.now(UTC)
+
+    class Provider:
+        mode = "TEST"
+        def __init__(self, output): self.output = output
+        async def submit(self, _job, _id, checkpoint):
+            checkpoint(provider_id="model-sheet-remote", partial=self.output)
+            self.output.write_bytes(b"model sheet")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    event = {
+        "request_id": "model-sheet-remote", "endpoint_id": "blackforestlabs/flux-3/text-to-image",
+        "timestamp": (now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+        "quantity": 1, "output_units": 1, "unit": "image", "unit_price": 0.048,
+        "percent_discount": 0, "cost_subtotal": 0.048, "cost_discount": 0,
+        "cost_total": 0.048, "cost_estimate_nano_usd": 48_000_000,
+    }
+    consumer = FalBillingConsumer(LoopbackFalBillingFixture(
+        pricing_pages=[], billing_pages=[{"billing_events": [event], "next_cursor": None, "has_more": False}],
+    ))
+    result = await YoungIdentityModelSheetComposition.for_test(tmp_path, authority).execute(
+        lambda output: Provider(output),
+        settlement_consumer=consumer,
+        settlement_window=(now - timedelta(seconds=2), now),
+    )
+
+    assert result["status"] == "COMPLETE"
+    assert result["settlement"]["status"] == "SETTLED"
+    assert result["settlement"]["claim"]["state"] == "SETTLED"
 
 
 @pytest.mark.parametrize("field,value", [("call_limit", True), ("maximum_usd", True), ("payload_sha256", "A" * 64)])
