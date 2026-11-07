@@ -356,7 +356,9 @@ async def test_direct_execute_prepared_cannot_bypass_protected_composition_or_in
 ])
 async def test_caller_review_run_never_admits_or_creates_state(tmp_path, monkeypatch, attack):
     """Only composition-owned review evidence may cross the admission boundary."""
-    from src.hybrid.young_identity_model_sheet_production import YoungIdentityModelSheetProduction
+    from src.hybrid.young_identity_model_sheet_production import (
+        YoungIdentityModelSheetProduction,
+    )
 
     authority = _qualified_test_root(tmp_path, monkeypatch)
     quote, openapi = _fixture_inputs()

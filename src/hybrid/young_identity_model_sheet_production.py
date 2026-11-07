@@ -56,17 +56,24 @@ _REVIEW_CAPABILITY_TOKEN = object()
 class _ValidatedReviewCapability:
     """Non-caller-constructible, composition-owned independent-review proof."""
 
-    __slots__ = ("run", "packet_sha256", "request_sha256", "quote_sha256", "openapi_sha256", "financial_sha256")
+    __slots__ = (
+        "financial_sha256",
+        "openapi_sha256",
+        "packet_sha256",
+        "quote_sha256",
+        "request_sha256",
+        "run",
+    )
 
     def __init__(self, token, run, packet_sha256, request_sha256, quote_sha256, openapi_sha256, financial_sha256):
         if token is not _REVIEW_CAPABILITY_TOKEN:
             raise ProductionAdmissionError("independent review capability is composition-owned")
-        self.run = run
-        self.packet_sha256 = packet_sha256
-        self.request_sha256 = request_sha256
-        self.quote_sha256 = quote_sha256
-        self.openapi_sha256 = openapi_sha256
         self.financial_sha256 = financial_sha256
+        self.openapi_sha256 = openapi_sha256
+        self.packet_sha256 = packet_sha256
+        self.quote_sha256 = quote_sha256
+        self.request_sha256 = request_sha256
+        self.run = run
 
 
 def _canonical(value: object) -> bytes:
@@ -359,7 +366,6 @@ class YoungIdentityModelSheetProduction:
         # No caller path is authority; only an internal, immediately read-back
         # capability may cross this boundary.
         execution = self.root / "execution" / OPERATION_ID
-        unprepared_execution = not (execution / "executor.sqlite3").exists()
         if not isinstance(_review_capability, _ValidatedReviewCapability):
             raise ProductionAdmissionError("missing independent review for unprepared execution")
         revalidated_review = self._validated_review_capability(
