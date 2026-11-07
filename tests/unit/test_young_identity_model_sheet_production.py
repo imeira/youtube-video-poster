@@ -743,6 +743,159 @@ def _subprocess_recovery_child(root_text: str, phase: str) -> None:
     print(json.dumps({"phase": phase, **counts, "claims": claims}))
 
 
+def _amended_live_recovery_child(root_text: str, phase: str) -> None:
+    """Exercise the public LIVE route from disk-only v3 amendment state."""
+    from hashlib import sha256
+
+    import src.hybrid.jaco_flux3_production as canonical_production
+    import src.hybrid.young_identity_model_sheet_production as production
+    from src.hybrid.execution import Executor, ProviderResult
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    root = Path(root_text)
+    counts_path = root / "live-transport-counts.json"
+    counts = json.loads(counts_path.read_text()) if counts_path.exists() else {"POST": 0, "GET": 0}
+    if phase == "submit":
+        authority_path = _qualified_live_root(root, _ChildMonkeyPatch())
+        authority = json.loads(authority_path.read_text(encoding="utf-8"))
+        prior_path = Path(authority["deployment_qualification"]["path"])
+        prior = json.loads(prior_path.read_text(encoding="utf-8"))
+        prior["execution_code_sha256"] = production.PRIOR_QUALIFIED_EXECUTION_SHA256
+        _write(prior_path, prior)
+        prior_bytes, prior_sha = prior_path.read_bytes(), sha256(prior_path.read_bytes()).hexdigest()
+        amended = dict(prior)
+        amended.update({
+            "schema": "jaco-protected-deployment-qualification/v3",
+            "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+            "technical_deployment_amendment": {
+                "schema": "jaco-technical-deployment-amendment/v1",
+                "kind": "EXECUTION_CODE_HASH_SUCCESSOR_ONLY",
+                "prior_qualification_path": str(prior_path),
+                "prior_qualification_sha256": prior_sha,
+                "prior_qualification_bytes_sha256": prior_sha,
+                "prior_execution_code_sha256": production.PRIOR_QUALIFIED_EXECUTION_SHA256,
+                "new_execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+                "review_ci_provenance_sha256": prior["ci_digest_sha256"],
+                "operation_policy_sha256": prior["operation_policy_sha256"],
+                "financial_policy_sha256": prior["financial_policy_sha256"],
+                "preflight_sha256": prior["preflight_sha256"],
+            },
+        })
+        amended_path = root / "standing-policy" / production.AMENDED_QUALIFICATION_PATH.name
+        _write(amended_path, amended)
+        authority["deployment_qualification"] = {
+            "path": str(amended_path), "sha256": sha256(amended_path.read_bytes()).hexdigest(),
+        }
+        _write(authority_path, authority)
+        execution = root / "execution" / production.OPERATION_ID
+        Executor(execution / "executor.sqlite3", Config(limit=Decimal(10)))
+        _write(execution / "protected-qualification.json", prior)
+        ledger_path = root / "ledger" / "standing-budget.sqlite3"
+        StandingBudgetLedger(
+            ledger_path, policy_sha256=authority["canonical_ledger"]["financial_policy_sha256"],
+            episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE",
+        )
+        histories = (
+            ("7f19aab26d71464a9bc257f4f566d2c6cb642aab0bc55864bad8dcbaeab0ae47",
+             "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170"),
+            ("27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052",
+             "JACO_GEN28_STYLE_REMEDIATION_001:46bb52a78057088ef1030ed77f54dd4e4dc671aa67576c0074939389bb947e11"),
+        )
+        with sqlite3.connect(ledger_path) as db:
+            for request_id, scope in histories:
+                receipt = {
+                    "schema": 2, "authority": "TRANSPORT_AUTHENTICATED_FAL_READBACK",
+                    "local_request_id": request_id, "provider_request_id": f"remote-{request_id}",
+                    "endpoint_id": production.ENDPOINT, "auth_scope": scope, "authority_mode": "LIVE",
+                    "currency": "USD", "cost_total_micro_usd": "48000", "evidence_hash": "a" * 64,
+                    "provenance": "FAL_BILLING_READBACK",
+                }
+                body = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+                db.execute("INSERT INTO claims VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                    request_id, production.EPISODE_ID, production.ENDPOINT, "2026-11", 48000, 0,
+                    "SETTLED", 48000, "FAL_READBACK_V2", scope, f"remote-{request_id}", "LIVE", None,
+                ))
+                db.execute("INSERT INTO settlement_receipts VALUES(?,?,?,?,?)", (
+                    request_id, sha256(body.encode()).hexdigest(), 48000, body, "FAL_BILLING_READBACK",
+                ))
+        old_receipts = {
+            row[0]: {"body": row[1], "sha256": row[2]}
+            for row in sqlite3.connect(ledger_path).execute(
+                "SELECT request_id, receipt_body, receipt_sha256 FROM settlement_receipts"
+            )
+        }
+        (root / "amended-live-before.json").write_text(json.dumps({
+            "old_marker": prior_bytes.hex(), "old_marker_sha256": prior_sha,
+            "old_receipts": old_receipts,
+        }, sort_keys=True), encoding="utf-8")
+    else:
+        authority_path = root / "standing-policy" / production.AUTHORITY_PATH.name
+        production.ROOT, production.AUTHORITY_PATH = root, authority_path
+        production.FINANCIAL_SHA256 = sha256((root / "financial-record-source.json").read_bytes()).hexdigest()
+        canonical_production._CANONICAL_STATE_DB = root / "canonical-state.sqlite3"
+
+    class OfflineLiveProvider:
+        mode = "LIVE"
+
+        def __init__(self, output, _openapi, _credential):
+            self.output = output
+
+        async def submit(self, _job, _request_id, checkpoint):
+            counts["POST"] += 1; counts_path.write_text(json.dumps(counts), encoding="utf-8")
+            checkpoint(provider_id="amended-live-remote-1", partial=self.output)
+            raise TimeoutError("controlled LIVE crash after durable remote checkpoint")
+
+        async def recover(self, _job, _request_id, remote, _partial, _checkpoint):
+            assert remote == "amended-live-remote-1"
+            counts["GET"] += 1; counts_path.write_text(json.dumps(counts), encoding="utf-8")
+            self.output.write_bytes(b"recovered without resubmission")
+            return ProviderResult(self.output, Decimal("0.048"))
+
+    canonical_production._FixedFalProvider = OfflineLiveProvider
+    quote, openapi = _fixture_inputs()
+    if phase == "submit":
+        async def quote_and_openapi(_credential):
+            return quote, openapi
+    else:
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("recovery must not call quote, OpenAPI, or review")
+        quote_and_openapi = forbidden
+        production.YoungIdentityModelSheetProduction._review_for_execution = forbidden
+
+    try:
+        result = asyncio.run(production.YoungIdentityModelSheetProduction()._execute_with_composition(
+            quote_and_openapi=quote_and_openapi,
+            credential_loader=lambda: "offline-non-secret-credential",
+        ))
+    except TimeoutError:
+        if phase != "submit":
+            raise
+        result = {"status": "CHECKPOINTED"}
+    ledger_path = root / "ledger" / "standing-budget.sqlite3"
+    execution = root / "execution" / production.OPERATION_ID
+    with sqlite3.connect(ledger_path) as db:
+        claims = db.execute(
+            "SELECT request_id, state, actual, cap, provider_request_id FROM claims ORDER BY request_id"
+        ).fetchall()
+        receipts = {
+            row[0]: {"body": row[1], "sha256": row[2]}
+            for row in db.execute("SELECT request_id, receipt_body, receipt_sha256 FROM settlement_receipts")
+        }
+    journal = json.loads(sqlite3.connect(execution / "executor.sqlite3").execute(
+        "SELECT data FROM jobs"
+    ).fetchone()[0])
+    snapshot = json.loads((root / "amended-live-before.json").read_text(encoding="utf-8"))
+    print(json.dumps({
+        "phase": phase, "result": result["status"], "counts": counts, "claims": claims,
+        "receipts": receipts, "old_marker_hex": (execution / "protected-qualification.json").read_bytes().hex(),
+        "old_marker_sha256": sha256((execution / "protected-qualification.json").read_bytes()).hexdigest(),
+        "new_marker_sha256": sha256((execution / "protected-qualification.v3.json").read_bytes()).hexdigest(),
+        "selected_marker_sha256": json.loads((execution / "protected-qualification.selection.v1.json").read_text())["selected_marker_sha256"],
+        "journal": journal, "before": snapshot,
+    }, sort_keys=True))
+
+
 async def _async(*values):
     return values
 
@@ -1143,6 +1296,42 @@ def test_controlled_python_child_recovers_existing_executor_and_ledger_with_get_
     second = subprocess.run([*command, "recover"], text=True, capture_output=True, check=False, timeout=45)
     assert second.returncode == 0, second.stderr
     assert json.loads(second.stdout) == {"phase": "recover", "posts": 1, "gets": 1, "claims": 1}
+
+
+def test_public_live_v3_amendment_recovers_in_fresh_process_without_second_reservation_or_post(tmp_path):
+    """A real LIVE admission keeps v2 history immutable and recovers GET-only."""
+    module = "tests.unit.test_young_identity_model_sheet_production"
+    command = [
+        sys.executable, "-c",
+        f"from {module} import _amended_live_recovery_child as f; import sys; f(sys.argv[1], sys.argv[2])",
+        str(tmp_path),
+    ]
+    first = subprocess.run([*command, "submit"], text=True, capture_output=True, check=False, timeout=60)
+    assert first.returncode == 0, first.stderr
+    submitted = json.loads(first.stdout)
+    assert submitted["result"] == "CHECKPOINTED"
+    assert submitted["counts"] == {"POST": 1, "GET": 0}
+    assert len(submitted["claims"]) == 3
+    assert sum((row[2] if row[2] is not None else row[3]) for row in submitted["claims"]) == 144000
+    assert submitted["old_marker_hex"] == submitted["before"]["old_marker"]
+    assert submitted["old_marker_sha256"] == submitted["before"]["old_marker_sha256"]
+    assert submitted["receipts"] == submitted["before"]["old_receipts"]
+
+    second = subprocess.run([*command, "recover"], text=True, capture_output=True, check=False, timeout=60)
+    assert second.returncode == 0, second.stderr
+    recovered = json.loads(second.stdout)
+    assert recovered["result"] == "COMPLETE"
+    assert recovered["counts"] == {"POST": 1, "GET": 1}
+    assert len(recovered["claims"]) == 3
+    assert sum((row[2] if row[2] is not None else row[3]) for row in recovered["claims"]) == 144000
+    assert recovered["receipts"] == recovered["before"]["old_receipts"]
+    assert recovered["old_marker_hex"] == recovered["before"]["old_marker"]
+    assert recovered["old_marker_sha256"] == recovered["before"]["old_marker_sha256"]
+    assert recovered["new_marker_sha256"] == recovered["selected_marker_sha256"]
+    current = next(row for row in recovered["claims"] if row[0] not in recovered["receipts"])
+    assert current[1:] == ["RESERVED", None, 48000, "amended-live-remote-1"]
+    assert recovered["journal"]["status"] == "COMPLETE"
+    assert recovered["journal"]["provider_id"] == "amended-live-remote-1"
 
 
 @pytest.mark.asyncio
