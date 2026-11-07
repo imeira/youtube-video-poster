@@ -153,7 +153,7 @@ def test_cap_exposure_blocks_before_any_operation_artifact(tmp_path):
     _fixture(tmp_path)
     with sqlite3.connect(tmp_path / "ledger" / "standing-budget.sqlite3") as db:
         db.execute(
-            "INSERT INTO claims VALUES ('prior', 'SETTLED', 'JACO_GENESIS28', 1, 9_970_000)"
+            "INSERT INTO claims VALUES ('prior', 'SETTLED', 'JACO_GENESIS28', 1, 9970000)"
         )
     with pytest.raises(BoundedAdmissionError, match="cap exposure"):
         BoundedOperationAdmission._for_test(tmp_path).admit(
