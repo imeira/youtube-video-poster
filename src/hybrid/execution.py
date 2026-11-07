@@ -424,8 +424,34 @@ class Executor:
         jaco_final_admission = False
         if job.endpoint == "blackforestlabs/flux-3/text-to-image":
             marker = row.get("final_admission_marker")
+            successor_marker = (
+                job.scene == "JACO_GEN28_STYLE_REMEDIATION_001"
+                and isinstance(marker, dict)
+                and marker == {
+                    "schema": 2,
+                    "kind": "JACO_STYLE_REMEDIATION_QUALIFICATION_MARKER",
+                    "qualification_sha256": marker.get("qualification_sha256"),
+                    "request_id": job.request_id,
+                    "endpoint": job.endpoint,
+                    "payload_sha256": marker.get("payload_sha256"),
+                    "input_kind": marker.get("input_kind"),
+                    "auth_scope": marker.get("auth_scope"),
+                    "reserved_usd": "0.048",
+                    "trust_identity": "PROTECTED_DEPLOYMENT_QUALIFICATION",
+                }
+                and isinstance(marker.get("qualification_sha256"), str)
+                and len(marker["qualification_sha256"]) == 64
+            )
+            if successor_marker and (
+                marker["payload_sha256"] != job.intent_input_sha256
+                or marker["input_kind"] != "TEXT_TO_IMAGE"
+                or marker["auth_scope"] != binding["auth_scope"]
+                or self._jaco_final_admission_verifier is None
+            ):
+                raise PermissionError("style remediation qualification marker changed")
             if (
-                not isinstance(marker, dict)
+                not successor_marker
+                and (not isinstance(marker, dict)
                 or marker != {
                     "schema": 2,
                     "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER",
@@ -448,7 +474,7 @@ class Executor:
                 or marker["input_kind"] != "TEXT_TO_IMAGE"
                 or marker["auth_scope"] != binding["auth_scope"]
                 or not isinstance(marker["trust_identity"], str)
-                or self._jaco_final_admission_verifier is None
+                or self._jaco_final_admission_verifier is None)
             ):
                 raise PermissionError("FLUX 3 canary submit requires configured durable final-admission marker")
             # The verifier belongs to the composition, reopens its immutable receipt,
