@@ -25,8 +25,8 @@ first gate.
 | --- | --- |
 | operation | `id`, `kind`, `endpoint`, `call_limit`, `maximum_usd`, `payload`, `payload_sha256` |
 | authority | closed v2 schema with operation, explicit initial lineage (`first`, empty predecessor), non-reuse flag, policy/preflight hashes, protected ledger, qualification, cap and mode |
-| standing policy | closed v2 schema, canonical consent session/message/prompt plus transcript/source hashes, and bound financial baseline/source hash |
-| preflight | closed v2 schema, blocked status, replay prohibition and exact three-view payload hash |
+| standing policy | closed canonical v1 schema: full consent descriptor, operation class, admission/exclusion lists, financial baseline and history preservation. The validator uses the descriptor fields and does not manufacture a `147620` message-ID rule. |
+| preflight | legacy v2 remains readable only for existing non-production TEST fixtures. The successor contract is explicit v3: blocked status, replay prohibition, exact requested front-open-eyes / three-quarter-open-eyes / standing-body payload hash, plus closed byte descriptors for canonical script packet, EP8 F001 manifest, raster, and derived palette evidence. |
 | financial source | closed reconciliation schema/hash, USD 10 episode scope, financial-only/non-generation approval |
 | ledger reservation | request ID, `JACO_GENESIS28`, fixed Flux endpoint, `0.048`, `FAL_READBACK_V2`, `TEST_LOCAL_ONLY`, `TEST` |
 | Executor marker | schema `2`, kind `JACO_FLUX3_FINAL_ADMISSION_MARKER`, authority receipt path/hash, request ID, endpoint, payload hash, `TEXT_TO_IMAGE`, scope, reserved amount, trust identity |
@@ -47,6 +47,8 @@ and delegates GET-only readback plus settlement to
 `FalLedgerSettlementService`.
 
 The protected LIVE factory remains the only configured LIVE entrypoint. Its
-fixed root, endpoint, consent `147620`, parent-review barrier, cumulative
+fixed root, endpoint, parent-review barrier, cumulative
 ledger cap, and distinct financial (`916e…`) versus operational (`46bb…`)
-bindings remain untouched. This TEST composition cannot provision LIVE work.
+bindings remain untouched. The canonical v1 consent descriptor stays the
+protected source of message identity; this validator does not add a numeric
+message-ID authority. This TEST composition cannot provision LIVE work.

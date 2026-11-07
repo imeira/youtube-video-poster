@@ -37,9 +37,10 @@ FINANCIAL_SOURCE_PATH = ROOT / "financial-record-source.json"
 CAP = Decimal("0.048")
 EXPECTED_PAYLOAD = {
     "prompt": (
-        "Young identity model sheet, exactly three labeled views in one 16:9 "
-        "image: front view, profile view, and back view; consistent child-safe "
-        "character design, neutral presentation, no extra poses or text."
+        "Evaluation-only Genesis 28 young-adult Jacó identity model sheet in one 16:9 PNG. "
+        "Exactly three views of the same single character: (1) front head-and-shoulders, eyes open, "
+        "neutral expression; (2) three-quarter head-and-shoulders, eyes open; (3) standing full-body "
+        "neutral pose with readable hair, mantle, tunic, sandals, and silhouette."
     ),
     "aspect_ratio": "16:9", "resolution": "1k", "output_format": "png",
     "enable_prompt_expansion": False, "safety_tolerance": 2,
@@ -139,6 +140,77 @@ def _canonical_consent(policy: dict[str, Any]) -> dict[str, Any]:
     return consent
 
 
+def _canonical_v1_consent(policy: dict[str, Any]) -> dict[str, Any]:
+    """Validate the complete v1 consent descriptor without inventing message IDs."""
+    fields = {"session_id", "consent_message_id", "consent_role", "prompt_message_id",
+              "prompt_role", "consent_literal_utf8_bytes", "consent_literal_utf8_sha256",
+              "prompt_utf8_bytes", "prompt_utf8_sha256"}
+    consent = _exact(policy["canonical_consent"], fields, "v1 canonical consent")
+    if (not isinstance(consent["session_id"], str) or not consent["session_id"]
+            or type(consent["consent_message_id"]) is not int
+            or type(consent["prompt_message_id"]) is not int
+            or consent["consent_role"] != "user" or consent["prompt_role"] != "tool"
+            or type(consent["consent_literal_utf8_bytes"]) is not int
+            or type(consent["prompt_utf8_bytes"]) is not int
+            or consent["consent_literal_utf8_bytes"] < 0 or consent["prompt_utf8_bytes"] < 0):
+        raise ProductionAdmissionError("v1 canonical consent changed")
+    _digest(consent["consent_literal_utf8_sha256"], "v1 consent literal hash")
+    _digest(consent["prompt_utf8_sha256"], "v1 consent prompt hash")
+    return consent
+
+
+def _source_evidence(preflight: dict[str, Any]) -> None:
+    required = {"canonical_script_packet", "ep8_f001_manifest", "ep8_f001_raster", "ep8_f001_palette"}
+    evidence = _exact(preflight["source_evidence"], required, "source evidence")
+    for name, descriptor in evidence.items():
+        descriptor = _exact(descriptor, {"path", "sha256", "bytes"}, f"{name} descriptor")
+        if not isinstance(descriptor["path"], str) or not descriptor["path"] or type(descriptor["bytes"]) is not int or descriptor["bytes"] < 0:
+            raise ProductionAdmissionError(f"{name} descriptor changed")
+        _digest(descriptor["sha256"], f"{name} hash")
+        try:
+            path = _safe_path(Path(descriptor["path"]), f"{name} path")
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise ProductionAdmissionError(f"{name} evidence is unavailable") from exc
+        if len(raw) != descriptor["bytes"] or sha256(raw).hexdigest() != descriptor["sha256"]:
+            raise ProductionAdmissionError(f"{name} evidence changed")
+
+
+def _validate_v1_policy(policy: dict[str, Any]) -> None:
+    fields = {"admission_requirements", "allowed_operation_class", "canonical_consent",
+              "episode_id", "explicit_exclusions", "financial_baseline", "history_preservation",
+              "policy_id", "root_request_id", "schema", "status", "trust_derivation", "version"}
+    _exact(policy, fields, "standing v1 policy")
+    if (policy["schema"] != "jaco-standing-episode-operation-policy/v1" or policy["version"] != 1
+            or policy["status"] != "ACTIVE_FOR_DERIVATION_REQUIRES_INDEPENDENT_OPERATION_REVIEW"
+            or policy["episode_id"] != EPISODE_ID or policy["root_request_id"] != REQUEST_ID
+            or policy["policy_id"] != "JACO_GENESIS28_STANDING_OPERATION_POLICY"
+            or policy["trust_derivation"] != "CANONICAL_USER_TRANSCRIPT_PLUS_TRUSTED_LOCAL_OPERATOR"
+            or not isinstance(policy["admission_requirements"], list)
+            or not isinstance(policy["explicit_exclusions"], list)):
+        raise ProductionAdmissionError("standing v1 policy changed")
+    _canonical_v1_consent(policy)
+    operation = _exact(policy["allowed_operation_class"], {"input_kind", "kind", "max_calls_per_operation", "per_operation_cap_must_be_positive_and_at_most_remaining", "providers"}, "v1 operation class")
+    if (operation["input_kind"] != "TEXT_TO_IMAGE"
+            or operation["kind"] != "QUALIFIED_JACO_EPISODE_ASSET_GENERATION_OR_QUALITY_REMEDIATION"
+            or operation["providers"] != [ENDPOINT] or type(operation["max_calls_per_operation"]) is not int
+            or operation["max_calls_per_operation"] != 1
+            or operation["per_operation_cap_must_be_positive_and_at_most_remaining"] is not True):
+        raise ProductionAdmissionError("standing v1 operation class changed")
+    baseline = _exact(policy["financial_baseline"], {"canonical_settlement_receipt_path", "canonical_settlement_receipt_sha256", "currency", "episode_cap_usd", "no_duplicate_cap_authority", "pending_usd", "prior_root_request_is_consumed", "remaining_usd", "settled_actual_usd"}, "v1 financial baseline")
+    if (baseline["currency"] != "USD" or _money(baseline["episode_cap_usd"], "episode cap") != Decimal(10)
+            or _money(baseline["remaining_usd"], "remaining") < CAP
+            or _money(baseline["pending_usd"], "pending") < 0
+            or baseline["no_duplicate_cap_authority"] is not True
+            or baseline["prior_root_request_is_consumed"] is not True):
+        raise ProductionAdmissionError("standing v1 financial baseline changed")
+    _digest(baseline["canonical_settlement_receipt_sha256"], "settlement receipt hash")
+    history = _exact(policy["history_preservation"], {"does_not_overwrite_path", "old_one_shot_sha256", "supersedes_for_future_operations_only"}, "v1 history preservation")
+    if not isinstance(history["does_not_overwrite_path"], str) or not history["does_not_overwrite_path"]:
+        raise ProductionAdmissionError("standing v1 history preservation changed")
+    _digest(history["old_one_shot_sha256"], "old one-shot hash")
+
+
 class YoungIdentityModelSheetProduction:
     """The deployment-pinned composition; no caller can select its authority."""
     def __init__(self) -> None:
@@ -163,14 +235,26 @@ class YoungIdentityModelSheetProduction:
         policy, policy_sha = _load(policy_path, "protected standing policy"); preflight, preflight_sha = _load(preflight_path, "protected preflight")
         _digest(authority["policy_sha256"], "policy hash"); _digest(authority["preflight_sha256"], "preflight hash")
         if authority["policy_sha256"] != policy_sha or authority["preflight_sha256"] != preflight_sha: raise ProductionAdmissionError("protected hash changed")
-        _exact(policy, {"schema", "status", "episode_id", "canonical_consent", "financial_baseline"}, "standing policy")
-        if policy["schema"] != "jaco-standing-episode-operation-policy/v2" or policy["status"] != "ACTIVE_FOR_DERIVATION_REQUIRES_INDEPENDENT_OPERATION_REVIEW" or policy["episode_id"] != EPISODE_ID: raise ProductionAdmissionError("standing policy changed")
-        consent = _canonical_consent(policy)
-        baseline = _exact(policy["financial_baseline"], {"currency", "total_episode_cap", "remaining_usd", "pending_usd", "source_sha256"}, "financial baseline")
-        if baseline["currency"] != "USD" or _money(baseline["total_episode_cap"], "episode cap") != Decimal(10) or _money(baseline["remaining_usd"], "remaining") < CAP or _money(baseline["pending_usd"], "pending") < 0: raise ProductionAdmissionError("financial baseline changed")
-        _digest(baseline["source_sha256"], "financial baseline source")
-        _exact(preflight, {"schema", "status", "episode_id", "request_id", "operation", "replay_prohibition"}, "preflight")
-        if preflight["schema"] != "jaco-episode-operation-preflight/v2" or preflight["status"] != "VALIDATED_PRE_DISPATCH_BLOCKED_MISSING_OPERATION_AUTHORIZATION" or preflight["episode_id"] != EPISODE_ID or preflight["request_id"] != REQUEST_ID or preflight["replay_prohibition"] is not True: raise ProductionAdmissionError("preflight binding changed")
+        if policy.get("schema") == "jaco-standing-episode-operation-policy/v1":
+            _validate_v1_policy(policy)
+            v1_policy = True
+        else:
+            _exact(policy, {"schema", "status", "episode_id", "canonical_consent", "financial_baseline"}, "standing policy")
+            if policy["schema"] != "jaco-standing-episode-operation-policy/v2" or policy["status"] != "ACTIVE_FOR_DERIVATION_REQUIRES_INDEPENDENT_OPERATION_REVIEW" or policy["episode_id"] != EPISODE_ID: raise ProductionAdmissionError("standing policy changed")
+            consent = _canonical_consent(policy)
+            baseline = _exact(policy["financial_baseline"], {"currency", "total_episode_cap", "remaining_usd", "pending_usd", "source_sha256"}, "financial baseline")
+            if baseline["currency"] != "USD" or _money(baseline["total_episode_cap"], "episode cap") != Decimal(10) or _money(baseline["remaining_usd"], "remaining") < CAP or _money(baseline["pending_usd"], "pending") < 0: raise ProductionAdmissionError("financial baseline changed")
+            _digest(baseline["source_sha256"], "financial baseline source")
+            v1_policy = False
+        preflight_fields = {"schema", "status", "episode_id", "request_id", "operation", "replay_prohibition"}
+        if v1_policy and preflight.get("schema") != "jaco-episode-operation-preflight/v3":
+            raise ProductionAdmissionError("v1 successor requires v3 evidence-bound preflight")
+        if preflight.get("schema") == "jaco-episode-operation-preflight/v3":
+            _exact(preflight, preflight_fields | {"source_evidence"}, "preflight")
+            _source_evidence(preflight)
+        else:
+            _exact(preflight, preflight_fields, "preflight")
+        if preflight["schema"] not in {"jaco-episode-operation-preflight/v2", "jaco-episode-operation-preflight/v3"} or preflight["status"] != "VALIDATED_PRE_DISPATCH_BLOCKED_MISSING_OPERATION_AUTHORIZATION" or preflight["episode_id"] != EPISODE_ID or preflight["request_id"] != REQUEST_ID or preflight["replay_prohibition"] is not True: raise ProductionAdmissionError("preflight binding changed")
         operation = _exact(preflight["operation"], {"id", "kind", "endpoint", "call_limit", "maximum_usd", "payload", "payload_sha256"}, "operation")
         if operation["id"] != OPERATION_ID or operation["kind"] != "MODEL_SHEET_THREE_VIEW" or operation["endpoint"] != ENDPOINT or type(operation["call_limit"]) is not int or operation["call_limit"] != 1: raise ProductionAdmissionError("preflight operation binding changed")
         payload = operation.get("payload")
@@ -180,10 +264,11 @@ class YoungIdentityModelSheetProduction:
                 or expected_payload_sha != sha256(_canonical(EXPECTED_PAYLOAD)).hexdigest()):
             raise ProductionAdmissionError("exact three-views payload required")
         if _money(operation["maximum_usd"], "operation cap") != CAP or _money(authority["maximum_next_cost_usd"], "authority cap") != CAP: raise ProductionAdmissionError("cap binding changed")
-        # The transcript provenance is not merely syntactically valid: its two
-        # non-message sources are bound into this protected chain as well.
-        if (consent["financial_record_sha256"] != baseline["source_sha256"]
-                or consent["review_source_sha256"] != authority["preflight_sha256"]):
+        # v2 transcript provenance binds its independent sources directly.  The
+        # complete v1 policy is itself hash-bound by authority and its v3
+        # preflight binds the reference evidence byte-for-byte.
+        if not v1_policy and (consent["financial_record_sha256"] != baseline["source_sha256"]
+                              or consent["review_source_sha256"] != authority["preflight_sha256"]):
             raise ProductionAdmissionError("canonical consent source bindings changed")
         return authority, policy, preflight
 
