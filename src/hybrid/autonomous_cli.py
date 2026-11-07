@@ -893,8 +893,10 @@ def main(argv=None):
             else:
                 if a.action == "run" and not a.once:
                     p.error("run requires --once; use serve for the bounded worker loop")
-                if a.action == "host" and a.concurrency != 1:
-                    raise ValueError("host concurrency must be exactly one")
+                if not 1 <= a.concurrency <= 32:
+                    raise ValueError("host concurrency must be an integer from 1 through 32")
+                if a.action == "host" and a.once and a.concurrency != 1:
+                    raise ValueError("host --once concurrency must be exactly one")
                 queue = EpisodeTaskQueue(queue_path)
                 worker_id = f"host-{os.getpid()}" if a.action == "host" else f"cli-{os.getpid()}"
                 worker = DurableEpisodeWorker(
@@ -915,7 +917,7 @@ def main(argv=None):
                                 os.environ["HYBRID_TEST_CRASH_AFTER_CHECKPOINT"] = "1"
                             result = asyncio.run(_serve_test_host(worker, concurrency=a.concurrency))
                         else:
-                            asyncio.run(worker.serve())
+                            asyncio.run(worker.serve(concurrency=a.concurrency))
                     except KeyboardInterrupt:
                         result = {"status": "STOPPED", "mode": "TEST"}
                     else:

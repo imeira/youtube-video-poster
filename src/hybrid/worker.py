@@ -186,7 +186,10 @@ class EpisodeTaskQueue:
 
     def next_pending(self):
         with self._db() as db:
-            row = db.execute("SELECT episode_id FROM episode_tasks WHERE status IN ('PENDING','RUNNING') ORDER BY updated_at,episode_id LIMIT 1").fetchone()
+            # Admit fresh work before attempting a possibly still-owned recovery.
+            # A bounded host can then fill independent episode slots instead of
+            # repeatedly contending for the first RUNNING task's active lease.
+            row = db.execute("SELECT episode_id FROM episode_tasks WHERE status IN ('PENDING','RUNNING') ORDER BY CASE status WHEN 'PENDING' THEN 0 ELSE 1 END, updated_at,episode_id LIMIT 1").fetchone()
         return None if row is None else self.status(row[0])
 
     def _active(self, lease, episode_id, worker_id, now):
@@ -360,13 +363,31 @@ class DurableEpisodeWorker:
                 self.leases.release(current, now=time.time())
 
     async def serve(self, *, stop: asyncio.Event | None = None, concurrency: int = 1):
-        """Run the existing single-owner worker until its host requests stop."""
-        if type(concurrency) is not int or concurrency != 1:
-            raise ValueError("DurableEpisodeWorker host concurrency must be exactly one")
+        """Run a rolling bounded window of the existing fenced worker turns."""
+        if type(concurrency) is not int or not 1 <= concurrency <= 32:
+            raise ValueError("DurableEpisodeWorker concurrency must be an integer from 1 through 32")
         stop = stop or asyncio.Event()
-        while not stop.is_set():
-            await self.run_once()
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
-            except TimeoutError:
-                pass
+        in_flight: set[asyncio.Task] = set()
+        try:
+            while not stop.is_set():
+                while len(in_flight) < concurrency and not stop.is_set():
+                    in_flight.add(asyncio.create_task(self.run_once()))
+                done, _pending = await asyncio.wait(
+                    in_flight, timeout=self.poll_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if done:
+                    no_claim = False
+                    for completed in done:
+                        in_flight.remove(completed)
+                        no_claim = completed.result() is None or no_claim
+                    if no_claim and not stop.is_set():
+                        try:
+                            await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
+                        except TimeoutError:
+                            pass
+        finally:
+            for invocation in in_flight:
+                invocation.cancel()
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)

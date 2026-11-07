@@ -6,6 +6,8 @@ import multiprocessing
 import os
 import sqlite3
 import subprocess
+import threading
+import time
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -257,3 +259,112 @@ def test_read_status_uses_no_sql_and_rejects_duplicate_json_keys(tmp_path, monke
 
     snapshot.write_bytes(b'{"schema":"episode-task-queue-snapshot-v1","schema":"forged"}')
     assert EpisodeTaskQueue.read_status(queue.database, "TEST-EP")["snapshot"] == "STALE"
+
+
+def test_serve_uses_a_rolling_bounded_window_without_another_runner(tmp_path):
+    """One worker host can own two distinct TEST episodes, never more than asked."""
+    queue = EpisodeTaskQueue(tmp_path / "worker.sqlite3")
+    queue.enqueue("TEST-ONE", str(tmp_path / "one"), "fixture")
+    queue.enqueue("TEST-TWO", str(tmp_path / "two"), "fixture")
+    entered, release, stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    active, peak = set(), []
+
+    async def handler(task):
+        active.add(task["episode_id"])
+        peak.append(len(active))
+        if len(active) == 2:
+            entered.set()
+        await release.wait()
+        active.remove(task["episode_id"])
+        return {"state": "DONE", "next_action": "TERMINAL"}
+
+    async def exercise():
+        worker = DurableEpisodeWorker(queue, "bounded", handler, poll_seconds=0.01)
+        serving = asyncio.create_task(worker.serve(stop=stop, concurrency=2))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert peak == [1, 2]
+        release.set()
+        for episode_id in ("TEST-ONE", "TEST-TWO"):
+            deadline = asyncio.get_running_loop().time() + 2
+            while queue.status(episode_id)["status"] != "DONE":
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.01)
+        stop.set()
+        await asyncio.wait_for(serving, timeout=2)
+        for invalid_concurrency in (0, 33, True):
+            with pytest.raises(ValueError, match="1 through 32"):
+                await worker.serve(stop=asyncio.Event(), concurrency=invalid_concurrency)
+
+    asyncio.run(exercise())
+
+
+def test_serve_polls_when_only_an_already_owned_episode_remains(tmp_path, monkeypatch):
+    """A full host must not hot-loop claiming its own still-running episode."""
+    queue = EpisodeTaskQueue(tmp_path / "worker.sqlite3")
+    queue.enqueue("TEST-ONE", str(tmp_path / "one"), "fixture")
+    entered, release, stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = 0
+    original_next_pending = queue.next_pending
+
+    def counted_next_pending():
+        nonlocal calls
+        calls += 1
+        return original_next_pending()
+
+    monkeypatch.setattr(queue, "next_pending", counted_next_pending)
+
+    async def handler(_task):
+        entered.set()
+        await release.wait()
+        return {"state": "DONE", "next_action": "TERMINAL"}
+
+    async def exercise():
+        worker = DurableEpisodeWorker(queue, "bounded", handler, poll_seconds=0.05)
+        serving = asyncio.create_task(worker.serve(stop=stop, concurrency=2))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.sleep(0.12)
+        stop.set()
+        release.set()
+        await asyncio.wait_for(serving, timeout=2)
+        assert calls <= 4
+
+    asyncio.run(exercise())
+
+
+def test_serve_shutdown_quarantines_each_live_offloaded_handler(tmp_path):
+    """Host shutdown retains every ambiguity barrier while thread work is alive."""
+    queue = EpisodeTaskQueue(tmp_path / "worker.sqlite3")
+    queue.enqueue("TEST-ONE", str(tmp_path / "one"), "fixture")
+    queue.enqueue("TEST-TWO", str(tmp_path / "two"), "fixture")
+    entered, release, stop = asyncio.Event(), threading.Event(), asyncio.Event()
+    active = set()
+
+    async def handler(task):
+        active.add(task["episode_id"])
+        if len(active) == 2:
+            entered.set()
+        await asyncio.to_thread(release.wait)
+        return {"state": "DONE", "next_action": "TERMINAL"}
+
+    async def exercise():
+        worker = DurableEpisodeWorker(
+            queue, "bounded", handler, lease_ttl_seconds=1,
+            poll_seconds=0.01, shutdown_deadline_seconds=0.01,
+        )
+        serving = asyncio.create_task(worker.serve(stop=stop, concurrency=2))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            stop.set()
+            await asyncio.wait_for(serving, timeout=2)
+            assert {queue.status(episode_id)["status"] for episode_id in active} == {
+                "UNKNOWN_REQUIRES_RECONCILIATION"
+            }
+            for episode_id in active:
+                with pytest.raises(RuntimeError, match="lease is held"):
+                    queue.leases.acquire(
+                        episode_id, "other:run", now=time.time(), ttl_seconds=1
+                    )
+        finally:
+            release.set()
+
+    asyncio.run(exercise())
