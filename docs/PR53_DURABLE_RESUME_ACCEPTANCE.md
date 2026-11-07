@@ -5,11 +5,11 @@ the protected TEST composition.  It is not a claim that full CI ran or passed.
 
 ## Command
 
-```powershell
-python -m pytest tests/unit/test_jaco_style_remediation_operation.py tests/unit/test_bounded_operation_admission.py -q
+```text
+python scripts/run_offline_tests.py tests/unit/test_bounded_operation_admission.py tests/unit/test_jaco_style_remediation_operation.py -m "not slow" --tb=short -q
 ```
 
-The command was run on this worktree and completed with `28 passed` (the test
+The command was run on this worktree and completed with `30 passed` (the test
 environment also emitted its existing pytest deprecation warning).
 
 ## Durable counter artifact
