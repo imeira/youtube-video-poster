@@ -34,13 +34,15 @@ def _qualified_test_authority(root: Path) -> Path:
     """A hermetic deployment contract; it is deliberately not a LIVE artifact."""
     policy, authority_path = _authority(root)
     preflight = root / "preflight" / "JACO_GEN28_STYLE_REMEDIATION_001.preflight.json"
-    qualification = root / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.qualification.v1.json"
+    qualification = root / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.qualification.v2.json"
     qualification_body = {
-        "schema": "jaco-test-deployment-qualification/v1",
+        "schema": "jaco-test-deployment-qualification/v2",
         "status": "QUALIFIED",
         "operation_id": "JACO_GEN28_STYLE_REMEDIATION_001",
         "episode_id": "JACO_GENESIS28",
         "policy_sha256": _sha(policy),
+        "operation_policy_sha256": _sha(policy),
+        "financial_policy_sha256": "pending-fixture-financial-binding",
         "preflight_sha256": _sha(preflight),
         "mode": "TEST",
         "review_packet_schema": "jaco-fal-flux3-successor-benchmark/3",
@@ -57,7 +59,8 @@ def _qualified_test_authority(root: Path) -> Path:
         "deployment_qualification": {"path": str(qualification), "sha256": _sha(qualification)},
         "canonical_ledger": {
             "path": str(root / "ledger" / "standing-budget.sqlite3"),
-            "policy_sha256": _sha(policy),
+            "financial_policy_sha256": "pending-fixture-financial-binding",
+            "operation_policy_sha256": _sha(policy),
             "financial_source": {
                 "path": str(root / "financial-record-source.json"),
                 "sha256": "",
@@ -70,7 +73,17 @@ def _qualified_test_authority(root: Path) -> Path:
         "revision": "818556d97edb648f", "currency": "USD", "total_episode_cap": "10.00",
         "status": "APPROVED_USD10", "approval_scope": "FINANCIAL_ONLY", "authorizes_generation": False,
     })
-    authority["canonical_ledger"]["financial_source"]["sha256"] = _sha(financial_source)
+    financial_hash = _sha(financial_source)
+    from src.hybrid.standing_budget import StandingBudgetLedger
+    StandingBudgetLedger(
+        root / "ledger" / "standing-budget.sqlite3", policy_sha256=financial_hash,
+        episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST",
+    )
+    authority["canonical_ledger"]["financial_source"]["sha256"] = financial_hash
+    authority["canonical_ledger"]["financial_policy_sha256"] = financial_hash
+    qualification_body["financial_policy_sha256"] = financial_hash
+    _write(qualification, qualification_body)
+    authority["deployment_qualification"]["sha256"] = _sha(qualification)
     _write(authority_path, authority)
     return authority_path
 
@@ -219,6 +232,112 @@ async def test_execution_rejects_forged_current_financial_source_before_review_o
 
 
 @pytest.mark.asyncio
+async def test_split_financial_ledger_binding_reaches_isolated_network_boundary_and_preserves_prior_claim(tmp_path):
+    """A real financial-root ledger is not rebound to the operation policy."""
+    from src.hybrid.jaco_style_remediation_operation import OperationAdmissionFactory
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    authority_path = _qualified_test_authority(tmp_path)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    financial_source = tmp_path / "financial-record-source.json"
+    financial_hash = _sha(financial_source)
+    operation_hash = _sha(tmp_path / "standing-policy" / "JACO_GENESIS28_STANDING_OPERATION_POLICY.v1.json")
+    assert financial_hash != operation_hash
+    authority["canonical_ledger"] = {
+        "path": str(tmp_path / "ledger" / "standing-budget.sqlite3"),
+        "financial_policy_sha256": financial_hash,
+        "operation_policy_sha256": operation_hash,
+        "financial_source": {"path": str(financial_source), "sha256": financial_hash},
+    }
+    _write(authority_path, authority)
+    ledger = StandingBudgetLedger(
+        tmp_path / "ledger" / "standing-budget.sqlite3", policy_sha256=financial_hash,
+        episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST",
+    )
+    ledger.reserve("JACO_GEN28_CANONICAL_001", "JACO_GENESIS28", "blackforestlabs/flux-3/text-to-image", "0.048")
+    ledger.settle("JACO_GEN28_CANONICAL_001", "0.048")
+    calls: list[str] = []
+
+    class NetworkBoundary:
+        mode = "TEST"
+
+        def __init__(self, output, _schema):
+            self.output = output
+
+        async def submit(self, *_args):
+            calls.append("POST_BOUNDARY")
+            raise RuntimeError("NETWORK_BLOCKED_BOUNDARY")
+
+    async def quote_and_openapi():
+        calls.append("GET")
+        return _fixture_quote(), _fixture_openapi()
+
+    factory = OperationAdmissionFactory._for_test(root=tmp_path, authority_path=authority_path)
+    with pytest.raises(RuntimeError, match="NETWORK_BLOCKED_BOUNDARY"):
+        await factory._execute_with_composition(
+            quote_and_openapi=quote_and_openapi,
+            credential_loader=lambda: (_ for _ in ()).throw(AssertionError("TEST has no credential")),
+            test_provider_factory=NetworkBoundary,
+        )
+
+    assert calls == ["GET", "POST_BOUNDARY"]
+    reopened = StandingBudgetLedger(
+        tmp_path / "ledger" / "standing-budget.sqlite3", policy_sha256=financial_hash,
+        episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST",
+    )
+    with reopened._connect() as db:
+        rows = db.execute("SELECT request_id, state, actual, cap FROM claims ORDER BY request_id").fetchall()
+    assert len(rows) == 2
+    assert (rows[0]["request_id"], rows[0]["state"], rows[0]["actual"], rows[0]["cap"]) == (
+        "JACO_GEN28_CANONICAL_001", "SETTLED", 48000, 48000,
+    )
+    assert (rows[1]["state"], rows[1]["actual"], rows[1]["cap"]) == ("RESERVED", None, 48000)
+    assert rows[1]["request_id"] != rows[0]["request_id"]
+    assert reopened.exposure()["episode_usd"]["JACO_GENESIS28"] == "0.096000"
+
+
+@pytest.mark.asyncio
+async def test_changed_financial_source_or_forged_operation_binding_blocks_before_get_or_directory_creation(tmp_path):
+    from src.hybrid.jaco_style_remediation_operation import (
+        OperationAdmissionError,
+        OperationAdmissionFactory,
+    )
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    authority_path = _qualified_test_authority(tmp_path)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    financial_source = tmp_path / "financial-record-source.json"
+    financial_hash = _sha(financial_source)
+    authority["canonical_ledger"] = {
+        "path": str(tmp_path / "ledger" / "standing-budget.sqlite3"),
+        "financial_policy_sha256": financial_hash,
+        "operation_policy_sha256": "f" * 64,
+        "financial_source": {"path": str(financial_source), "sha256": financial_hash},
+    }
+    _write(authority_path, authority)
+    StandingBudgetLedger(
+        tmp_path / "ledger" / "standing-budget.sqlite3", policy_sha256=financial_hash,
+        episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST",
+    )
+    financial_source.write_text('{"changed":true}', encoding="utf-8")
+    calls: list[str] = []
+
+    async def quote_and_openapi():
+        calls.append("GET")
+        return {}, {}
+
+    factory = OperationAdmissionFactory._for_test(root=tmp_path, authority_path=authority_path)
+    with pytest.raises(OperationAdmissionError, match="financial source|operation policy"):
+        await factory._execute_with_composition(
+            quote_and_openapi=quote_and_openapi,
+            credential_loader=lambda: (_ for _ in ()).throw(AssertionError("credential must remain unread")),
+        )
+    assert calls == []
+    assert not (tmp_path / "operation-runs").exists()
+    assert not (tmp_path / "execution").exists()
+
+
+@pytest.mark.asyncio
 async def test_execution_rejects_payload_replay_before_review_or_reservation(tmp_path):
     from src.hybrid.jaco_style_remediation_operation import (
         OperationAdmissionError,
@@ -354,7 +473,7 @@ asyncio.run(main())
     assert run(tmp_path, "recover")["status"] == "COMPLETE"
     assert json.loads((tmp_path / "fixture-counts.json").read_text()) == {"posts": 1, "gets": 1}
     from src.hybrid.standing_budget import StandingBudgetLedger
-    ledger = StandingBudgetLedger(tmp_path / "ledger" / "standing-budget.sqlite3", policy_sha256=_sha(tmp_path / "standing-policy" / "JACO_GENESIS28_STANDING_OPERATION_POLICY.v1.json"), episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
+    ledger = StandingBudgetLedger(tmp_path / "ledger" / "standing-budget.sqlite3", policy_sha256=_sha(tmp_path / "financial-record-source.json"), episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
     with ledger._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
     unknown_root = tmp_path / "unknown"
