@@ -38,9 +38,17 @@ PRIOR_QUALIFIED_EXECUTION_SHA256 = "f701cb1b1d296238ab00708bb92ad131ca7a5665d237
 LEDGER_PATH = ROOT / "ledger" / "standing-budget.sqlite3"
 FINANCIAL_SOURCE_PATH = ROOT / "financial-record-source.json"
 CAP = Decimal("0.048")
-_HISTORICAL_SETTLED_SCOPES = frozenset({
-    "JACO_FLUX3_FINAL_ADMISSION", "JACO_GEN28_STYLE_REMEDIATION_001",
-})
+# The historical ledger is an immutable, protected artifact.  These are complete
+# scope identities bound to the exact local request IDs in its canonical
+# receipts; labels, prefixes, and caller-normalized strings are never authority.
+_HISTORICAL_SETTLED_CLAIMS = {
+    "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170": (
+        "7f19aab26d71464a9bc257f4f566d2c6cb642aab0bc55864bad8dcbaeab0ae47"
+    ),
+    "JACO_GEN28_STYLE_REMEDIATION_001:46bb52a78057088ef1030ed77f54dd4e4dc671aa67576c0074939389bb947e11": (
+        "27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052"
+    ),
+}
 EXPECTED_PAYLOAD = {
     "prompt": (
         "Evaluation-only Genesis 28 young-adult Jacó identity model sheet in one 16:9 PNG. "
@@ -696,7 +704,8 @@ class YoungIdentityModelSheetProduction:
                 if (episode_id != EPISODE_ID or provider != ENDPOINT or not re.fullmatch(r"20[0-9]{2}-(0[1-9]|1[0-2])", month)
                         or cap != _units(CAP) or actual != _units(CAP) or experiment not in {0, 1}
                         or state != "SETTLED" or settlement_mode != "FAL_READBACK_V2"
-                        or row_scope not in _HISTORICAL_SETTLED_SCOPES or provider_request_id == "UNASSIGNED"
+                        or _HISTORICAL_SETTLED_CLAIMS.get(row_scope) != row_request_id
+                        or provider_request_id == "UNASSIGNED"
                         or row_mode != "LIVE"):
                     raise ValueError("claim is not bounded settled history")
                 receipt_row = receipts.pop(row_request_id, None)

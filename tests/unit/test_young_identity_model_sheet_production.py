@@ -311,9 +311,13 @@ async def test_pre_post_admits_two_bound_settled_live_history_and_preserves_cumu
         ledger_path, policy_sha256=authority["canonical_ledger"]["financial_policy_sha256"],
         episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE",
     )
+    # Sanitized byte-faithful copies of the two protected production settled
+    # claims.  The scope is a complete authenticated identifier, not a label.
     histories = (
-        ("historical-final-admission", "JACO_FLUX3_FINAL_ADMISSION"),
-        ("historical-style-remediation", "JACO_GEN28_STYLE_REMEDIATION_001"),
+        ("7f19aab26d71464a9bc257f4f566d2c6cb642aab0bc55864bad8dcbaeab0ae47",
+         "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170"),
+        ("27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052",
+         "JACO_GEN28_STYLE_REMEDIATION_001:46bb52a78057088ef1030ed77f54dd4e4dc671aa67576c0074939389bb947e11"),
     )
     with sqlite3.connect(ledger_path) as db:
         for request_id, scope in histories:
@@ -361,6 +365,35 @@ async def test_pre_post_admits_two_bound_settled_live_history_and_preserves_cumu
             "SELECT claims.request_id, claims.actual, receipt_body, receipt_sha256 FROM claims JOIN settlement_receipts USING(request_id)"
         )}
     assert {key: after[key] for key in before} == before
+
+
+@pytest.mark.parametrize("scope", [
+    "JACO_FLUX3_FINAL_ADMISSION",
+    "JACO_GEN28_STYLE_REMEDIATION_001",
+    "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170 ",
+    "JACO_FLUX3_FINAL_ADMISSION:A32871D181A22A45291A526C29934ABF3FA2A9AEA17F30CF881832DD8CEBF170",
+    "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf171",
+])
+def test_historical_scope_classifier_rejects_nonexact_scope_forms(scope):
+    """No trim, case-fold, prefix, or arbitrary digest compatibility path."""
+    from src.hybrid.young_identity_model_sheet_production import (
+        _HISTORICAL_SETTLED_CLAIMS,
+    )
+
+    assert scope not in _HISTORICAL_SETTLED_CLAIMS
+
+
+def test_historical_scope_classifier_binds_each_exact_scope_to_its_request():
+    from src.hybrid.young_identity_model_sheet_production import (
+        _HISTORICAL_SETTLED_CLAIMS,
+    )
+
+    assert _HISTORICAL_SETTLED_CLAIMS == {
+        "JACO_FLUX3_FINAL_ADMISSION:a32871d181a22a45291a526c29934abf3fa2a9aea17f30cf881832dd8cebf170":
+            "7f19aab26d71464a9bc257f4f566d2c6cb642aab0bc55864bad8dcbaeab0ae47",
+        "JACO_GEN28_STYLE_REMEDIATION_001:46bb52a78057088ef1030ed77f54dd4e4dc671aa67576c0074939389bb947e11":
+            "27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052",
+    }
 
 
 @pytest.mark.asyncio
