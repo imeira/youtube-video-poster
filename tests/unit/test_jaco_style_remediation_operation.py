@@ -24,7 +24,7 @@ def _sha(path: Path) -> str:
 def _authority(root: Path) -> tuple[Path, Path]:
     protected = root / "standing-policy"
     preflight = root / "preflight" / "JACO_GEN28_STYLE_REMEDIATION_001.preflight.json"
-    _write(preflight, {"schema": "jaco-episode-operation-preflight/v1", "episode_id": "JACO_GENESIS28", "request_id": "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9", "operation": {"id": "JACO_GEN28_STYLE_REMEDIATION_001", "endpoint": "blackforestlabs/flux-3/text-to-image", "call_limit": 1, "maximum_usd": "0.048", "payload": {"prompt": "remediate", "aspect_ratio": "16:9", "resolution": "1k", "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2}}})
+    _write(preflight, {"schema": "jaco-episode-operation-preflight/v1", "episode_id": "JACO_GENESIS28", "request_id": "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9", "operation": {"id": "JACO_GEN28_STYLE_REMEDIATION_001", "endpoint": "blackforestlabs/flux-3/text-to-image", "call_limit": 1, "maximum_usd": "0.048", "payload": {"prompt": "A child-safe fixture image for isolated successor acceptance.", "aspect_ratio": "16:9", "resolution": "1k", "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2}}})
     policy = _write(protected / "JACO_GENESIS28_STANDING_OPERATION_POLICY.v1.json", {"episode_id": "JACO_GENESIS28", "canonical_consent": {"session_id": "local-712d007e4f3efba4d8c6cfc52f947e69023fed6f445a54206a6c3ede9b317fbb", "consent_message_id": 147620, "prompt_message_id": 147618}, "financial_baseline": {"episode_cap_usd": "10.000000", "remaining_usd": "9.952000", "pending_usd": "0.000000"}})
     authority = _write(protected / "JACO_GEN28_STYLE_REMEDIATION_001.authority.v1.json", {"schema": "jaco-derived-operation-authority/v1", "status": "READY_FOR_INDEPENDENT_PARENT_REVIEW_NO_RESERVATION_NO_POST", "operation_id": "JACO_GEN28_STYLE_REMEDIATION_001", "episode_id": "JACO_GENESIS28", "maximum_next_cost_usd": "0.048000", "policy_path": str(policy), "policy_sha256": _sha(policy), "preflight_path": str(preflight), "preflight_sha256": _sha(preflight), "budget_check": {"actual_usd": "0.048000", "pending_usd": "0.000000", "episode_cap_usd": "10.000000", "next_cap_usd": "0.048000", "post_reservation_exposure_usd": "0.096000"}})
     return policy, authority
@@ -34,12 +34,6 @@ def _qualified_test_authority(root: Path) -> Path:
     """A hermetic deployment contract; it is deliberately not a LIVE artifact."""
     policy, authority_path = _authority(root)
     preflight = root / "preflight" / "JACO_GEN28_STYLE_REMEDIATION_001.preflight.json"
-    body = json.loads(preflight.read_text(encoding="utf-8"))
-    body["operation"]["payload"].update(
-        prompt="A child-safe fixture image for the isolated successor acceptance run",
-        aspect_ratio="4:3",
-    )
-    _write(preflight, body)
     qualification = root / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.qualification.v1.json"
     qualification_body = {
         "schema": "jaco-test-deployment-qualification/v1",
@@ -62,18 +56,19 @@ def _qualified_test_authority(root: Path) -> Path:
         "preflight_sha256": _sha(preflight),
         "deployment_qualification": {"path": str(qualification), "sha256": _sha(qualification)},
         "canonical_ledger": {
-            "path": str(root / "ledger" / "standing.sqlite3"),
+            "path": str(root / "ledger" / "standing-budget.sqlite3"),
             "policy_sha256": _sha(policy),
             "financial_source": {
-                "path": str(root / "ledger" / "financial-record.json"),
+                "path": str(root / "financial-record-source.json"),
                 "sha256": "",
             },
         },
     })
-    financial_source = _write(root / "ledger" / "financial-record.json", {
+    financial_source = _write(root / "financial-record-source.json", {
         "schema": "jaco-factory-financial-reconciliation/1",
         "request_hash": "72eb129dc96eeed89e27a67c0bb32e19aba484d629f58c6b6cae977a0a1bfba9",
-        "currency": "USD", "total_episode_cap": "10.00", "authorizes_generation": False,
+        "revision": "818556d97edb648f", "currency": "USD", "total_episode_cap": "10.00",
+        "status": "APPROVED_USD10", "approval_scope": "FINANCIAL_ONLY", "authorizes_generation": False,
     })
     authority["canonical_ledger"]["financial_source"]["sha256"] = _sha(financial_source)
     _write(authority_path, authority)
@@ -90,6 +85,11 @@ def _fixture_quote() -> dict[str, object]:
         "observed_at_epoch": int(time.time()), "provider_expiry": "UNKNOWN_NOT_ASSERTED",
         "price_validity": "LOCAL_OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_EXPIRY",
     }
+
+
+def _fixture_openapi() -> dict[str, object]:
+    path = Path(__file__).parents[1] / "fixtures" / "fal_flux3_queue_openapi_20261106.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_operation_factory_makes_fresh_immutable_review_packet_from_fixed_authority(tmp_path):
@@ -192,14 +192,14 @@ async def test_execution_rejects_forged_current_financial_source_before_review_o
     )
 
     authority = _qualified_test_authority(tmp_path)
-    source = tmp_path / "ledger" / "financial-record.json"
+    source = tmp_path / "financial-record-source.json"
     source.write_text('{"forged":true}', encoding="utf-8")
     factory = OperationAdmissionFactory._for_test(root=tmp_path, authority_path=authority)
 
     with pytest.raises(OperationAdmissionError, match="financial source"):
         await factory._execute_prepared(
             quote=_fixture_quote(),
-            openapi={"endpoint": "blackforestlabs/flux-3/text-to-image"},
+            openapi=_fixture_openapi(),
             credential="",
             test_provider_factory=lambda *_args: None,
         )
@@ -224,7 +224,7 @@ async def test_execution_rejects_payload_replay_before_review_or_reservation(tmp
     with pytest.raises(OperationAdmissionError, match="hash changed"):
         await factory._execute_prepared(
             quote=_fixture_quote(),
-            openapi={"endpoint": "blackforestlabs/flux-3/text-to-image"},
+            openapi=_fixture_openapi(),
             credential="",
             test_provider_factory=lambda *_args: None,
         )
@@ -244,7 +244,7 @@ async def test_execution_rejects_stale_price_before_reservation(tmp_path):
     with pytest.raises(LocalProcessReviewError, match="stale"):
         await factory._execute_prepared(
             quote=quote,
-            openapi={"endpoint": "blackforestlabs/flux-3/text-to-image"},
+            openapi=_fixture_openapi(),
             credential="",
             test_provider_factory=lambda *_args: None,
         )
@@ -267,7 +267,7 @@ async def test_execution_rejects_unknown_budget_before_review_or_reservation(tmp
     with pytest.raises(OperationAdmissionError, match="actual spend"):
         await factory._execute_prepared(
             quote=_fixture_quote(),
-            openapi={"endpoint": "blackforestlabs/flux-3/text-to-image"},
+            openapi=_fixture_openapi(),
             credential="",
             test_provider_factory=lambda *_args: None,
         )
@@ -278,6 +278,9 @@ async def test_execution_rejects_unknown_budget_before_review_or_reservation(tmp
 def test_successor_test_composition_recovers_remote_id_once_in_fresh_processes(tmp_path):
     """Same Executor/ledger/reviewer orchestration, with only local TEST transport."""
     authority = _qualified_test_authority(tmp_path)
+    (tmp_path / "official-openapi.json").write_bytes(
+        (Path(__file__).parents[1] / "fixtures" / "fal_flux3_queue_openapi_20261106.json").read_bytes()
+    )
     script = tmp_path / "successor_child.py"
     script.write_text(
         '''
@@ -299,7 +302,7 @@ counts_path = root / "fixture-counts.json"
 counts = json.loads(counts_path.read_text()) if counts_path.exists() else {"posts": 0, "gets": 0}
 quote = {"schema":"FAL_AUTHENTICATED_PRICE_CONSUMER_SNAPSHOT/2","endpoint_id":"blackforestlabs/flux-3/text-to-image","currency":"USD","maximum_usd":"0.048","unit_price_usd":"0.048","provider_unit":"image","semantic_unit":"FLAT_1K_SINGLE_IMAGE","quantity":1,"api_url":"https://api.fal.ai/v1/models/pricing","raw_sanitized_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observed_at_epoch":0,"provider_expiry":"UNKNOWN_NOT_ASSERTED","price_validity":"LOCAL_OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_EXPIRY"}
 quote["observed_at_epoch"] = int(time.time())
-openapi = {"endpoint":"blackforestlabs/flux-3/text-to-image"}
+openapi = json.loads((root / "official-openapi.json").read_text(encoding="utf-8"))
 class FixtureTransport:
     mode = "TEST"
     def __init__(self, output, _schema): self.output = output
@@ -340,11 +343,12 @@ asyncio.run(main())
     assert run(tmp_path, "recover")["status"] == "COMPLETE"
     assert json.loads((tmp_path / "fixture-counts.json").read_text()) == {"posts": 1, "gets": 1}
     from src.hybrid.standing_budget import StandingBudgetLedger
-    ledger = StandingBudgetLedger(tmp_path / "ledger" / "standing.sqlite3", policy_sha256=_sha(tmp_path / "standing-policy" / "JACO_GENESIS28_STANDING_OPERATION_POLICY.v1.json"), episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
+    ledger = StandingBudgetLedger(tmp_path / "ledger" / "standing-budget.sqlite3", policy_sha256=_sha(tmp_path / "standing-policy" / "JACO_GENESIS28_STANDING_OPERATION_POLICY.v1.json"), episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
     with ledger._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
     unknown_root = tmp_path / "unknown"
     unknown_authority = _qualified_test_authority(unknown_root)
+    (unknown_root / "official-openapi.json").write_bytes((tmp_path / "official-openapi.json").read_bytes())
     authority = unknown_authority
     assert run(unknown_root, "unknown")["status"] == "CRASHED"
     assert run(unknown_root, "unknown")["status"] == "QUARANTINED"

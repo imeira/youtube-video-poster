@@ -12,23 +12,25 @@ Do **not** modify immutable standing authority v1. Provision a versioned success
 
 - authority: `C:/HermesStudio/production/jaco-flux3/standing-policy/JACO_GEN28_STYLE_REMEDIATION_001.authority.v2.json`
 - qualification: `C:/HermesStudio/production/jaco-flux3/standing-policy/JACO_GEN28_STYLE_REMEDIATION_001.qualification.v1.json`
-- financial source: `C:/HermesStudio/production/jaco-flux3/ledger/financial-record.json`
-- shared ledger: `C:/HermesStudio/production/jaco-flux3/ledger/standing.sqlite3`
+- financial source: `C:/HermesStudio/production/jaco-flux3/financial-record-source.json`
+- shared ledger: `C:/HermesStudio/production/jaco-flux3/ledger/standing-budget.sqlite3`
 
 The current implementation accepts an authority only when it retains the closed `jaco-derived-operation-authority/v1` scope and its `canonical_ledger` binding is exactly:
 
 ```json
 {
-  "path": ".../ledger/standing.sqlite3",
+  "path": ".../ledger/standing-budget.sqlite3",
   "policy_sha256": "<current standing-policy SHA-256>",
   "financial_source": {
-    "path": ".../ledger/financial-record.json",
+    "path": ".../financial-record-source.json",
     "sha256": "<current financial-source SHA-256>"
   }
 }
 ```
 
 The financial source must exactly be the closed reconciliation record for the fixed request, USD, `10.00` episode cap, and `authorizes_generation: false`; its digest is distinct from the standing-policy digest. The qualification is closed: `schema`, `status`, `operation_id`, `episode_id`, `policy_sha256`, `preflight_sha256`, `mode`, `authorization`, `review_packet_schema` (`jaco-fal-flux3-successor-benchmark/3`), `reviewer` (`LOCAL_PROCESS_REVIEW_AUTOMATED_V1`), `ci_digest_sha256`, and `execution_code_sha256` (the current hash of `jaco_style_remediation_operation.py`; plus `consent_fixture` only for private TEST). LIVE requires `jaco-protected-deployment-qualification/v1`, `QUALIFIED`, mode `LIVE`, and `STANDING_USER_AUTHORIZATION_PROTECTED_POLICY`; it is not created by this PR and no signature is claimed.
+
+Before any qualification or credential resolution, `--verify` is a read-only deployment probe. It opens the protected policy, immutable preflight, canonical financial source, and existing ledger schema; it confirms the protected `16:9` payload geometry is in the FAL Flux 3 supported enum and returns `NEEDS_QUALIFICATION`. It does not provision authority v2, create a ledger, reserve budget, or issue network/provider calls.
 
 The operation additionally creates a closed reviewer packet and request at execution, binding request ID, endpoint, operation payload SHA-256, quote/OpenAPI hashes, the copied hash-pinned financial source, one-call limit, `UNKNOWN_UNTIL_PROVIDER_RECEIPT_OR_BILLING_RECONCILIATION`, and `NO_TEST_AS_LIVE`. The marker binds the qualification digest, request, endpoint, payload, input kind, scope, reserved value, and protected trust identity. The local reviewer is same-host independent review only, not external authority or a self-authenticating caller.
 

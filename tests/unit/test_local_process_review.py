@@ -20,7 +20,9 @@ def _write_json(path: Path, value: object) -> Path:
     return path
 
 
-def _inputs(tmp_path: Path, *, observed_at_epoch: int | None = None) -> dict[str, Path]:
+def _inputs(
+    tmp_path: Path, *, observed_at_epoch: int | None = None, aspect_ratio: str = "4:3"
+) -> dict[str, Path]:
     quote = _write_json(tmp_path / "quote.json", {
         "schema": "FAL_AUTHENTICATED_PRICE_CONSUMER_SNAPSHOT/2",
         "endpoint_id": ENDPOINT,
@@ -47,7 +49,7 @@ def _inputs(tmp_path: Path, *, observed_at_epoch: int | None = None) -> dict[str
     })
     payload = {
         "prompt": "Genesis 28 Jacó and Isaque, child-safe canonical establishing image; no text, no modern objects.",
-        "aspect_ratio": "4:3", "resolution": "1k", "output_format": "png",
+        "aspect_ratio": aspect_ratio, "resolution": "1k", "output_format": "png",
         "enable_prompt_expansion": False, "safety_tolerance": 2,
     }
     packet = {
@@ -99,6 +101,42 @@ def test_local_process_reviewer_produces_readback_verified_pass_without_provider
     assert result["isolation"]["provider_secrets_available"] is False
     assert result["isolation"]["same_host_threat_model"] == "NOT_HOSTILE_CODE_ISOLATION"
     assert result["prohibitions"] == ["NO_FAL_PAID_POST", "NO_RESERVATION", "NO_GATEWAY_OR_OTHER_EP_WRITE", "NO_TEST_AS_LIVE"]
+
+
+def test_local_process_reviewer_accepts_supported_16_9_geometry_from_packet(tmp_path):
+    """The reviewer validates the provider's enum, not an obsolete canary ratio."""
+    from src.hybrid.local_process_review import (
+        build_local_process_review_policy,
+        run_local_process_review,
+    )
+
+    paths = _inputs(tmp_path, aspect_ratio="16:9")
+    policy = build_local_process_review_policy(
+        root=tmp_path, packet_path=paths["packet"], review_request_path=paths["request"],
+        quote_path=paths["quote"], openapi_path=paths["openapi"], financial_record_path=paths["finance"],
+        output_path=tmp_path / "review-output.json", request_id=REQUEST_ID,
+        review_request_sha256=_sha(paths["request"]),
+    )
+
+    assert run_local_process_review(policy)["verdict"] == "PASS"
+
+
+def test_local_process_reviewer_rejects_geometry_absent_from_openapi_enum(tmp_path):
+    from src.hybrid.local_process_review import (
+        LocalProcessReviewError,
+        build_local_process_review_policy,
+        run_local_process_review,
+    )
+
+    paths = _inputs(tmp_path, aspect_ratio="3:1")
+    policy = build_local_process_review_policy(
+        root=tmp_path, packet_path=paths["packet"], review_request_path=paths["request"],
+        quote_path=paths["quote"], openapi_path=paths["openapi"], financial_record_path=paths["finance"],
+        output_path=tmp_path / "review-output.json", request_id=REQUEST_ID,
+        review_request_sha256=_sha(paths["request"]),
+    )
+    with pytest.raises(LocalProcessReviewError, match="payload geometry"):
+        run_local_process_review(policy)
 
 
 def test_local_process_reviewer_rejects_wrong_review_request_hash_before_policy_write(tmp_path):
