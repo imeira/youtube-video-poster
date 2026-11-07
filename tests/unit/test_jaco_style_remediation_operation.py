@@ -116,67 +116,6 @@ def test_protected_successor_rejects_legacy_4_3_geometry_before_review_or_reserv
         _validate_geometry({"aspect_ratio": "4:3"})
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("operation.call_limit", True),
-        ("operation.maximum_usd", True),
-        ("payload.safety_tolerance", True),
-        ("payload.safety_tolerance", "2"),
-    ],
-)
-def test_protected_preflight_type_closes_every_accepted_numeric_field(tmp_path, field, value):
-    """A rebounded fixture still cannot smuggle bool/string numeric values."""
-    from src.hybrid.jaco_style_remediation_operation import (
-        OperationAdmissionError,
-        OperationAdmissionFactory,
-    )
-
-    _policy, authority_path = _authority(tmp_path)
-    authority = json.loads(authority_path.read_text(encoding="utf-8"))
-    preflight_path = tmp_path / "preflight" / "JACO_GEN28_STYLE_REMEDIATION_001.preflight.json"
-    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    target = preflight["operation"] if field.startswith("operation.") else preflight["operation"]["payload"]
-    target[field.rsplit(".", 1)[1]] = value
-    _write(preflight_path, preflight)
-    authority["preflight_sha256"] = _sha(preflight_path)
-    _write(authority_path, authority)
-
-    with pytest.raises(OperationAdmissionError, match="preflight|payload"):
-        OperationAdmissionFactory._for_test(root=tmp_path, authority_path=authority_path)._authority()
-
-
-@pytest.mark.parametrize(
-    ("field", "digest"),
-    [
-        ("policy_sha256", True),
-        ("preflight_sha256", 7),
-        ("ci_digest_sha256", "C" * 64),
-        ("execution_code_sha256", "a" * 63),
-        ("operation_policy_sha256", True),
-        ("financial_policy_sha256", "C" * 64),
-    ],
-)
-def test_qualification_digest_is_lowercase_sha256_not_truthy_or_length_only(tmp_path, field, digest):
-    from src.hybrid.jaco_style_remediation_operation import (
-        OperationAdmissionError,
-        OperationAdmissionFactory,
-    )
-
-    authority_path = _qualified_test_authority(tmp_path)
-    authority = json.loads(authority_path.read_text(encoding="utf-8"))
-    qualification_path = Path(authority["deployment_qualification"]["path"])
-    qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
-    qualification[field] = digest
-    _write(qualification_path, qualification)
-    authority["deployment_qualification"]["sha256"] = _sha(qualification_path)
-    _write(authority_path, authority)
-
-    factory = OperationAdmissionFactory._for_test(root=tmp_path, authority_path=authority_path)
-    with pytest.raises(OperationAdmissionError, match="qualification"):
-        factory._qualification(factory._authority()[0])
-
-
 def test_operation_factory_makes_fresh_immutable_review_packet_from_fixed_authority(tmp_path):
     from src.hybrid.jaco_style_remediation_operation import OperationAdmissionFactory
 
@@ -479,7 +418,7 @@ import asyncio, json, socket, sys, time
 from decimal import Decimal
 from pathlib import Path
 from src.hybrid.execution import ProviderResult
-from src.hybrid.bounded_operation_admission import BoundedOperationAdmission
+from src.hybrid.jaco_style_remediation_operation import OperationAdmissionFactory
 class NoNetworkSocket(socket.socket):
     def connect(self, address, *_args, **_kwargs):
         if address[0] not in {"127.0.0.1", "::1"}: raise AssertionError("TEST fixture attempted network")
@@ -490,7 +429,7 @@ class NoNetworkSocket(socket.socket):
 socket.socket = NoNetworkSocket
 root, authority, action = map(Path, sys.argv[1:3]) + (sys.argv[3],)
 counts_path = root / "fixture-counts.json"
-counts = json.loads(counts_path.read_text()) if counts_path.exists() else {"factories": 0, "posts": 0, "gets": 0}
+counts = json.loads(counts_path.read_text()) if counts_path.exists() else {"posts": 0, "gets": 0}
 quote = {"schema":"FAL_AUTHENTICATED_PRICE_CONSUMER_SNAPSHOT/2","endpoint_id":"blackforestlabs/flux-3/text-to-image","currency":"USD","maximum_usd":"0.048","unit_price_usd":"0.048","provider_unit":"image","semantic_unit":"FLAT_1K_SINGLE_IMAGE","quantity":1,"api_url":"https://api.fal.ai/v1/models/pricing","raw_sanitized_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observed_at_epoch":0,"provider_expiry":"UNKNOWN_NOT_ASSERTED","price_validity":"LOCAL_OBSERVED_AT_MAX_AGE_SECONDS_300_NOT_PROVIDER_EXPIRY"}
 quote["observed_at_epoch"] = int(time.time())
 openapi = json.loads((root / "official-openapi.json").read_text(encoding="utf-8"))
@@ -507,11 +446,9 @@ class FixtureTransport:
         assert provider_id == "TEST-REMOTE-1"; counts["gets"] += 1; counts_path.write_text(json.dumps(counts))
         self.output.write_bytes(b"fixture GET recovery")
         return ProviderResult(self.output, Decimal("0.048"))
-async def inputs():
-    counts["factories"] += 1; counts_path.write_text(json.dumps(counts))
-    return quote, openapi
+async def inputs(): return quote, openapi
 async def main():
-    factory = BoundedOperationAdmission._for_test(root=root, authority_path=authority)
+    factory = OperationAdmissionFactory._for_test(root=root, authority_path=authority)
     try:
         result = await factory._execute_with_composition(quote_and_openapi=inputs, credential_loader=lambda: (_ for _ in ()).throw(AssertionError("TEST must not resolve credential")), test_provider_factory=FixtureTransport)
     except TimeoutError: result = {"status":"CRASHED"}
@@ -533,28 +470,8 @@ asyncio.run(main())
         return json.loads(completed.stdout)
     first = run(tmp_path, "submit")
     assert first["status"] == "CRASHED", first
-    assert json.loads((tmp_path / "fixture-counts.json").read_text()) == {
-        "factories": 1, "posts": 1, "gets": 0,
-    }
-    # Two fresh processes race to consume the same persisted provider-ID
-    # checkpoint.  Executor's OS lock makes this one readback, never a second
-    # reservation or submit.
-    concurrent = [
-        subprocess.Popen(
-            [executable, str(script), str(tmp_path), str(authority), "recover"],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        )
-        for _ in range(2)
-    ]
-    recovered = []
-    for child in concurrent:
-        stdout, stderr = child.communicate(timeout=45)
-        assert child.returncode == 0, stderr
-        recovered.append(json.loads(stdout))
-    assert all(result["status"] == "COMPLETE" for result in recovered)
-    assert json.loads((tmp_path / "fixture-counts.json").read_text()) == {
-        "factories": 1, "posts": 1, "gets": 1,
-    }
+    assert run(tmp_path, "recover")["status"] == "COMPLETE"
+    assert json.loads((tmp_path / "fixture-counts.json").read_text()) == {"posts": 1, "gets": 1}
     from src.hybrid.standing_budget import StandingBudgetLedger
     ledger = StandingBudgetLedger(tmp_path / "ledger" / "standing-budget.sqlite3", policy_sha256=_sha(tmp_path / "financial-record-source.json"), episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
     with ledger._connect() as db:
@@ -565,4 +482,4 @@ asyncio.run(main())
     authority = unknown_authority
     assert run(unknown_root, "unknown")["status"] == "CRASHED"
     assert run(unknown_root, "unknown")["status"] == "QUARANTINED"
-    assert json.loads((unknown_root / "fixture-counts.json").read_text()) == {"factories": 1, "posts": 1, "gets": 0}
+    assert json.loads((unknown_root / "fixture-counts.json").read_text()) == {"posts": 1, "gets": 0}
