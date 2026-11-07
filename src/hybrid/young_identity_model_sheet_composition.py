@@ -109,7 +109,8 @@ class YoungIdentityModelSheetComposition:
             raise CompositionError("authority cap does not bind operation")
         return {"authority": authority, "operation": operation, "financial_sha": source_sha, "cost": cost}
 
-    async def execute(self, provider_factory):
+    async def execute(self, provider_factory, *, settlement_consumer=None,
+                      settlement_window=None):
         manifest = self.manifest(); operation = manifest["operation"]; cost = manifest["cost"]
         ledger = StandingBudgetLedger(self.root / "ledger.sqlite3", policy_sha256=manifest["financial_sha"], episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
         # Executor's existing TEST admission contract fixes the runtime scope;
@@ -128,7 +129,24 @@ class YoungIdentityModelSheetComposition:
             executor.prepare_intent(job, auth_scope=scope)
             ledger.reserve(job.request_id, manifest["authority"]["predecessor_operation_id"], operation["endpoint"], str(cost), settlement_mode="FAL_READBACK_V2", auth_scope=scope, authority_mode="TEST")
             executor._change(job.request_id, final_admission_marker=marker_for(job))
-        return await executor.run(job, provider_factory(self.root / "provider-result.bin"), settlement_checkpoint=lambda lid, rid: ledger.bind_provider_request_id(lid, rid), submit_prepared=True)
+        completed = await executor.run(
+            job,
+            provider_factory(self.root / "provider-result.bin"),
+            settlement_checkpoint=lambda lid, rid: ledger.bind_provider_request_id(lid, rid),
+            submit_prepared=True,
+        )
+        if settlement_consumer is None and settlement_window is None:
+            return completed
+        if settlement_consumer is None or not isinstance(settlement_window, tuple) or len(settlement_window) != 2:
+            raise CompositionError("TEST settlement requires consumer and exact window")
+        # Reconciliation owns GET-only billing parsing and authenticated claim
+        # settlement.  This composition never constructs a credential or a
+        # transport, so a caller can supply only the existing TEST fixture.
+        from src.hybrid.billing_reconciler import FalLedgerSettlementService
+        settlement = await FalLedgerSettlementService(
+            ledger, executor, settlement_consumer,
+        ).reconcile(job.request_id, start=settlement_window[0], end=settlement_window[1])
+        return {**completed, "settlement": settlement}
 
     def audit(self) -> dict[str, int]:
         ledger = StandingBudgetLedger(self.root / "ledger.sqlite3", policy_sha256=self.manifest()["financial_sha"], episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="TEST")
