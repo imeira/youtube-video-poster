@@ -377,9 +377,15 @@ class DurableEpisodeWorker:
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if done:
+                    no_claim = False
                     for completed in done:
                         in_flight.remove(completed)
-                        completed.result()
+                        no_claim = completed.result() is None or no_claim
+                    if no_claim and not stop.is_set():
+                        try:
+                            await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
+                        except TimeoutError:
+                            pass
         finally:
             for invocation in in_flight:
                 invocation.cancel()
