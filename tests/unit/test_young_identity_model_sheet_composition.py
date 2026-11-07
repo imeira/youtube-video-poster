@@ -22,11 +22,54 @@ def _fixture(root):
     operation = {"id": "JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001", "kind": "MODEL_SHEET", "endpoint": "blackforestlabs/flux-3/text-to-image", "call_limit": 1, "maximum_usd": "0.048", "payload": {"prompt": "closed fixture", "aspect_ratio": "16:9"}, "payload_sha256": ""}
     operation["payload_sha256"] = sha256(json.dumps(operation["payload"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     preflight = _write(root / "preflight.json", {"operation": operation, "replay_prohibition": True})
-    policy = _write(root / "policy.json", {"canonical_consent": {"consent_message_id": 147620}})
+    policy = _write(root / "policy.json", {"schema": "jaco-young-identity-test-standing-policy/v1", "status": "TEST_ONLY", "episode_id": "JACO_GENESIS28", "canonical_consent": {"consent_message_id": 147620}, "financial_baseline": {"currency": "USD", "total_episode_cap": "10.00"}})
     financial = _write(root / "financial.json", {"currency": "USD", "total_episode_cap": "10.00"})
     psha, fsha = sha256(policy.read_bytes()).hexdigest(), sha256(financial.read_bytes()).hexdigest()
     authority = _write(root / "authority.json", {"schema": "jaco-derived-operation-authority/v1", "status": "TEST_ONLY", "operation_id": operation["id"], "predecessor_operation_id": "JACO_GEN28_STYLE_REMEDIATION_001", "executor_predecessor_request_id": "", "executor_category": "first", "policy_path": str(policy), "policy_sha256": psha, "preflight_path": str(preflight), "preflight_sha256": sha256(preflight.read_bytes()).hexdigest(), "financial_source": {"path": str(financial), "sha256": fsha}, "financial_policy_sha256": fsha, "maximum_next_cost_usd": "0.048", "mode": "TEST"})
     return authority
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation, refresh_policy_hash", [
+    pytest.param(lambda policy: {"canonical_consent": {"consent_message_id": 147620}}, True, id="minimal-policy-reproducer"),
+    pytest.param(lambda policy: {key: value for key, value in policy.items() if key != "financial_baseline"}, True, id="missing-financial-baseline"),
+    pytest.param(lambda policy: {**policy, "status": "LIVE"}, True, id="wrong-policy-status"),
+    pytest.param(lambda policy: {**policy, "episode_id": "FOREIGN_EPISODE"}, True, id="foreign-episode"),
+    pytest.param(lambda policy: {**policy, "financial_baseline": {"currency": "USD", "total_episode_cap": "9.99"}}, True, id="foreign-financial-baseline"),
+    pytest.param(lambda policy: {**policy, "status": True}, True, id="boolean-status"),
+    pytest.param(lambda policy: {**policy, "canonical_consent": {"consent_message_id": True}}, True, id="boolean-consent-id"),
+    pytest.param(lambda policy: {**policy, "unexpected": "field"}, True, id="unknown-policy-key"),
+    pytest.param(lambda policy: policy, False, id="invalid-authority-policy-hash"),
+    pytest.param(lambda policy: {**policy, "status": "TEST_ONLY "}, False, id="changed-policy-with-stale-hash"),
+])
+async def test_invalid_standing_policy_rejects_before_executor_ledger_or_provider_factory(tmp_path, monkeypatch, mutation, refresh_policy_hash):
+    """Every invalid policy, including the review reproducer, fails before side effects."""
+    import src.hybrid.young_identity_model_sheet_composition as composition_module
+    from src.hybrid.young_identity_model_sheet_composition import (
+        CompositionError,
+        YoungIdentityModelSheetComposition,
+    )
+
+    authority = _fixture(tmp_path)
+    policy_path = tmp_path / "policy.json"
+    policy = json.loads(policy_path.read_text())
+    authority_body = json.loads(authority.read_text())
+    mutated = mutation(policy)
+    _write(policy_path, mutated)
+    if refresh_policy_hash:
+        authority_body["policy_sha256"] = sha256(policy_path.read_bytes()).hexdigest()
+    elif mutated == policy:
+        authority_body["policy_sha256"] = "A" * 64
+    _write(authority, authority_body)
+
+    side_effects = []
+    monkeypatch.setattr(composition_module, "Executor", lambda *args, **kwargs: side_effects.append("executor"))
+    monkeypatch.setattr(composition_module, "StandingBudgetLedger", lambda *args, **kwargs: side_effects.append("ledger"))
+    with pytest.raises(CompositionError):
+        await YoungIdentityModelSheetComposition.for_test(tmp_path, authority).execute(
+            lambda output: side_effects.append("provider")
+        )
+    assert side_effects == []
 
 
 @pytest.mark.asyncio

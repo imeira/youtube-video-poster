@@ -18,6 +18,8 @@ from src.hybrid.standing_budget import StandingBudgetLedger
 
 OPERATION_ID = "JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001"
 ENDPOINT = "blackforestlabs/flux-3/text-to-image"
+EPISODE_ID = "JACO_GENESIS28"
+STANDING_POLICY_SCHEMA = "jaco-young-identity-test-standing-policy/v1"
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -50,6 +52,27 @@ def _cost(value: object) -> Decimal:
     return result
 
 
+def _valid_standing_policy(policy: dict[str, Any], financial: dict[str, Any]) -> bool:
+    """Validate the complete TEST-only standing policy, not just its consent ID."""
+    if set(policy) != {
+        "schema", "status", "episode_id", "canonical_consent", "financial_baseline",
+    }:
+        return False
+    consent = policy["canonical_consent"]
+    baseline = policy["financial_baseline"]
+    return (
+        policy["schema"] == STANDING_POLICY_SCHEMA
+        and policy["status"] == "TEST_ONLY"
+        and policy["episode_id"] == EPISODE_ID
+        and isinstance(consent, dict)
+        and set(consent) == {"consent_message_id"}
+        and type(consent["consent_message_id"]) is int
+        and consent["consent_message_id"] == 147620
+        and isinstance(baseline, dict)
+        and baseline == financial
+    )
+
+
 class YoungIdentityModelSheetComposition:
     _TEST_CONSTRUCTION_TOKEN = object()
 
@@ -76,7 +99,7 @@ class YoungIdentityModelSheetComposition:
         policy, psha = _load(policy_path); preflight, fsha = _load(preflight_path); source, source_sha = _load(self.root / "financial.json")
         if (not all(_hash(authority[k]) for k in ("policy_sha256", "preflight_sha256", "financial_policy_sha256")) or not _hash(financial["sha256"]) or authority["policy_sha256"] != psha or authority["preflight_sha256"] != fsha or financial["sha256"] != source_sha or authority["financial_policy_sha256"] != source_sha or authority["financial_policy_sha256"] == psha):
             raise CompositionError("financial and operation roots must be distinct hashes")
-        if policy.get("canonical_consent", {}).get("consent_message_id") != 147620 or source != {"currency": "USD", "total_episode_cap": "10.00"}:
+        if source != {"currency": "USD", "total_episode_cap": "10.00"} or not _valid_standing_policy(policy, source):
             raise CompositionError("standing consent or financial scope invalid")
         operation = preflight.get("operation")
         if not isinstance(operation, dict) or set(operation) != {"id", "kind", "endpoint", "call_limit", "maximum_usd", "payload", "payload_sha256"} or operation.get("id") != OPERATION_ID or operation.get("endpoint") != ENDPOINT or type(operation.get("call_limit")) is not int or operation["call_limit"] != 1 or not isinstance(operation.get("maximum_usd"), str) or not isinstance(operation.get("kind"), str) or not operation["kind"] or not isinstance(operation.get("payload"), dict) or not _hash(operation.get("payload_sha256")) or sha256(_canonical(operation["payload"])).hexdigest() != operation["payload_sha256"] or preflight.get("replay_prohibition") is not True:
