@@ -106,3 +106,17 @@ and the fresh catalog/model-price comparison. That path remains unimplemented
 and is intentionally not called by this review policy. Post-generation visual QA
 is a separate pixel-based review and can never be self-approved by this
 pre-generation reviewer.
+
+## Episode operation compiler and quality-remediation successor
+
+`EpisodeExecutionPolicyCompiler` is the sole compiler for the next Jacó image operation. It consumes immutable bytes for the consumed FLUX 3 packet/receipt, the FAIL PNG, its `NOT_PROMOTED` QA receipt, and the EP8 F001 approved manifest/reference. It produces one closed successor, `JACO_GEN28_STYLE_REMEDIATION_001`, with a one-call maximum of USD 0.048 and no reservation or dispatch side effect.
+
+The compiler preserves the rejected candidate as `PERMANENTLY_REJECTED_NOT_REUSABLE`; it cannot become an approved asset, reference, or promotion fallback. The replacement prompt fixes the recorded defects rather than asserting a model-capability failure: it requires the manifest-approved EP8 child-stylized 3D illustrative style, forbids realistic/cinematic photorealism and duplicated angels, and requires an unambiguous ascent/descent reading with integrated stairs.
+
+The USD 10 is an **episode-total** cap. The compiler calculates `actual_spend + pending + next_operation_maximum`; it never treats USD 10 as a per-job cap and creates no budget reservation until a later authenticated operation admission. The previously consumed one-call mandate is retained as evidence only. Canonical-history direction to evaluate within the existing ceiling establishes planning scope, not a deployable provider capability or a fresh operation authorization. A missing trusted successor authority is reported precisely as `VALIDATED_PRE_DISPATCH_BLOCKED_MISSING_OPERATION_AUTHORIZATION`—it must not be replaced by an invented TTL, TEST root, caller boolean, or reused canary receipt.
+
+The only routine human media gates remain `thumbnail` then `final_video`, each bound to delivered media hashes and Telegram readback. Publication stays `EXPLICIT_SEPARATE_COMMAND_REQUIRED`; neither this successor policy nor either media acceptance permits publication.
+
+### Negative acceptance coverage
+
+The compiler/validator must reject: a foreign request, any apparent USD-cap amendment/collision, TEST-root dispatch, operation-ID replay, and promotion or reuse of the rejected source asset. `write_preflight` uses exclusive binary creation and exact-byte readback; replay cannot overwrite an operation receipt.
