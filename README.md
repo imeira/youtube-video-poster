@@ -1,5 +1,9 @@
 # Hybrid AI Animation Studio
 
+The Young Identity Model Sheet production composition is implemented but
+**unprovisioned**. Its tests exercise only hermetic TEST transport; they do not
+imply LIVE authority, provider authorization, or a verified actual cost.
+
 ## Offline EP8 finishing
 
 Import the current EP8 authority into a separate workspace without changing the

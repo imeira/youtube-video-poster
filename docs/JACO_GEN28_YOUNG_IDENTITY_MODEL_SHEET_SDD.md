@@ -1,9 +1,20 @@
 # Young Identity Model Sheet composition SDD
 
-`JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001` is a separate TEST fixture
-composition. It reuses `Executor` and `StandingBudgetLedger`; it does not
-alter the protected-root operation factory or introduce another authority,
-ledger, runner, credential, or provisioning path.
+`JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001` remains a separate TEST fixture
+composition. `JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_002` is its separately
+named production successor in `young_identity_model_sheet_production.py`.
+It uses the existing `Executor` and `StandingBudgetLedger` with a protected
+qualification, fresh cap-bound quote, fixed FAL provider, and durable recovery.
+
+## Production status: unprovisioned
+
+The LIVE code is implemented, but no authority, protected qualification,
+preflight, or deployment root for operation `_002` is provisioned in this
+repository. CI and tests use only the private TEST fixture; passing them does
+not grant authority, establish price as verified actual cost, reserve a LIVE
+budget, or authorize a provider POST. An independently issued, hash-bound LIVE
+qualification is required before the public `execute()` route can pass its
+first gate.
 
 ## Exact admission field map
 
