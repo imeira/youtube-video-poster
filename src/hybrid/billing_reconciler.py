@@ -64,11 +64,26 @@ class JacoFinalAdmissionContractVerifier:
         "reserved_usd", "trust_identity",
     })
 
-    def __init__(self, *, root, execution_root) -> None:
+    def __init__(
+        self, *, root, execution_root, style_authority_path=None,
+        style_qualification_path=None, style_policy_path=None,
+        financial_source_path=None, style_authority_sha256=None, execution_code_path=None,
+    ) -> None:
         from pathlib import Path
 
         self.root = Path(root).resolve()
         self.execution_root = Path(execution_root).resolve()
+        style_paths = (style_authority_path, style_qualification_path, style_policy_path, financial_source_path)
+        if any(path is not None for path in style_paths) and not all(path is not None for path in style_paths):
+            raise TypeError("complete typed style-remediation contract paths required")
+        self.style_authority_path = Path(style_authority_path).resolve() if style_authority_path else None
+        self.style_qualification_path = Path(style_qualification_path).resolve() if style_qualification_path else None
+        self.style_policy_path = Path(style_policy_path).resolve() if style_policy_path else None
+        self.financial_source_path = Path(financial_source_path).resolve() if financial_source_path else None
+        if self.style_authority_path is not None and (not isinstance(style_authority_sha256, str) or not _HASH.fullmatch(style_authority_sha256)):
+            raise TypeError("pinned style-remediation authority hash required")
+        self.style_authority_sha256 = style_authority_sha256
+        self.execution_code_path = Path(execution_code_path).resolve() if execution_code_path else None
 
     @staticmethod
     def _document(path, label: str) -> tuple[dict, str]:
@@ -136,6 +151,9 @@ class JacoFinalAdmissionContractVerifier:
         return mandate, mandate_sha, authorization, authorization_sha, policy
 
     def verify(self, receipt: dict, binding: dict, claim: dict) -> None:
+        if self._is_style_scope(binding.get("auth_scope") if isinstance(binding, dict) else None):
+            self._verify_style_remediation(receipt, binding, claim)
+            return
         mandate, mandate_sha, authorization, authorization_sha, _policy = self._policy_contract()
         final_receipt, _ = self._document(
             self.execution_root / "final-admission-receipt.json", "receipt"
@@ -187,10 +205,74 @@ class JacoFinalAdmissionContractVerifier:
         ):
             raise SettlementDenied("final-admission binding mismatch")
 
+    def _is_style_scope(self, scope: object) -> bool:
+        return (
+            self.style_authority_path is not None and isinstance(scope, str)
+            and scope.startswith("JACO_GEN28_STYLE_REMEDIATION_001:")
+        )
+
+    def _verify_style_remediation(self, receipt: dict, binding: dict, claim: dict) -> None:
+        """Verify the already-submitted successor, never a caller-selected operation."""
+        assert self.style_authority_path and self.style_qualification_path
+        assert self.style_policy_path and self.financial_source_path
+        authority, authority_sha = self._document(self.style_authority_path, "style authority")
+        qualification, qualification_sha = self._document(self.style_qualification_path, "style qualification")
+        policy, policy_sha = self._document(self.style_policy_path, "standing policy")
+        financial, financial_sha = self._document(self.financial_source_path, "financial source")
+        operation = "JACO_GEN28_STYLE_REMEDIATION_001"
+        local_id = "27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052"
+        remote_id = "01a1b4a6-65e9-7e31-815f-1726452a3693"
+        endpoint = "blackforestlabs/flux-3/text-to-image"
+        ledger = authority.get("canonical_ledger")
+        consent = policy.get("canonical_consent") if isinstance(policy, dict) else None
+        marker = receipt.get("final_admission_marker") if isinstance(receipt, dict) else None
+        expected_scope = f"{operation}:{policy_sha}"
+        if (
+            authority_sha != self.style_authority_sha256
+            or authority.get("schema") != "jaco-derived-operation-authority/v1"
+            or authority.get("status") != "READY_FOR_INDEPENDENT_PARENT_REVIEW_NO_RESERVATION_NO_POST"
+            or authority.get("operation_id") != operation or authority.get("episode_id") != "JACO_GENESIS28"
+            or authority.get("policy_sha256") != policy_sha
+            or not isinstance(ledger, dict) or ledger.get("financial_policy_sha256") != financial_sha
+            or not isinstance(financial, dict) or financial.get("currency") != "USD"
+            or policy.get("schema") != "jaco-standing-episode-operation-policy/v1"
+            or policy.get("episode_id") != "JACO_GENESIS28" or not isinstance(consent, dict)
+            or not isinstance(consent.get("session_id"), str) or not consent["session_id"]
+            or type(consent.get("consent_message_id")) is not int
+            or type(consent.get("prompt_message_id")) is not int
+            or qualification.get("schema") != "jaco-protected-deployment-qualification/v2"
+            or qualification.get("status") != "QUALIFIED" or qualification.get("operation_id") != operation
+            or qualification.get("episode_id") != "JACO_GENESIS28" or qualification.get("mode") != "LIVE"
+            or qualification.get("authorization") != "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY"
+            or qualification.get("policy_sha256") != policy_sha
+            or qualification.get("operation_policy_sha256") != policy_sha
+            or qualification.get("financial_policy_sha256") != financial_sha
+            or (self.execution_code_path is not None and qualification.get("execution_code_sha256") != sha256(self.execution_code_path.read_bytes()).hexdigest())
+            or not isinstance(receipt, dict) or receipt.get("receipt_schema") != 2
+            or receipt.get("request_id") != local_id or receipt.get("scene") != operation
+            or receipt.get("endpoint") != endpoint or receipt.get("mode") != "LIVE"
+            or receipt.get("input_contract") != {"schema": 1, "input_kind": "TEXT_TO_IMAGE", "payload_sha256": marker.get("payload_sha256") if isinstance(marker, dict) else None}
+            or not isinstance(marker, dict)
+            or marker != {"schema": 2, "kind": "JACO_STYLE_REMEDIATION_QUALIFICATION_MARKER", "qualification_sha256": qualification_sha, "request_id": local_id, "endpoint": endpoint, "payload_sha256": marker.get("payload_sha256"), "input_kind": "TEXT_TO_IMAGE", "auth_scope": expected_scope, "reserved_usd": "0.048", "trust_identity": "PROTECTED_DEPLOYMENT_QUALIFICATION"}
+            or not isinstance(marker.get("payload_sha256"), str) or not _HASH.fullmatch(marker["payload_sha256"])
+            or binding != {"schema": 2, "local_request_id": local_id, "provider_request_id": remote_id, "endpoint_id": endpoint, "auth_scope": expected_scope, "authority_mode": "LIVE"}
+            or not isinstance(claim, dict) or claim.get("request_id") != local_id
+            or claim.get("episode_id") != "JACO_GENESIS28" or claim.get("provider") != endpoint
+            or claim.get("reserved_usd") != "0.048000" or claim.get("state") != "RESERVED"
+            or claim.get("actual_usd") is not None or claim.get("settlement_mode") != "FAL_READBACK_V2"
+            or claim.get("auth_scope") != expected_scope or claim.get("provider_request_id") != remote_id
+            or claim.get("authority_mode") != "LIVE" or claim.get("currency", "USD") != "USD"
+        ):
+            raise SettlementDenied("final-admission style-remediation binding mismatch")
+
     def scope(self) -> str:
         """Return the single exact scope after reopening protected policy."""
         _mandate, mandate_sha, _authorization, _authorization_sha, _policy = self._policy_contract()
         return f"JACO_FLUX3_FINAL_ADMISSION:{mandate_sha}"
+
+    def matches_scope(self, scope: object) -> bool:
+        """Identify either explicitly provisioned Jacó settlement authority."""
+        return isinstance(scope, str) and (self._is_style_scope(scope) or scope == self.scope())
 
 
 def _canonical_hash(document: dict) -> str:
@@ -314,12 +396,9 @@ class FalLedgerSettlementService:
         if receipt.get("mode") == "TEST":
             expected_scope = "TEST_LOCAL_ONLY"
         elif receipt.get("mode") == "LIVE":
-            jaco_scope = (
-                self.jaco_final_admission_verifier.scope()
-                if self.jaco_final_admission_verifier is not None else None
-            )
-            if binding["auth_scope"] == jaco_scope:
-                expected_scope = jaco_scope
+            jaco_scope = self.jaco_final_admission_verifier
+            if jaco_scope is not None and jaco_scope.matches_scope(binding["auth_scope"]):
+                expected_scope = binding["auth_scope"]
             else:
                 authorization = receipt.get("authorization")
                 if not isinstance(authorization, dict) or authorization.get("request_id") != local_request_id:
@@ -367,7 +446,7 @@ class FalLedgerSettlementService:
             raise SettlementDenied("standing-ledger settlement binding mismatch")
         if (
             self.jaco_final_admission_verifier is not None
-            and binding["auth_scope"] == self.jaco_final_admission_verifier.scope()
+            and self.jaco_final_admission_verifier.matches_scope(binding["auth_scope"])
         ):
             self.jaco_final_admission_verifier.verify(receipt, binding, claim)
         transport_authority = getattr(self.consumer._transport, "authority", None)

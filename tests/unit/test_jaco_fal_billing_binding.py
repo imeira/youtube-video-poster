@@ -158,3 +158,83 @@ def test_jaco_contract_verifier_rejects_wrong_claim_currency_amount_and_settleme
         bad_claim[key] = value
         with pytest.raises(SettlementDenied, match="final-admission"):
             verifier.verify(receipt, binding, bad_claim)
+
+
+def test_jaco_contract_verifier_admits_only_the_typed_style_remediation_successor(tmp_path):
+    """The successor must not fall through to the generic LIVE binding path."""
+    from src.hybrid.billing_reconciler import JacoFinalAdmissionContractVerifier
+
+    operation = "JACO_GEN28_STYLE_REMEDIATION_001"
+    local_id = "27ef6a66be109984c208daa6e053e4a9d4f51a0202b46d624ea964336f74d052"
+    remote_id = "01a1b4a6-65e9-7e31-815f-1726452a3693"
+    policy_sha = "4" * 64
+    financial_sha = "9" * 64
+    payload_sha = "a" * 64
+    authority = {
+        "schema": "jaco-derived-operation-authority/v1",
+        "status": "READY_FOR_INDEPENDENT_PARENT_REVIEW_NO_RESERVATION_NO_POST",
+        "operation_id": operation, "episode_id": "JACO_GENESIS28",
+        "policy_sha256": policy_sha, "preflight_sha256": "p" * 64,
+        "canonical_ledger": {"financial_policy_sha256": financial_sha},
+    }
+    authority_sha = _write(tmp_path / f"{operation}.authority.v2.json", authority)
+    qualification = {
+        "schema": "jaco-protected-deployment-qualification/v2", "status": "QUALIFIED",
+        "operation_id": operation, "episode_id": "JACO_GENESIS28", "mode": "LIVE",
+        "authorization": "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY",
+        "policy_sha256": policy_sha, "operation_policy_sha256": policy_sha,
+        "financial_policy_sha256": financial_sha, "preflight_sha256": "p" * 64,
+    }
+    qualification_sha = _write(tmp_path / f"{operation}.qualification.v2.json", qualification)
+    policy = {"schema": "jaco-standing-episode-operation-policy/v1", "episode_id": "JACO_GENESIS28",
+              "canonical_consent": {"session_id": "canonical", "consent_message_id": 1, "prompt_message_id": 0}}
+    policy_sha = _write(tmp_path / "JACO_GENESIS28_STANDING_OPERATION_POLICY.v1.json", policy)
+    financial = {"schema": "jaco-factory-financial-reconciliation/1", "currency": "USD"}
+    financial_sha = _write(tmp_path / "financial-record-source.json", financial)
+    authority["policy_sha256"] = policy_sha
+    authority["canonical_ledger"]["financial_policy_sha256"] = financial_sha
+    authority_sha = _write(tmp_path / f"{operation}.authority.v2.json", authority)
+    qualification.update({"policy_sha256": policy_sha, "operation_policy_sha256": policy_sha,
+                          "financial_policy_sha256": financial_sha})
+    qualification_sha = _write(tmp_path / f"{operation}.qualification.v2.json", qualification)
+    execution = tmp_path / "execution"; execution.mkdir()
+    marker = {
+        "schema": 2, "kind": "JACO_STYLE_REMEDIATION_QUALIFICATION_MARKER",
+        "qualification_sha256": qualification_sha, "request_id": local_id, "endpoint": ENDPOINT,
+        "payload_sha256": payload_sha, "input_kind": "TEXT_TO_IMAGE",
+        "auth_scope": f"{operation}:{policy_sha}", "reserved_usd": "0.048",
+        "trust_identity": "PROTECTED_DEPLOYMENT_QUALIFICATION",
+    }
+    receipt = {"receipt_schema": 2, "request_id": local_id, "scene": operation,
+               "endpoint": ENDPOINT, "mode": "LIVE",
+               "input_contract": {"schema": 1, "input_kind": "TEXT_TO_IMAGE", "payload_sha256": payload_sha},
+               "final_admission_marker": marker}
+    binding = {"schema": 2, "local_request_id": local_id, "provider_request_id": remote_id,
+               "endpoint_id": ENDPOINT, "auth_scope": marker["auth_scope"], "authority_mode": "LIVE"}
+    claim = {"request_id": local_id, "episode_id": "JACO_GENESIS28", "provider": ENDPOINT,
+             "reserved_usd": "0.048000", "state": "RESERVED", "actual_usd": None,
+             "settlement_mode": "FAL_READBACK_V2", "auth_scope": marker["auth_scope"],
+             "provider_request_id": remote_id, "authority_mode": "LIVE", "currency": "USD"}
+
+    verifier = JacoFinalAdmissionContractVerifier(
+        root=tmp_path, execution_root=execution,
+        style_authority_path=tmp_path / f"{operation}.authority.v2.json",
+        style_qualification_path=tmp_path / f"{operation}.qualification.v2.json",
+        style_policy_path=tmp_path / "JACO_GENESIS28_STANDING_OPERATION_POLICY.v1.json",
+        financial_source_path=tmp_path / "financial-record-source.json",
+        style_authority_sha256=authority_sha,
+    )
+    assert verifier.matches_scope(marker["auth_scope"])
+    verifier.verify(receipt, binding, claim)
+
+    for mutation in (
+        lambda r, b, c: r.__setitem__("mode", "TEST"),
+        lambda r, b, c: b.__setitem__("provider_request_id", "wrong-remote"),
+        lambda r, b, c: r["input_contract"].__setitem__("payload_sha256", "f" * 64),
+        lambda r, b, c: c.__setitem__("reserved_usd", "0.047000"),
+        lambda r, b, c: c.__setitem__("currency", "EUR"),
+    ):
+        r, b, c = deepcopy(receipt), deepcopy(binding), deepcopy(claim)
+        mutation(r, b, c)
+        with pytest.raises(Exception, match="final-admission"):
+            verifier.verify(r, b, c)

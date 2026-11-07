@@ -32,6 +32,7 @@ PRIOR_ACTUAL = Decimal("0.048000")
 NEXT_CAP = Decimal("0.048000")
 APPROVED_PREFLIGHT_SHA256 = "7b4699ce1ad1379984f1c87f45d9c0896fae502cef3c276762bd56f3b230a6e4"
 APPROVED_FINANCIAL_SOURCE_SHA256 = "916e8230db47406db96cbe774b9332c00ed24cf156c66d4d91d11a213b64f50d"
+APPROVED_STYLE_AUTHORITY_SHA256 = "b7e0841a93ab2d112d7ddbfff8df2091854ccda061c7315ad8a269d654503cf9"
 FAL_FLUX3_ASPECT_RATIOS = frozenset({
     "auto", "21:9", "2:1", "16:9", "3:2", "7:5", "4:3", "5:4", "1:1",
     "4:5", "3:4", "5:7", "2:3", "9:16", "1:2",
@@ -332,6 +333,50 @@ class OperationAdmissionFactory:
         if not isinstance(stored, dict) or stored.get("policy_sha256") != financial_policy_sha:
             raise OperationAdmissionError("canonical ledger does not bind financial source")
         return ledger_path, financial_policy_sha, financial_source
+
+    def billing_settlement_service(self, consumer):
+        """Compose GET-only settlement for the one already-reserved successor.
+
+        The caller supplies only the bounded billing consumer.  All operation,
+        execution, ledger, policy and qualification paths are protected here;
+        this function cannot reserve, submit, or choose an operation.
+        """
+        from src.hybrid.billing_reconciler import (
+            FalLedgerSettlementService,
+            JacoFinalAdmissionContractVerifier,
+        )
+        from src.hybrid.execution import Executor
+        from src.hybrid.planner import Config
+        from src.hybrid.standing_budget import StandingBudgetLedger
+
+        authority, _policy, _preflight = self._authority()
+        qualification = self._qualification(authority)
+        if qualification["mode"] != "LIVE":
+            raise OperationAdmissionError("production billing requires LIVE qualification")
+        ledger_path, financial_policy_sha, _financial = self._canonical_ledger_binding(authority)
+        execution = self.root / "execution" / OPERATION_ID
+        executor_path = execution / "executor.sqlite3"
+        if not executor_path.is_file():
+            raise OperationAdmissionError("protected successor executor receipt is unavailable")
+        verifier = JacoFinalAdmissionContractVerifier(
+            root=self.root,
+            execution_root=execution,
+            style_authority_path=self.authority_path,
+            style_qualification_path=self.root / "standing-policy" / "JACO_GEN28_STYLE_REMEDIATION_001.qualification.v2.json",
+            style_policy_path=self.root / "standing-policy" / POLICY_PATH.name,
+            financial_source_path=self.root / FINANCIAL_SOURCE_PATH.name,
+            style_authority_sha256=APPROVED_STYLE_AUTHORITY_SHA256,
+            execution_code_path=Path(__file__),
+        )
+        ledger = StandingBudgetLedger(
+            ledger_path, policy_sha256=financial_policy_sha, episode_limit_usd="10",
+            month_limit_usd="10", experiment_limit_usd="10", mode="LIVE",
+        )
+        executor = Executor(executor_path, Config(limit=Decimal(10)), standing_ledger=ledger)
+        return FalLedgerSettlementService(
+            ledger, executor, consumer,
+            jaco_final_admission_verifier=verifier,
+        )
 
     def _review_for_execution(
         self, quote: dict[str, Any], openapi: dict[str, Any], financial_source: dict[str, Any]
