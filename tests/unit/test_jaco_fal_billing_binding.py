@@ -225,6 +225,7 @@ def test_jaco_contract_verifier_admits_only_the_typed_style_remediation_successo
         style_authority_sha256=authority_sha,
     )
     assert verifier.matches_scope(marker["auth_scope"])
+    assert not verifier.matches_scope(f"{operation}:{'f' * 64}")
     verifier.verify(receipt, binding, claim)
 
     for mutation in (

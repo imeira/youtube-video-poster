@@ -206,10 +206,11 @@ class JacoFinalAdmissionContractVerifier:
             raise SettlementDenied("final-admission binding mismatch")
 
     def _is_style_scope(self, scope: object) -> bool:
-        return (
-            self.style_authority_path is not None and isinstance(scope, str)
-            and scope.startswith("JACO_GEN28_STYLE_REMEDIATION_001:")
-        )
+        """Accept only the one protected operation scope, never a prefix."""
+        if self.style_policy_path is None or not isinstance(scope, str):
+            return False
+        _policy, policy_sha = self._document(self.style_policy_path, "standing policy")
+        return scope == f"JACO_GEN28_STYLE_REMEDIATION_001:{policy_sha}"
 
     def _verify_style_remediation(self, receipt: dict, binding: dict, claim: dict) -> None:
         """Verify the already-submitted successor, never a caller-selected operation."""
@@ -271,8 +272,12 @@ class JacoFinalAdmissionContractVerifier:
         return f"JACO_FLUX3_FINAL_ADMISSION:{mandate_sha}"
 
     def matches_scope(self, scope: object) -> bool:
-        """Identify either explicitly provisioned Jacó settlement authority."""
-        return isinstance(scope, str) and (self._is_style_scope(scope) or scope == self.scope())
+        """Identify the composition's one explicitly provisioned authority."""
+        if not isinstance(scope, str):
+            return False
+        if self.style_authority_path is not None:
+            return self._is_style_scope(scope)
+        return scope == self.scope()
 
 
 def _canonical_hash(document: dict) -> str:
