@@ -526,7 +526,10 @@ class YoungIdentityModelSheetProduction:
                 self._review_for_execution(quote, openapi, _financial_source), quote, openapi, _financial_source,
             )
         job = Job(OPERATION_ID, authority["executor_category"], qualification["mode"], ENDPOINT, preflight["operation"]["payload"], None, CAP, predecessor=authority["executor_predecessor_request_id"], input_kind="TEXT_TO_IMAGE")
-        scope = "TEST_LOCAL_ONLY" if qualification["mode"] == "TEST" else f"{OPERATION_ID}:{authority['policy_sha256']}"; marker_path = execution / "protected-qualification.json"
+        scope = "TEST_LOCAL_ONLY" if qualification["mode"] == "TEST" else f"{OPERATION_ID}:{authority['policy_sha256']}"
+        amended = "technical_deployment_amendment" in qualification
+        marker_path = execution / ("protected-qualification.v3.json" if amended else "protected-qualification.json")
+        selection_path = execution / "protected-qualification.selection.v1.json"
         def marker_for(bound):
             return {"schema": 2, "kind": "JACO_FLUX3_FINAL_ADMISSION_MARKER", "receipt_path": str(marker_path), "receipt_sha256": sha256(marker_path.read_bytes()).hexdigest(), "request_id": bound.request_id, "endpoint": ENDPOINT, "payload_sha256": bound.intent_input_sha256, "input_kind": "TEXT_TO_IMAGE", "auth_scope": scope, "reserved_usd": "0.048", "trust_identity": "YOUNG_IDENTITY_MODEL_SHEET_PROTECTED_QUALIFICATION"}
         def verify(bound, marker, claim):
@@ -546,6 +549,20 @@ class YoungIdentityModelSheetProduction:
                     raise ProductionAdmissionError("pre-POST qualification marker changed")
             else:
                 _write_once(marker_path, qualification)
+            if amended:
+                selection = {
+                    "schema": 1, "kind": "JACO_TECHNICAL_QUALIFICATION_SELECTION",
+                    "prior_marker_path": str(execution / "protected-qualification.json"),
+                    "prior_marker_sha256": qualification["technical_deployment_amendment"]["prior_qualification_bytes_sha256"],
+                    "selected_marker_path": str(marker_path),
+                    "selected_marker_sha256": sha256(marker_path.read_bytes()).hexdigest(),
+                }
+                if selection_path.exists():
+                    persisted_selection, _ = _load(selection_path, "qualification selection")
+                    if persisted_selection != selection:
+                        raise ProductionAdmissionError("pre-POST qualification selection changed")
+                else:
+                    _write_once(selection_path, selection)
             executor.prepare_intent(job, auth_scope=scope); claim = ledger.reserve(job.request_id, authority["predecessor_operation_id"] or EPISODE_ID, ENDPOINT, str(CAP), settlement_mode="FAL_READBACK_V2", auth_scope=scope, provider_request_id="UNASSIGNED", authority_mode=qualification["mode"])
             if claim.get("state") != "RESERVED": raise ProductionAdmissionError("canonical reservation rejected")
             executor._change(job.request_id, final_admission_marker=marker_for(job))
@@ -589,6 +606,7 @@ class YoungIdentityModelSheetProduction:
             allowed = {
                 "executor.sqlite3", "executor.sqlite3-shm", "executor.sqlite3-wal",
                 ".executor.sqlite3.init.lock", "protected-qualification.json",
+                "protected-qualification.v3.json", "protected-qualification.selection.v1.json",
             }
             unexpected = {
                 path.name for path in execution.iterdir()
@@ -656,6 +674,24 @@ class YoungIdentityModelSheetProduction:
         if claim_rows:
             raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
 
+    def _pre_post_marker_snapshot(self, execution: Path, qualification: dict[str, Any]) -> None:
+        """Allow a versioned marker only when its immutable predecessor survives."""
+        if "technical_deployment_amendment" not in qualification:
+            return
+        amendment = qualification["technical_deployment_amendment"]
+        old_marker = execution / "protected-qualification.json"
+        new_marker = execution / "protected-qualification.v3.json"
+        pointer = execution / "protected-qualification.selection.v1.json"
+        if not old_marker.is_file() or new_marker.exists() or pointer.exists():
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+        prior, prior_sha = _load(old_marker, "prior protected qualification marker")
+        if prior_sha != amendment["prior_qualification_bytes_sha256"]:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+        # The on-disk old marker remains in place.  The later v3 marker and
+        # selector are write-once successors; neither path is replaced.
+        if prior.get("execution_code_sha256") != amendment["prior_execution_code_sha256"]:
+            raise ProductionAdmissionError("ambiguous execution checkpoint blocks retry")
+
     async def _execute_with_composition(self, *, quote_and_openapi, credential_loader=None, test_provider_factory=None):
         authority, _, preflight = self._authority(); qualification = self._qualification(authority)
         ledger_path, financial_sha, _ = self._ledger_binding(authority)
@@ -673,6 +709,7 @@ class YoungIdentityModelSheetProduction:
             ).request_id
             scope = "TEST_LOCAL_ONLY" if qualification["mode"] == "TEST" else f"{OPERATION_ID}:{authority['policy_sha256']}"
             self._pre_post_ledger_snapshot(ledger_path, financial_sha, qualification["mode"], expected_id, scope)
+            self._pre_post_marker_snapshot(execution, qualification)
         if phase == "RECOVERY":
             # A durable executor means recovery only: no fresh price/OpenAPI or
             # reviewer subprocess. Missing/invalid checkpoint state fails in the
