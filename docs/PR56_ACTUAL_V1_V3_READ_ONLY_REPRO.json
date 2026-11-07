@@ -1,0 +1,19 @@
+{
+  "schema": "pr56-actual-v1-v3-read-only-repro/1",
+  "candidate_sha256": "19c14b3c1023bfdadc4654e8201a6e94a55c818c85166a2415fdf4e64bee3b70",
+  "candidate_bytes": 2619,
+  "palette_sha256": "fbc76f2a6ad3dddb28feb6027f68c19ba7f70d3a64ad943657013d03a97e4e60",
+  "canonical_verifier": "src.hybrid.jaco_flux3_production._validate_canonical_v1_transcript",
+  "authority_stage": "PASS",
+  "policy_schema": "jaco-standing-episode-operation-policy/v1",
+  "preflight_schema": "jaco-episode-operation-preflight/v3",
+  "validation_stage": "MISSING_QUALIFICATION",
+  "qualification_error": "protected qualification is not strict readable JSON",
+  "external_actions": {
+    "credentials": 0,
+    "ledger_writes": 0,
+    "provider_gets": 0,
+    "provider_posts": 0,
+    "reservations": 0
+  }
+}
