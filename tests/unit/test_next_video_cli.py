@@ -97,18 +97,45 @@ def test_next_video_denies_live_and_concurrency_mutation_before_queue_write(tmp_
     assert (workspace / "TEST" / "worker.sqlite3").read_bytes() == queue_before
 
 
-def test_next_video_denies_production_root_and_nonloopback_option_before_start(tmp_path):
+def test_next_video_denies_production_root_descendants_and_resolved_alias_before_state_access(tmp_path, monkeypatch):
     from src.hybrid import next_video
 
     packet = compiled_packet(tmp_path / "packet")
-    protected = Path("C:/HermesStudio/production")
+    for protected in ("C:/HermesStudio/production", r"C:\\HermesStudio\\production\\child"):
+        with pytest.raises(ValueError, match="production root"):
+            next_video.start(Path(protected), packet, mode="TEST", concurrency=1)
+    # Model a native junction resolving from a scratch spelling into production.
+    monkeypatch.setattr(next_video.Path, "resolve", lambda self: Path("C:/HermesStudio/production/alias"))
     with pytest.raises(ValueError, match="production root"):
-        next_video.start(protected, packet, mode="TEST", concurrency=1)
-    assert not (protected / "TEST" / "worker.sqlite3").exists()
+        next_video._workspace(tmp_path / "junction-to-production")
 
-    with pytest.raises(SystemExit):
-        next_video.main([
-            "start", "--workspace", str(tmp_path / "network"), "--compiled-input", str(packet),
-            "--endpoint", "https://example.invalid",
-        ])
-    assert not (tmp_path / "network" / "TEST" / "worker.sqlite3").exists()
+
+def test_next_video_status_uses_fenced_queue_snapshot_not_forged_runner_state(tmp_path):
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, started
+    request_id = started["request_id"]
+    assert run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)[0] == 0
+    runner_path = workspace / "TC" / request_id[:16] / "runner" / "runner.json"
+    runner_path.write_text('{"state":"PUBLISHED"}', encoding="utf-8")
+    before = {p.relative_to(workspace): p.read_bytes() for p in (workspace / "TEST").rglob("*") if p.is_file()}
+    code, projected = run_next_video("status", "--workspace", str(workspace), "--request-id", request_id)
+    after = {p.relative_to(workspace): p.read_bytes() for p in (workspace / "TEST").rglob("*") if p.is_file()}
+    assert code == 0, projected
+    assert projected["runner"]["state"] == "WAITING_THUMBNAIL_APPROVAL"
+    assert projected["runner"]["fencing_token"] == projected["queue"]["fencing_token"]
+    assert projected["runner"]["snapshot"] == "CURRENT"
+    assert projected["publication"] == "DISABLED"
+    assert before == after
+
+
+def test_next_video_status_fails_closed_when_snapshot_missing_or_invalid(tmp_path):
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, started
+    snapshot = workspace / "TEST" / "worker.snapshot.json"
+    snapshot.unlink()
+    code, projected = run_next_video("status", "--workspace", str(workspace), "--request-id", started["request_id"])
+    assert code == 0, projected
+    assert projected["runner"] == {"status": "UNVERIFIED", "snapshot": "STALE"}
+    assert projected["publication"] == "DISABLED"

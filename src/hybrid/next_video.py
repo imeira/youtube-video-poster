@@ -9,12 +9,12 @@ import argparse
 import asyncio
 import json
 import os
+from hashlib import sha256
 from pathlib import Path
 
 from src.hybrid.autonomous import _atomic_json
 from src.hybrid.autonomous_cli import (
     _compiled_root,
-    _compiled_status,
     _fixture_worker_handler,
     _load_compiled,
     _serve_test_host,
@@ -37,13 +37,25 @@ def _concurrency(value: int) -> int:
     return value
 
 
+def _windows_path(value: Path | str) -> str:
+    """Normalize a path spelling solely for the pre-open Windows root policy."""
+    return str(value).replace("\\", "/").rstrip("/").casefold()
+
+
+def _is_production_path(value: Path | str) -> bool:
+    protected = "c:/hermesstudio/production"
+    candidate = _windows_path(value)
+    return candidate == protected or candidate.startswith(protected + "/")
+
+
 def _workspace(value: Path | str) -> Path:
-    """Reject the literal production root before any state or packet access."""
-    literal = str(value).replace("\\", "/").rstrip("/").casefold()
-    if literal == "c:/hermesstudio/production":
+    """Deny production spellings before resolve and resolved aliases before use."""
+    if _is_production_path(value):
         raise ValueError("next-video TEST facade rejects the production root")
+    # Resolve is required to detect a native junction alias, but only after the
+    # literal Windows production root and every descendant spelling was denied.
     workspace = Path(value).resolve()
-    if workspace.as_posix().rstrip("/").casefold() == "c:/hermesstudio/production":
+    if _is_production_path(workspace):
         raise ValueError("next-video TEST facade rejects the production root")
     return workspace
 
@@ -109,11 +121,39 @@ def start(workspace: Path, packet: Path, *, mode: str, concurrency: int) -> dict
     }
 
 
+def _runner_status_from_queue(metadata: dict, queue: dict) -> dict:
+    """Project runner state only from the hash-validated writer snapshot.
+
+    ``runner.json`` is deliberately not opened here: it is mutable caller state
+    and cannot establish a status authority for a read-only CLI.
+    """
+    if queue.get("snapshot") != "CURRENT" or queue.get("status") == "UNAVAILABLE":
+        return {"status": "UNVERIFIED", "snapshot": "STALE"}
+    if queue.get("episode_id") != metadata["episode_id"] or queue.get("kind") != "compiled":
+        return {"status": "UNVERIFIED", "snapshot": "STALE"}
+    snapshot_hash = queue.get("snapshot_sha256")
+    generation = queue.get("generated_at_utc")
+    fence = queue.get("fencing_token")
+    state = queue.get("state")
+    if (not isinstance(snapshot_hash, str) or len(snapshot_hash) != 64
+            or not isinstance(generation, str) or not isinstance(state, str)
+            or fence is not None and type(fence) is not int):
+        return {"status": "UNVERIFIED", "snapshot": "STALE"}
+    identity = sha256(
+        (metadata["request_id"] + "\0" + metadata["episode_id"] + "\0" + metadata["compiled_sha256"]).encode("utf-8")
+    ).hexdigest()
+    return {
+        "status": "VERIFIED_LOCAL_STATUS_ONLY", "snapshot": "CURRENT",
+        "snapshot_sha256": snapshot_hash, "generation": generation,
+        "identity_sha256": identity, "fencing_token": fence, "state": state,
+    }
+
+
 def status(workspace: Path, request_id: str) -> dict:
     workspace, request_id = _workspace(workspace), _request_id(request_id)
     metadata = _metadata(workspace, request_id)
     queue = EpisodeTaskQueue.read_status(_queue_path(workspace), metadata["episode_id"])
-    runner = _compiled_status(_compiled_root(workspace, request_id), request_id)
+    runner = _runner_status_from_queue(metadata, queue)
     return {
         "mode": "TEST", "request_id": request_id, "episode_id": metadata["episode_id"],
         "concurrency": metadata["concurrency"], "queue": queue, "runner": runner,

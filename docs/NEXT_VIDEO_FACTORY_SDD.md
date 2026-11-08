@@ -26,6 +26,10 @@ O runner associado usa seus estados fechados já existentes, incluindo `WAITING_
 
 Antes de cada mutação da fila, o writer publica `WRITER_IN_PROGRESS`; após commit, publica snapshot `CURRENT`. O resultado de cada submit, QA e render permanece nos receipts hash-bound do runner/pipeline. `status` lê somente o snapshot JSON da fila e a projeção compilada de arquivos; não abre SQLite, WAL ou cria estado.
 
+Antes de qualquer `resolve`, abertura, criação de diretório, fila ou pacote, a fachada normaliza a grafia nativa Windows e nega `C:\\HermesStudio\\production` e **todo descendente**, sem diferença de maiúsculas/minúsculas e aceitando barras normais ou invertidas. Em seguida ela resolve uma única vez para detectar alias/junction: qualquer alias que resolva para essa raiz ou descendente também é negado antes de traversal ou open. Testes usam somente strings de policy ou um alias mockado para scratch; nunca acessam a árvore real de produção.
+
+`status` não lê `runner.json`, nem abre SQLite/WAL. Ele reutiliza exclusivamente o snapshot JSON fechado do writer da fila: valida hash canônico, freshness, identidade do episódio/tipo compiled, generation e fencing token. A projeção inclui `identity_sha256`, `snapshot_sha256`, generation e fence apenas quando o snapshot é `CURRENT`; snapshot ausente, stale ou inválido retorna `runner={"status":"UNVERIFIED","snapshot":"STALE"}` e não inclui estado caller-controlled. `publication` é sempre `DISABLED`.
+
 ## Ownership, recuperação e ambiguidade
 
 `DurableEpisodeWorker` conserva a ordem `episode lease -> runner ownership -> request ownership`. Resume usa o mesmo queue task e o mesmo adapter. Em processo novo, o handler reabre a cópia de pacote, runner, executor, receipts e QA; bytes ou hash divergentes falham antes de reutilização. Um receipt completo não é submetido novamente. Queda após COMPLETE executa somente a continuação elegível; queda após QA não repete QA/provider.
