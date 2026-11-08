@@ -264,6 +264,27 @@ def _construct_service(snapshot: _Snapshot, credential: str) -> FalLedgerSettlem
     return FalLedgerSettlementService(ledger, executor, FalBillingConsumer(AiohttpFalBillingClient(credential)), jaco_final_admission_verifier=_verifier(snapshot.factory, authority, snapshot.execution))
 
 
+def _canonical_media_paths(execution: Path) -> tuple[Path, Path]:
+    """Return the only safe companion and raster paths before either is opened."""
+    from src.hybrid import young_identity_model_sheet_production as production
+
+    expected_receipt = execution / "provider-receipt.json"
+    expected_media = execution / "provider-receipt.quarantine.png"
+    try:
+        safe_execution = production._safe_path(execution, "canonical recovery execution")
+        receipt = production._safe_path(expected_receipt, "canonical provider receipt companion")
+        media = production._safe_path(expected_media, "canonical quarantined media")
+    except (OSError, ValueError, ProductionAdmissionError) as exc:
+        raise ProductionAdmissionError("durable quarantined model-sheet media is unavailable") from exc
+    if (
+        safe_execution != execution.absolute()
+        or receipt != expected_receipt.absolute()
+        or media != expected_media.absolute()
+    ):
+        raise ProductionAdmissionError("durable quarantined model-sheet media is unavailable")
+    return receipt, media
+
+
 def validate_model_sheet_completion(executor_db_path, ledger_path, job, result) -> None:
     """Reopen the one protected model-sheet completion before any executor write.
 
@@ -292,7 +313,7 @@ def validate_model_sheet_completion(executor_db_path, ledger_path, job, result) 
     if supplied_media != expected_media.absolute():
         raise PermissionError("repository-owned completion validation requires fixed canonical quarantine path")
     try:
-        canonical_media = production._safe_path(expected_media, "canonical quarantined media")
+        _receipt_path, canonical_media = _canonical_media_paths(execution)
     except ProductionAdmissionError as exc:
         raise PermissionError("repository-owned completion validation requires fixed canonical quarantine path") from exc
     if canonical_media != expected_media.absolute():
@@ -328,9 +349,8 @@ def validate_model_sheet_completion(executor_db_path, ledger_path, job, result) 
 async def _recover_after_settlement(snapshot: _Snapshot) -> dict:
     """Complete from canonical settlement and quarantined bytes; no provider call."""
     authority, _policy, preflight = snapshot.factory._authority()
-    receipt_path = snapshot.execution / "provider-receipt.json"
-    media = snapshot.execution / "provider-receipt.quarantine.png"
     try:
+        receipt_path, media = _canonical_media_paths(snapshot.execution)
         provider_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         media_sha256 = sha256(media.read_bytes()).hexdigest()
     except (OSError, ValueError, json.JSONDecodeError) as exc:
