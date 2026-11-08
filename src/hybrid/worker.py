@@ -158,7 +158,12 @@ class EpisodeTaskQueue:
             return {"status": "UNAVAILABLE", "snapshot": "STALE", "reason": "episode task is not queued"}
         # This verifies byte integrity only.  It is intentionally a local status
         # projection, never approval, provider, billing, or publication authority.
-        return {key: value for key, value in row.items() if key != "root"} | {"snapshot": "CURRENT", "authority": "LOCAL_STATUS_ONLY"}
+        return {key: value for key, value in row.items() if key != "root"} | {
+            "snapshot": "CURRENT",
+            "snapshot_sha256": supplied_hash,
+            "generated_at_utc": document["generated_at_utc"],
+            "authority": "LOCAL_STATUS_ONLY",
+        }
 
     def _row(self, episode_id):
         with self._db() as db:

@@ -350,6 +350,7 @@ class DirectorAgent:
         policy_document: dict,
         *,
         ownership_assertion=None,
+        provider_concurrency: int = 1,
     ):
         """Attach an existing TEST compiled pipeline to the durable runner.
 
@@ -388,6 +389,7 @@ class DirectorAgent:
             executor,
             ledger,
             ownership_assertion=ownership_assertion,
+            provider_concurrency=provider_concurrency,
         )
         config = self.__dict__.get("config")
         return AutonomousCompiledTestAdapter(

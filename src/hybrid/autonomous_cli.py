@@ -36,6 +36,14 @@ TEST_COMPILED_PROVIDER = "test-local-fixture"
 TEST_COMPILED_COST = Decimal("0.01")
 
 
+def _start_checkpoint(_name: str) -> None:
+    """Acceptance tests may monkeypatch this in-process hook to simulate death.
+
+    It deliberately has no CLI option or environment toggle, so production
+    invocation cannot request a crash path.
+    """
+
+
 def parse_prompt(prompt):
     lines, fields = prompt.splitlines(), {}
     for line in lines[1:]:
@@ -127,6 +135,32 @@ class FixtureProvider:
                 raise RuntimeError("TEST fixture POST counter is invalid")
             _atomic_json(counter, {"posts": previous["posts"] + 1})
 
+    def _record_benchmark_event(self, event: str, scene: str) -> None:
+        """Emit bounded TEST-fixture timing evidence only when explicitly enabled."""
+        raw = os.environ.get("HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON")
+        if raw is None:
+            return
+        latencies = json.loads(raw)
+        if not isinstance(latencies, dict) or scene not in latencies:
+            raise RuntimeError("explicit TEST fixture latency map is invalid")
+        path = self.root / "fixture-events.jsonl"
+        with file_lock(self.root / "fixture-events.lock"):
+            previous = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+            record = {"sequence": len(previous) + 1, "event": event, "scene": scene, "monotonic_s": time.monotonic()}
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _test_latency(scene: str) -> float:
+        raw = os.environ.get("HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON")
+        if raw is None:
+            return 0.0
+        values = json.loads(raw)
+        value = values.get(scene) if isinstance(values, dict) else None
+        if type(value) not in {int, float} or value < 0 or value > 5:
+            raise RuntimeError("explicit TEST fixture latency must be bounded")
+        return float(value)
+
     def _image_result(self, job, rid):
         out = self.root / f"{rid}.TEST.png"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -141,7 +175,9 @@ class FixtureProvider:
     async def submit(self, job, rid, checkpoint):
         self.root.mkdir(parents=True, exist_ok=True)
         self._record_test_post()
+        self._record_benchmark_event("submit_started", job.scene)
         checkpoint(provider_id="TEST-" + rid[:12])
+        await asyncio.sleep(self._test_latency(job.scene))
         # Acceptance-only fault injection. It is unreachable without the
         # explicit TEST host flag and never constructs a network provider.
         if os.environ.get("HYBRID_TEST_CRASH_AFTER_CHECKPOINT") == "1":
@@ -159,8 +195,11 @@ class FixtureProvider:
                 ],
                 check=True,
             )
-            return ProviderResult(out, job.cost)
-        return self._image_result(job, rid)
+            result = ProviderResult(out, job.cost)
+        else:
+            result = self._image_result(job, rid)
+        self._record_benchmark_event("submit_completed", job.scene)
+        return result
 
     async def recover(self, job, rid, provider_id, partial, checkpoint):
         if provider_id != "TEST-" + rid[:12] or partial:
@@ -457,7 +496,7 @@ def _compiled_status(root: Path, rid: str) -> dict:
     }
 
 
-def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None):
+def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None, provider_concurrency: int = 1):
     from src.agents.director import DirectorAgent
     from src.hybrid.compiled import CompiledEpisode, OperationalPipeline
 
@@ -499,10 +538,16 @@ def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None):
     # Never pass packet bytes as authority into the factory after validation.
     factory_args = (pipeline, runner_workspace, compiled_policy_document())
     if ownership_assertion is None:
-        adapter = director.create_autonomous_compiled_test_adapter(*factory_args)
+        if provider_concurrency == 1:
+            adapter = director.create_autonomous_compiled_test_adapter(*factory_args)
+        else:
+            adapter = director.create_autonomous_compiled_test_adapter(
+                *factory_args, provider_concurrency=provider_concurrency
+            )
     else:
         adapter = director.create_autonomous_compiled_test_adapter(
-            *factory_args, ownership_assertion=ownership_assertion
+            *factory_args, ownership_assertion=ownership_assertion,
+            provider_concurrency=provider_concurrency,
         )
     # The runner state is another untrusted read.  Guard it after the factory
     # has selected only the internal TEST adapter and immediately before load.
@@ -512,7 +557,16 @@ def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None):
 
 def _compiled_image_qa(reject_scene: str | None = None):
     def verdict(receipt):
-        return {"approved": receipt["request"]["scene"] != reject_scene, "reviewer": "TEST local image assertion (not human)", "reviewer_identity": {"subject": "TEST-local-image-qa", "issuer": "TEST assertion, not human approval"}, "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": ["TEST_LOCAL_ASSERTION"]}
+        scene = receipt["request"]["scene"]
+        raw = os.environ.get("HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON")
+        if raw is not None:
+            provider_root = Path(receipt["result"]).parent
+            event_path = provider_root / "fixture-events.jsonl"
+            with file_lock(provider_root / "fixture-events.lock"):
+                previous = event_path.read_text(encoding="utf-8").splitlines()
+                with event_path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"sequence": len(previous) + 1, "event": "qa_completed", "scene": scene, "monotonic_s": time.monotonic()}, sort_keys=True) + "\n")
+        return {"approved": scene != reject_scene, "reviewer": "TEST local image assertion (not human)", "reviewer_identity": {"subject": "TEST-local-image-qa", "issuer": "TEST assertion, not human approval"}, "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": ["TEST_LOCAL_ASSERTION"]}
     return verdict
 
 
@@ -527,24 +581,100 @@ def _stage_compiled(adapter, document):
     )
 
 
-def start_compiled(workspace: Path, packet: Path, reject_scene: str | None):
+def _compiled_start_paths(root: Path, rid: str) -> tuple[Path, Path]:
+    parent = _reject_reparse_path(root.parent)
+    return (
+        _reject_reparse_path(parent / f".{rid[:16]}.admission.lock"),
+        _reject_reparse_path(parent / f".{rid[:16]}.start-intent.json"),
+    )
+
+
+def _compiled_start_intent(root: Path, rid: str, seed: bytes, reject_scene: str | None, concurrency: int) -> dict:
+    return {
+        "schema": "compiled-start-intent/v2",
+        "request_id": rid,
+        "seed_sha256": sha256(seed).hexdigest(),
+        "reject_scene": reject_scene,
+        "provider_concurrency": concurrency,
+    }
+
+
+def _read_exact_start_intent(path: Path, expected: dict) -> dict:
+    actual = _compiled_json(_reject_reparse_path(path))
+    if not isinstance(actual, dict) or any(actual.get(key) != value for key, value in expected.items()):
+        raise ValueError("start intent does not bind this packet/mode/concurrency")
+    if actual.get("phase") not in {"ADMITTING", "READY"} or set(actual) != set(expected) | {"phase"}:
+        raise ValueError("start intent schema is invalid")
+    return actual
+
+
+def _write_start_intent(path: Path, expected: dict, phase: str) -> None:
+    _atomic_json(_reject_reparse_path(path), expected | {"phase": phase})
+
+
+def _finalize_compiled_start_locked(root: Path, rid: str, *, provider_concurrency: int, reject_scene: str | None = None) -> None:
+    """Finish an admission while its non-reentrant request lock is held."""
+    _lock_path, parent_intent = _compiled_start_paths(root, rid)
+    parent = _compiled_json(parent_intent)
+    root_document = _compiled_json(_reject_reparse_path(root / "start-intent.json"))
+    for document in (parent, root_document):
+        if (document.get("schema"), document.get("request_id"), document.get("reject_scene"), document.get("provider_concurrency")) != (
+            "compiled-start-intent/v2", rid, reject_scene, provider_concurrency
+        ):
+            raise ValueError("start intent does not bind this packet/mode/concurrency")
+    _write_start_intent(parent_intent, {key: parent[key] for key in parent if key != "phase"}, "READY")
+    _write_start_intent(root / "start-intent.json", {key: root_document[key] for key in root_document if key != "phase"}, "READY")
+
+
+def finalize_compiled_start(workspace: Path, rid: str, *, provider_concurrency: int, reject_scene: str | None = None) -> None:
+    """Mark an admission ready only after its caller's durable receipts exist."""
+    root = _compiled_root(_reject_reparse_path(Path(workspace)), rid)
+    lock_path, _parent_intent = _compiled_start_paths(root, rid)
+    with file_lock(lock_path):
+        _finalize_compiled_start_locked(root, rid, provider_concurrency=provider_concurrency, reject_scene=reject_scene)
+
+
+def start_compiled(workspace: Path, packet: Path, reject_scene: str | None, *, provider_concurrency: int = 1, on_admission=None):
+    """Recover one exact TEST admission in its final namespace under one lock."""
     from src.hybrid.compiled import CompiledEpisode
 
     packet = _reject_reparse_path(Path(packet))
-    # Parse and validate the literal episode storage key before deriving a
-    # workspace path, creating a directory, or constructing any SQLite service.
     packet_files = tuple(_reject_reparse_path(packet / name) for name in COMPILED_PACKET_FILES)
     CompiledEpisode.load(packet_files[0])
     seed = b"autonomous-compiled-test-v1\0" + b"".join(path.read_bytes() for path in packet_files)
-    rid, root = sha256(seed).hexdigest(), _compiled_root(workspace, sha256(seed).hexdigest())
-    if root.exists():
-        raise ValueError("request namespace already exists; never overwrite")
-    root.mkdir(parents=True)
-    snapshot, compiled_sha = _snapshot_compiled_input(packet, root / "inputs")
-    _atomic_json(root / "compiled-harness.json", {"kind": "compiled-test", "mode": "TEST", "request_id": rid, "compiled_episode_id": CompiledEpisode.load(root / "inputs" / "compiled.json").episode_id, "input_sha256": snapshot["input_sha256"], "policy_sha256": snapshot["policy_sha256"], "compiled_sha256": compiled_sha, "source_manifest_sha256": Manifest.load(root / "inputs" / "manifest.json").checksum, "test_reject_scene": reject_scene})
-    # Reload only after metadata exists: this proves the fresh-process reconstruction contract.
-    _, adapter, _ = _load_compiled(workspace, rid)
-    document = adapter.start()
+    rid = sha256(seed).hexdigest()
+    workspace = _reject_reparse_path(Path(workspace))
+    root = _compiled_root(workspace, rid)
+    lock_path, parent_intent = _compiled_start_paths(root, rid)
+    admission = _compiled_start_intent(root, rid, seed, reject_scene, provider_concurrency)
+    with file_lock(lock_path):
+        if parent_intent.exists():
+            _read_exact_start_intent(parent_intent, admission)
+        elif root.exists():
+            raise ValueError("existing partial legacy namespace requires explicit quarantine or reconciliation")
+        else:
+            _write_start_intent(parent_intent, admission, "ADMITTING")
+        if not root.exists():
+            root.mkdir(parents=True)
+            _start_checkpoint("after_mkdir")
+        root_intent = root / "start-intent.json"
+        if root_intent.exists():
+            _read_exact_start_intent(root_intent, admission)
+        elif any(root.iterdir()):
+            raise ValueError("existing partial legacy namespace requires explicit quarantine or reconciliation")
+        else:
+            _write_start_intent(root_intent, admission, "ADMITTING")
+        harness = root / "compiled-harness.json"
+        if not harness.exists():
+            snapshot, compiled_sha = _snapshot_compiled_input(packet, root / "inputs")
+            _atomic_json(harness, {"kind": "compiled-test", "mode": "TEST", "request_id": rid, "compiled_episode_id": CompiledEpisode.load(root / "inputs" / "compiled.json").episode_id, "input_sha256": snapshot["input_sha256"], "policy_sha256": snapshot["policy_sha256"], "compiled_sha256": compiled_sha, "source_manifest_sha256": Manifest.load(root / "inputs" / "manifest.json").checksum, "test_reject_scene": reject_scene})
+        _root, adapter, document = _load_compiled(workspace, rid, provider_concurrency=provider_concurrency)
+        if document is None:
+            document = adapter.start()
+        _start_checkpoint("after_runner")
+        if on_admission is not None:
+            on_admission(root, adapter, document)
+        _finalize_compiled_start_locked(root, rid, provider_concurrency=provider_concurrency, reject_scene=reject_scene)
     return _compiled_public(root, adapter, document)
 
 
@@ -647,6 +777,10 @@ async def _fixture_worker_handler(_task: dict) -> dict:
             raise RuntimeError("configured workspace has no unique compiled runner for queue episode")
         root, adapter, document = _load_compiled(
             workspace, matches[0], ownership_assertion=_task["_lease_assertion"],
+            provider_concurrency=(
+                json.loads((_compiled_root(workspace, matches[0]) / "next-video.json").read_text(encoding="utf-8")).get("concurrency", 1)
+                if (_compiled_root(workspace, matches[0]) / "next-video.json").is_file() else 1
+            ),
         )
         if adapter.runner.episode_id != ownership.episode_id:
             raise RuntimeError("compiled runner episode identity does not match queue lease")
@@ -735,6 +869,76 @@ def _worker_episode_id(root: Path) -> str:
     return episode_id
 
 
+def _compiled_gate_receipt_path(root: Path, kind: str) -> Path:
+    if kind not in {"thumbnail", "video"}:
+        raise ValueError("compiled gate kind is invalid")
+    return root / "gate-receipts" / f"{kind}.json"
+
+
+def _write_compiled_gate_receipt(root: Path, request_id: str, document: dict, kind: str) -> None:
+    """Persist TEST gate provenance outside mutable ``runner.json``.
+
+    The runner remains operational state, so it cannot alone authorize the
+    terminal queue transition.  This receipt is only written by the leased
+    approval entrypoint after the canonical runner transition succeeded.
+    """
+    gate = document.get("gates", {}).get(kind, {})
+    media = document.get("media", {}).get(kind, {})
+    receipt = {
+        "schema": "compiled-test-gate-receipt/v1",
+        "request_id": request_id,
+        "episode_id": document.get("episode_id"),
+        "kind": kind,
+        "artifact_path": media.get("path"),
+        "artifact_sha256": media.get("sha256"),
+        "approved": gate.get("approved"),
+        "reviewer": gate.get("reviewer"),
+    }
+    if (not isinstance(receipt["episode_id"], str) or not receipt["episode_id"]
+            or not isinstance(receipt["artifact_path"], str)
+            or not isinstance(receipt["artifact_sha256"], str)
+            or receipt["approved"] is not True
+            or not isinstance(receipt["reviewer"], str) or not receipt["reviewer"].strip()):
+        raise RuntimeError("canonical TEST gate did not produce a complete receipt")
+    path = _compiled_gate_receipt_path(root, kind)
+    if path.exists():
+        if _compiled_json(_reject_reparse_path(path)) != receipt:
+            raise RuntimeError("compiled TEST gate receipt is immutable")
+        return
+    _atomic_json(path, receipt)
+    if _compiled_json(_reject_reparse_path(path)) != receipt:
+        raise RuntimeError("compiled TEST gate receipt readback mismatch")
+
+
+def validate_compiled_gate_receipts(workspace: Path, request_id: str, document: dict) -> None:
+    """Require independently persisted leased gate receipts for terminal TEST state."""
+    root = _compiled_root(_reject_reparse_path(Path(workspace)), request_id)
+    if document.get("state") != "READY_TO_PUBLISH":
+        return
+    for kind in ("thumbnail", "video"):
+        receipt = _compiled_json(_reject_reparse_path(_compiled_gate_receipt_path(root, kind)))
+        required = {
+            "schema", "request_id", "episode_id", "kind", "artifact_path",
+            "artifact_sha256", "approved", "reviewer",
+        }
+        gate = document.get("gates", {}).get(kind, {})
+        media = document.get("media", {}).get(kind, {})
+        if (set(receipt) != required
+                or receipt.get("schema") != "compiled-test-gate-receipt/v1"
+                or receipt.get("request_id") != request_id
+                or receipt.get("episode_id") != document.get("episode_id")
+                or receipt.get("kind") != kind
+                or receipt.get("approved") is not True
+                or not isinstance(receipt.get("reviewer"), str) or not receipt["reviewer"].strip()
+                or receipt.get("artifact_path") != media.get("path")
+                or receipt.get("artifact_sha256") != media.get("sha256")
+                or any(receipt.get(key) != gate.get(key) for key in ("artifact_path", "artifact_sha256", "approved", "reviewer"))):
+            raise ValueError("ready TEST terminal lacks independently persisted gate receipt")
+        artifact = _reject_reparse_path(Path(receipt["artifact_path"]))
+        if sha256(_compiled_read_bytes(artifact)).hexdigest() != receipt["artifact_sha256"]:
+            raise ValueError("ready TEST terminal gate receipt artifact bytes do not match")
+
+
 def _approve_compiled_gate(workspace: Path, request_id: str, kind: str):
     """Mutate one gate only under the queue's existing episode lease."""
     from src.hybrid.autonomous import RunnerOwnership
@@ -781,6 +985,8 @@ def _approve_compiled_gate(workspace: Path, request_id: str, kind: str):
         artifact = _reject_reparse_path(Path(gate.get("artifact_path", "")))
         if not isinstance(digest, str) or sha256(_compiled_read_bytes(artifact)).hexdigest() != digest:
             raise RuntimeError("approval receipt is not bound to the current durable artifact")
+        assert_current(ownership)
+        _write_compiled_gate_receipt(root, request_id, document, kind)
         assert_current(ownership)
         queue.wake_gate(episode_id, kind)
         return root, adapter, document
