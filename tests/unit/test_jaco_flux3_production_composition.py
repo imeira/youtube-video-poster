@@ -105,19 +105,19 @@ def _write_hermetic_production_authority(tmp_path, monkeypatch, *, assistant_rol
     return root
 
 
-def test_mandate_loader_requires_pinned_root_and_never_claims_license_verification(tmp_path):
+def test_mandate_loader_requires_pinned_root_and_never_claims_license_verification(tmp_path, monkeypatch):
     """Local operator authority is source-bound, not a caller root or fake license."""
-    from src.hybrid.jaco_flux3_production import _PROVISIONED_ROOT, _validate_mandate
+    import src.hybrid.jaco_flux3_production as production
 
     caller_root = tmp_path / "caller-root"
     caller_root.mkdir()
+    _write_hermetic_production_authority(tmp_path, monkeypatch)
     with pytest.raises(ProductionCompositionError, match="pinned deployment root"):
-        _validate_mandate(caller_root)
+        production._validate_mandate(caller_root)
 
-    pinned = _PROVISIONED_ROOT
-    if not pinned.exists():
-        pytest.skip("operator-provisioned mandate has not been materialized")
-    result = _validate_mandate(pinned)
+    # Never open the host production root—even read-only.  The test installs a
+    # complete non-secret fixture at the fixed module seam instead.
+    result = production._validate_mandate(production._PROVISIONED_ROOT)
     assert result["trust_derivation"] == "CANONICAL_USER_TRANSCRIPT_PLUS_TRUSTED_LOCAL_OPERATOR"
     assert result["license_status"] == "EVALUATION_ONLY_CONDITIONALLY_SUPPORTABLE"
     assert result["release_authorization"] == "NOT_AUTHORIZED"
