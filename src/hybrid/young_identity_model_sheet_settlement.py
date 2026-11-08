@@ -274,23 +274,35 @@ def validate_model_sheet_completion(executor_db_path, ledger_path, job, result) 
     """
     from src.hybrid import young_identity_model_sheet_production as production
 
-    root = production.ROOT.resolve()
-    execution = (root / "execution" / production.OPERATION_ID).resolve()
-    expected_executor = (execution / "executor.sqlite3").resolve()
-    expected_ledger = (root / "ledger" / "standing-budget.sqlite3").resolve()
+    root = production._safe_path(production.ROOT, "protected model-sheet root")
+    execution = root / "execution" / production.OPERATION_ID
+    expected_executor = execution / "executor.sqlite3"
+    expected_ledger = root / "ledger" / "standing-budget.sqlite3"
+    expected_media = execution / "provider-receipt.quarantine.png"
     try:
-        supplied_executor = Path(executor_db_path).resolve()
-        supplied_ledger = Path(ledger_path).resolve()
-    except (TypeError, OSError, ValueError) as exc:
+        supplied_executor = production._safe_path(Path(executor_db_path), "executor path")
+        supplied_ledger = production._safe_path(Path(ledger_path), "ledger path")
+        # Do not resolve a caller result before establishing its exact spelling:
+        # an identical copy is not the immutable quarantine evidence.
+        supplied_media = Path(result).absolute()
+    except (TypeError, OSError, ValueError, ProductionAdmissionError) as exc:
         raise PermissionError("repository-owned completion validation requires fixed canonical paths") from exc
-    if supplied_executor != expected_executor or supplied_ledger != expected_ledger:
+    if supplied_executor != production._safe_path(expected_executor, "executor path") or supplied_ledger != production._safe_path(expected_ledger, "ledger path"):
         raise PermissionError("repository-owned completion validation requires fixed canonical paths")
+    if supplied_media != expected_media.absolute():
+        raise PermissionError("repository-owned completion validation requires fixed canonical quarantine path")
+    try:
+        canonical_media = production._safe_path(expected_media, "canonical quarantined media")
+    except ProductionAdmissionError as exc:
+        raise PermissionError("repository-owned completion validation requires fixed canonical quarantine path") from exc
+    if canonical_media != expected_media.absolute():
+        raise PermissionError("repository-owned completion validation requires fixed canonical quarantine path")
     if (
         getattr(job, "scene", None) != production.OPERATION_ID
         or getattr(job, "request_id", None) != LOCAL_REQUEST_ID
         or getattr(job, "mode", None) != "LIVE"
         or getattr(job, "endpoint", None) != production.ENDPOINT
-        or sha256(Path(result).read_bytes()).hexdigest() != APPROVED_QUARANTINED_PNG_SHA256
+        or sha256(canonical_media.read_bytes()).hexdigest() != APPROVED_QUARANTINED_PNG_SHA256
     ):
         raise PermissionError("repository-owned completion validation rejects changed immutable anchors")
     snapshot = _readonly_snapshot()

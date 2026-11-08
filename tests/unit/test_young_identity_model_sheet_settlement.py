@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import sqlite3
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +33,82 @@ def test_failed_readonly_guard_never_constructs_ledger_or_resolves_credential(mo
     assert calls == []
     assert not (tmp_path / "ledger.sqlite3").exists()
     assert not (tmp_path / "executor.sqlite3").exists()
+
+
+def _live_completion_job(settlement):
+    return SimpleNamespace(
+        scene="JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001",
+        request_id=settlement.LOCAL_REQUEST_ID,
+        mode="LIVE",
+        endpoint="blackforestlabs/flux-3/text-to-image",
+    )
+
+
+def test_completion_rejects_an_identical_copy_before_opening_it(tmp_path, monkeypatch):
+    """The completion raster has one canonical protected name, never a caller path."""
+    import src.hybrid.young_identity_model_sheet_production as production
+    import src.hybrid.young_identity_model_sheet_settlement as settlement
+
+    monkeypatch.setattr(production, "ROOT", tmp_path)
+    alternate = tmp_path / "same-bytes-copy.png"
+    canonical = tmp_path / "execution" / production.OPERATION_ID / "provider-receipt.quarantine.png"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(b"canonical-fixture-media")
+    # The alternate is byte-identical to the fixture's immutable media;
+    # identity is still the canonical path, checked before any file read.
+    alternate.write_bytes(canonical.read_bytes())
+    reads = []
+    original = Path.read_bytes
+
+    def reject_alternate_read(path):
+        if path == alternate:
+            reads.append(path)
+            raise AssertionError("alternate media was opened")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_alternate_read)
+    with pytest.raises(PermissionError, match="fixed canonical quarantine path"):
+        settlement.validate_model_sheet_completion(
+            tmp_path / "execution" / production.OPERATION_ID / "executor.sqlite3",
+            tmp_path / "ledger" / "standing-budget.sqlite3",
+            _live_completion_job(settlement),
+            alternate,
+        )
+    assert reads == []
+
+
+def test_completion_rejects_a_symlink_at_the_canonical_quarantine_path_before_open(tmp_path, monkeypatch):
+    """A canonical spelling cannot conceal a symlink or Windows reparse hop."""
+    import src.hybrid.young_identity_model_sheet_production as production
+    import src.hybrid.young_identity_model_sheet_settlement as settlement
+
+    monkeypatch.setattr(production, "ROOT", tmp_path)
+    canonical = tmp_path / "execution" / production.OPERATION_ID / "provider-receipt.quarantine.png"
+    canonical.parent.mkdir(parents=True)
+    target = tmp_path / "copied-result.png"
+    target.write_bytes(b"identical-but-linked")
+    try:
+        os.symlink(target, canonical)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable in this Windows test environment: {exc}")
+    reads = []
+    original = Path.read_bytes
+
+    def reject_canonical_read(path):
+        if path == canonical:
+            reads.append(path)
+            raise AssertionError("reparse-point media was opened")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_canonical_read)
+    with pytest.raises(PermissionError, match="fixed canonical quarantine path"):
+        settlement.validate_model_sheet_completion(
+            tmp_path / "execution" / production.OPERATION_ID / "executor.sqlite3",
+            tmp_path / "ledger" / "standing-budget.sqlite3",
+            _live_completion_job(settlement),
+            canonical,
+        )
+    assert reads == []
 
 
 def test_reconcile_uses_durable_submission_timestamp_and_current_utc_end(monkeypatch):
@@ -153,6 +236,61 @@ def test_verified_settled_replay_has_no_credential_or_billing_transport(monkeypa
     assert result["status"] == "SETTLED"
     assert result["completion"]["status"] == "COMPLETE"
     assert calls == ["proof", "recovery"]
+
+
+def test_public_live_fixture_settles_then_completes_in_guarded_fresh_cli_process(tmp_path):
+    """A real v3 LIVE fixture reaches validator-backed COMPLETE without transport."""
+    import src.hybrid.young_identity_model_sheet_settlement as settlement
+
+    module = "tests.unit.test_young_identity_model_sheet_production"
+    submit = [sys.executable, "-c", f"from {module} import _amended_live_recovery_child as f; import sys; f(sys.argv[1], sys.argv[2], sys.argv[3])", str(tmp_path), "submit", settlement.REMOTE_REQUEST_ID]
+    first = subprocess.run(submit, text=True, capture_output=True, check=False, timeout=60)
+    assert first.returncode == 0, first.stderr
+    assert json.loads(first.stdout)["result"] == "CHECKPOINTED"
+
+    execution = tmp_path / "execution" / "JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001"
+    media = execution / "provider-receipt.quarantine.png"
+    media.write_bytes(b"hermetic canonical model-sheet media")
+    media_sha = sha256(media.read_bytes()).hexdigest()
+    (execution / "provider-receipt.json").write_text(json.dumps({"sha256": media_sha, "kind": "PNG_RESULT", "actual_billed_amount": "UNKNOWN_UNTIL_BILLING_RECONCILIATION"}, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    (execution / "provider-receipt.recovery.json").write_text(json.dumps({"schema": 1, "provider_request_id": settlement.REMOTE_REQUEST_ID, "status_url": f"https://queue.fal.run/blackforestlabs/flux-3/requests/{settlement.REMOTE_REQUEST_ID}/status", "response_url": f"https://queue.fal.run/blackforestlabs/flux-3/requests/{settlement.REMOTE_REQUEST_ID}"}, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    ledger_path = tmp_path / "ledger" / "standing-budget.sqlite3"
+    with sqlite3.connect(ledger_path) as db:
+        scope = db.execute("SELECT auth_scope FROM claims WHERE request_id=?", (settlement.LOCAL_REQUEST_ID,)).fetchone()[0]
+        receipt = {"schema": 2, "authority": "TRANSPORT_AUTHENTICATED_FAL_READBACK", "local_request_id": settlement.LOCAL_REQUEST_ID, "provider_request_id": settlement.REMOTE_REQUEST_ID, "endpoint_id": "blackforestlabs/flux-3/text-to-image", "auth_scope": scope, "authority_mode": "LIVE", "currency": "USD", "cost_total_micro_usd": "48000", "evidence_hash": "b" * 64, "provenance": "FAL_BILLING_READBACK"}
+        receipt_body = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        db.execute("UPDATE claims SET state='SETTLED', actual=48000 WHERE request_id=?", (settlement.LOCAL_REQUEST_ID,))
+        db.execute("INSERT INTO settlement_receipts VALUES(?,?,?,?,?)", (settlement.LOCAL_REQUEST_ID, sha256(receipt_body.encode()).hexdigest(), 48000, receipt_body, "FAL_BILLING_READBACK"))
+
+    child = """
+import sys
+from hashlib import sha256
+from pathlib import Path
+from scripts.run_offline_tests import audit
+sys.addaudithook(audit)
+root = Path(sys.argv[1])
+import src.hybrid.jaco_flux3_production as canonical
+import src.hybrid.young_identity_model_sheet_production as production
+import src.hybrid.young_identity_model_sheet_settlement as settlement
+production.ROOT = root
+production.AUTHORITY_PATH = root / 'standing-policy' / 'JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001.authority.v2.json'
+production.FINANCIAL_SHA256 = sha256((root / 'financial-record-source.json').read_bytes()).hexdigest()
+canonical._CANONICAL_STATE_DB = root / 'canonical-state.sqlite3'
+media = root / 'execution' / production.OPERATION_ID / 'provider-receipt.quarantine.png'
+settlement.APPROVED_EXECUTION_CODE_SHA256 = sha256(Path(production.__file__).read_bytes()).hexdigest()
+settlement.APPROVED_QUARANTINED_PNG_SHA256 = sha256(media.read_bytes()).hexdigest()
+with __import__('sqlite3').connect(root / 'ledger' / 'standing-budget.sqlite3') as db:
+    settlement.APPROVED_SETTLEMENT_RECEIPT_SHA256 = db.execute('SELECT receipt_sha256 FROM settlement_receipts WHERE request_id=?', (settlement.LOCAL_REQUEST_ID,)).fetchone()[0]
+raise SystemExit(settlement.main(['--reconcile']))
+"""
+    replay = subprocess.run([sys.executable, "-c", child, str(tmp_path)], text=True, capture_output=True, check=False, timeout=60, env={**os.environ, "PYTHONPATH": str(Path.cwd())})
+    assert replay.returncode == 0, replay.stderr
+    result = json.loads(replay.stdout)
+    assert result == {"completion": {"request_id": settlement.LOCAL_REQUEST_ID, "result_sha256": media_sha, "status": "COMPLETE"}, "request_id": settlement.LOCAL_REQUEST_ID, "status": "SETTLED"}
+    with sqlite3.connect(execution / "executor.sqlite3") as db:
+        row = json.loads(db.execute("SELECT data FROM jobs").fetchone()[0])
+    assert row["status"] == "COMPLETE"
+    assert row["result_sha256"] == media_sha
 
 
 def test_main_rejects_caller_selected_billing_window():

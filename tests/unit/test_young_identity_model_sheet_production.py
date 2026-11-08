@@ -743,7 +743,9 @@ def _subprocess_recovery_child(root_text: str, phase: str) -> None:
     print(json.dumps({"phase": phase, **counts, "claims": claims}))
 
 
-def _amended_live_recovery_child(root_text: str, phase: str) -> None:
+def _amended_live_recovery_child(
+    root_text: str, phase: str, remote_id: str = "amended-live-remote-1"
+) -> None:
     """Exercise the public LIVE route from disk-only v3 amendment state."""
     from hashlib import sha256
 
@@ -843,7 +845,7 @@ def _amended_live_recovery_child(root_text: str, phase: str) -> None:
 
         async def submit(self, _job, _request_id, checkpoint):
             counts["POST"] += 1; counts_path.write_text(json.dumps(counts), encoding="utf-8")
-            checkpoint(provider_id="amended-live-remote-1", partial=self.output)
+            checkpoint(provider_id=remote_id, partial=self.output)
             raise TimeoutError("controlled LIVE crash after durable remote checkpoint")
 
         async def recover(self, _job, _request_id, remote, _partial, _checkpoint):
