@@ -1007,6 +1007,10 @@ class Executor:
             self._put(db, row)
 
     def complete_settled_recovery(self, job: Job, result_path: Path):
+        """Complete only after the fixed-root model-sheet validator reopens evidence."""
+        return self._complete_verified_settled_recovery(job, result_path)
+
+    def _complete_verified_settled_recovery(self, job: Job, result_path: Path):
         """Complete a submitted job from canonical settlement and durable media only."""
         if not isinstance(job, Job):
             raise TypeError("durable Job is required")
@@ -1014,6 +1018,13 @@ class Executor:
         result = Path(result_path).resolve()
         if not result.is_file():
             raise ValueError("durable recovered media is unavailable")
+        # The validator is repository-owned and derives the canonical paths from
+        # protected configuration.  Constructor callbacks and a supplied ledger
+        # are not completion authority.
+        from src.hybrid.young_identity_model_sheet_settlement import (
+            validate_model_sheet_completion,
+        )
+        validate_model_sheet_completion(self.database, getattr(self._standing_ledger, "path", None), job, result)
         row = self.inspect(job.request_id)
         if not isinstance(row, dict):
             raise TypeError("durable executor receipt is unavailable")
@@ -1048,15 +1059,6 @@ class Executor:
         actual = money(claim.get("actual_usd"))
         if actual > job.cost:
             raise PermissionError("settled actual exceeds submitted maximum")
-        production_binding = self._jaco_production_binding
-        if production_binding != {
-            "kind": "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION",
-            "auth_scope": binding.get("auth_scope"),
-        }:
-            raise PermissionError("protected completion admission is required")
-        if self._jaco_final_admission_verifier is None:
-            raise PermissionError("protected completion admission is required")
-        self._jaco_final_admission_verifier(job, row.get("final_admission_marker"), claim)
         if row.get("status") == "COMPLETE":
             self._verify_receipt(row)
             if row.get("result_sha256") != media_sha256:

@@ -264,6 +264,55 @@ def _construct_service(snapshot: _Snapshot, credential: str) -> FalLedgerSettlem
     return FalLedgerSettlementService(ledger, executor, FalBillingConsumer(AiohttpFalBillingClient(credential)), jaco_final_admission_verifier=_verifier(snapshot.factory, authority, snapshot.execution))
 
 
+def validate_model_sheet_completion(executor_db_path, ledger_path, job, result) -> None:
+    """Reopen the one protected model-sheet completion before any executor write.
+
+    This boundary deliberately derives every durable path from repository-owned
+    fixed configuration.  It compares the supplied paths before opening either
+    database, so copied fixture databases cannot redirect validation into a
+    caller-selected ledger or production root.
+    """
+    from src.hybrid import young_identity_model_sheet_production as production
+
+    root = production.ROOT.resolve()
+    execution = (root / "execution" / production.OPERATION_ID).resolve()
+    expected_executor = (execution / "executor.sqlite3").resolve()
+    expected_ledger = (root / "ledger" / "standing-budget.sqlite3").resolve()
+    try:
+        supplied_executor = Path(executor_db_path).resolve()
+        supplied_ledger = Path(ledger_path).resolve()
+    except (TypeError, OSError, ValueError) as exc:
+        raise PermissionError("repository-owned completion validation requires fixed canonical paths") from exc
+    if supplied_executor != expected_executor or supplied_ledger != expected_ledger:
+        raise PermissionError("repository-owned completion validation requires fixed canonical paths")
+    if (
+        getattr(job, "scene", None) != production.OPERATION_ID
+        or getattr(job, "request_id", None) != LOCAL_REQUEST_ID
+        or getattr(job, "mode", None) != "LIVE"
+        or getattr(job, "endpoint", None) != production.ENDPOINT
+        or sha256(Path(result).read_bytes()).hexdigest() != APPROVED_QUARANTINED_PNG_SHA256
+    ):
+        raise PermissionError("repository-owned completion validation rejects changed immutable anchors")
+    snapshot = _readonly_snapshot()
+    if snapshot.execution.resolve() != execution or snapshot.ledger_path.resolve() != expected_ledger:
+        raise PermissionError("repository-owned completion validation rejects changed canonical paths")
+    before = _readonly_ledger_snapshot(expected_ledger)
+    _prove_settlement(snapshot, before)
+    authority, _policy, _preflight = snapshot.factory._authority()
+    verifier = _verifier(snapshot.factory, authority, execution)
+    row = _one(expected_executor, "SELECT data FROM jobs WHERE id=?", (LOCAL_REQUEST_ID,), "executor")
+    try:
+        receipt = json.loads(row[0])
+        ledger = StandingBudgetLedger(
+            expected_ledger, policy_sha256=snapshot.financial_sha256,
+            episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE",
+        )
+        settled = ledger.verified_settlement_receipt(LOCAL_REQUEST_ID)
+        verifier.verify_completion(receipt, receipt.get("settlement_binding"), settled["claim"])
+    except Exception as exc:
+        raise PermissionError("repository-owned completion validation rejects canonical evidence") from exc
+
+
 async def _recover_after_settlement(snapshot: _Snapshot) -> dict:
     """Complete from canonical settlement and quarantined bytes; no provider call."""
     authority, _policy, preflight = snapshot.factory._authority()
@@ -281,18 +330,8 @@ async def _recover_after_settlement(snapshot: _Snapshot) -> dict:
         raise ProductionAdmissionError("durable quarantined model-sheet media changed")
     ledger = StandingBudgetLedger(snapshot.ledger_path, policy_sha256=snapshot.financial_sha256,
                                   episode_limit_usd="10", month_limit_usd="10", experiment_limit_usd="10", mode="LIVE")
-    verifier = _verifier(snapshot.factory, authority, snapshot.execution)
-    holder = {}
-    def complete_verifier(job, _marker, claim):
-        row = holder["executor"].inspect(job.request_id)
-        verifier.verify_completion(row, row.get("settlement_binding"), claim)
     executor = Executor(snapshot.execution / "executor.sqlite3", Config(limit=Decimal(10)),
-                        standing_ledger=ledger, _jaco_final_admission_verifier=complete_verifier,
-                        _jaco_production_binding={
-                            "kind": "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION",
-                            "auth_scope": f"{OPERATION_ID}:{authority['policy_sha256']}",
-                        })
-    holder["executor"] = executor
+                        standing_ledger=ledger)
     job = __import__("src.hybrid.execution", fromlist=["Job"]).Job(
         OPERATION_ID, authority["executor_category"], "LIVE", preflight["operation"]["endpoint"],
         preflight["operation"]["payload"], None, Decimal("0.048"),

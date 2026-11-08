@@ -227,16 +227,60 @@ async def test_direct_executor_cannot_complete_copied_settlement_in_submitted_or
 
     executor._change(job.request_id, status="SUBMITTED")
     submitted_before = executor.inspect(job.request_id)
-    with pytest.raises(PermissionError, match="protected completion admission"):
+    with pytest.raises(PermissionError, match="repository-owned completion validation"):
         executor.complete_settled_recovery(job, media)
     assert executor.inspect(job.request_id) == submitted_before
 
     executor._change(job.request_id, status="COMPLETE", result=str(media), result_sha256=sha256(media.read_bytes()).hexdigest())
     complete_before = executor.inspect(job.request_id)
-    with pytest.raises(PermissionError, match="protected completion admission"):
+    with pytest.raises(PermissionError, match="repository-owned completion validation"):
         executor.complete_settled_recovery(job, media)
     assert executor.inspect(job.request_id) == complete_before
     assert ledger.verified_settlement_receipt(job.request_id)["claim"]["state"] == "SETTLED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", [
+    "complete_settled_recovery", "_complete_verified_settled_recovery",
+])
+async def test_completion_entrypoints_reject_copied_settled_files_even_with_constructor_lambda(
+    tmp_path, method_name,
+):
+    """Neither public nor renamed mechanics accepts caller-installed authority."""
+    from src.hybrid.billing_reconciler import FalLedgerSettlementService
+
+    executor, job, _ = await _bound_receipt(tmp_path)
+    ledger = executor._standing_ledger
+    await FalLedgerSettlementService(
+        ledger,
+        executor,
+        FalBillingConsumer(LoopbackFalBillingFixture(
+            pricing_pages=[], billing_pages=[{
+                "billing_events": [_event(job.request_id, job.endpoint)],
+                "next_cursor": None, "has_more": False,
+            }],
+        )),
+        clock=lambda: END,
+    ).reconcile(job.request_id, start=START, end=END)
+    media = tmp_path / "known-binding-copied-media.png"
+    media.write_bytes(b"fixture bytes")
+    executor._change(job.request_id, status="SUBMITTED")
+    copied = Executor(
+        tmp_path / "copied-executor.sqlite3", Config(limit=Decimal(1)),
+        standing_ledger=ledger,
+        _jaco_final_admission_verifier=lambda *_args: None,
+        _jaco_production_binding={
+            "kind": "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION",
+            "auth_scope": "TEST_LOCAL_ONLY",
+        },
+    )
+    copied.database.write_bytes(executor.database.read_bytes())
+    before = copied.inspect(job.request_id)
+
+    with pytest.raises(PermissionError, match="repository-owned completion validation"):
+        getattr(copied, method_name)(job, media)
+
+    assert copied.inspect(job.request_id) == before
 
 
 @pytest.mark.asyncio
