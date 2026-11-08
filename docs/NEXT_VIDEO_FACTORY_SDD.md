@@ -14,7 +14,7 @@ A fachada somente compõe o `Director`/pacote compilado existente, `AutonomousCo
 - manifesto, áudio, timeline e receipts reabertos/re-hashados pelos componentes compilados existentes;
 - `concurrency`: inteiro persistido, padrão `1`, intervalo fechado `1..32`.
 
-`start` rejeita namespace existente em vez de sobrescrever. Ele cria o runner compilado através do Director, persiste a configuração da fachada, e enfileira a identidade do episódio. `resume`, `status` e `worker` recebem o request ID literal SHA-256; nunca procuram um episódio por texto, tema ou nome de personagem.
+`start` grava primeiro um intent hash-bound e toma um lock exclusivo por request. O intent recupera cada fase no mesmo namespace final (sem mover artefatos com caminhos absolutos): snapshot, harness, runner, metadados públicos e `enqueue` idempotente. Somente depois de todos os receipts duráveis o intent fica `READY`. Um namespace legado/parcial sem esse intent falha fechado e exige quarentena/reconciliação explícita; nunca é sobrescrito silenciosamente. `resume`, `status` e `worker` recebem o request ID literal SHA-256; nunca procuram um episódio por texto, tema ou nome de personagem.
 
 ## Estados fechados e transições
 

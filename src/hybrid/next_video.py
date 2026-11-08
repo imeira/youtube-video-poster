@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import ntpath
 import os
+import re
 from hashlib import sha256
 from pathlib import Path
 
@@ -18,6 +20,8 @@ from src.hybrid.autonomous_cli import (
     _fixture_worker_handler,
     _load_compiled,
     _serve_test_host,
+    _start_checkpoint,
+    finalize_compiled_start,
     start_compiled,
 )
 from src.hybrid.worker import DurableEpisodeWorker, EpisodeTaskQueue
@@ -38,8 +42,20 @@ def _concurrency(value: int) -> int:
 
 
 def _windows_path(value: Path | str) -> str:
-    """Normalize a path spelling solely for the pre-open Windows root policy."""
-    return str(value).replace("\\", "/").rstrip("/").casefold()
+    """Return one supported lexical Windows spelling before any filesystem I/O."""
+    raw = str(value)
+    slash = raw.replace("/", "\\")
+    # Device namespaces and UNC shares have semantics this TEST-only local
+    # facade does not support. Reject rather than treating an alias as ordinary.
+    if slash.startswith(("\\\\?\\", "\\\\.\\", "\\\\")):
+        raise ValueError("unsupported Windows path form")
+    drive, tail = ntpath.splitdrive(slash)
+    if drive and not tail.startswith("\\"):
+        raise ValueError("unsupported Windows path form")
+    if drive or re.match(r"^[A-Za-z]:", slash):
+        normalized = ntpath.normpath(slash)
+        return normalized.replace("\\", "/").rstrip("/").casefold()
+    return raw.replace("\\", "/").rstrip("/").casefold()
 
 
 def _is_production_path(value: Path | str) -> bool:
@@ -58,6 +74,33 @@ def _workspace(value: Path | str) -> Path:
     if _is_production_path(workspace):
         raise ValueError("next-video TEST facade rejects the production root")
     return workspace
+
+
+def _deny_terminal_publication_state(document: dict | None) -> None:
+    """Reject publication attempts; admit only hash-bound TEST gate completion."""
+    if not isinstance(document, dict):
+        raise TypeError("compiled runner state is missing or invalid")
+    if document.get("state") in {"PUBLISHED", "PUBLISH_INTENT"}:
+        raise ValueError("terminal publication state is not executable in next-video TEST mode")
+    if document.get("state") != "READY_TO_PUBLISH":
+        return
+    media, gates = document.get("media"), document.get("gates")
+    if not isinstance(media, dict) or not isinstance(gates, dict):
+        raise TypeError("ready TEST terminal lacks durable gate evidence")
+    for kind in ("thumbnail", "video"):
+        artifact, gate = media.get(kind), gates.get(kind)
+        if not isinstance(artifact, dict) or not isinstance(gate, dict):
+            raise TypeError("ready TEST terminal lacks durable gate evidence")
+        path, digest = artifact.get("path"), artifact.get("sha256")
+        if (not isinstance(path, str) or not isinstance(digest, str) or len(digest) != 64
+                or gate.get("approved") is not True or gate.get("artifact_sha256") != digest
+                or not isinstance(gate.get("reviewer"), str) or not gate["reviewer"].strip()):
+            raise ValueError("ready TEST terminal lacks durable gate evidence")
+        try:
+            if sha256(Path(path).read_bytes()).hexdigest() != digest:
+                raise ValueError("ready TEST terminal gate bytes do not match")
+        except OSError as error:
+            raise ValueError("ready TEST terminal gate artifact is unavailable") from error
 
 
 def _metadata_path(workspace: Path, request_id: str) -> Path:
@@ -110,9 +153,19 @@ def start(workspace: Path, packet: Path, *, mode: str, concurrency: int) -> dict
         "compiled_sha256": adapter.pipeline.episode.checksum,
         "policy_sha256": adapter.runner.policy.digest,
     }
-    _atomic_json(root / "next-video.json", metadata)
+    metadata_path = root / "next-video.json"
+    if metadata_path.exists():
+        if _metadata(workspace, request_id) != metadata:
+            raise ValueError("next-video metadata does not bind this start request")
+    else:
+        _atomic_json(metadata_path, metadata)
+    _start_checkpoint("after_metadata")
     queue = EpisodeTaskQueue(_queue_path(workspace))
     queued = queue.enqueue(adapter.runner.episode_id, str(workspace), "compiled")
+    _start_checkpoint("after_queue")
+    # The admission stays non-public until the snapshot, harness, runner,
+    # public metadata, and idempotent durable queue row all exist.
+    finalize_compiled_start(workspace, request_id, provider_concurrency=concurrency)
     return {
         "mode": "TEST", "request_id": request_id, "episode_id": adapter.runner.episode_id,
         "concurrency": concurrency, "queued": {key: queued[key] for key in ("status", "next_action", "state")},
@@ -170,6 +223,7 @@ def resume(workspace: Path, request_id: str, *, concurrency: int | None) -> dict
     _root, adapter, document = _load_compiled(
         workspace, request_id, provider_concurrency=metadata["concurrency"]
     )
+    _deny_terminal_publication_state(document)
     if adapter.runner.episode_id != metadata["episode_id"] or adapter.pipeline.episode.checksum != metadata["compiled_sha256"]:
         raise ValueError("next-video metadata no longer binds the compiled runner")
     # Fresh-process resume is read-only but must never report a stale cached QA
@@ -187,6 +241,15 @@ def worker(workspace: Path, request_id: str, *, once: bool, concurrency: int | N
     workspace, request_id = _workspace(workspace), _request_id(request_id)
     metadata = _metadata(workspace, request_id)
     persisted = _assert_persisted_concurrency(metadata, concurrency)
+    # Validate mutable runner state before opening or claiming the queue. A
+    # forged terminal marker must not become a DONE/TERMINAL queue projection.
+    _root, adapter, document = _load_compiled(
+        workspace, request_id, provider_concurrency=persisted
+    )
+    adapter.validate_cached_qa()
+    _deny_terminal_publication_state(document)
+    if adapter.runner.episode_id != metadata["episode_id"] or adapter.pipeline.episode.checksum != metadata["compiled_sha256"]:
+        raise ValueError("next-video metadata no longer binds the compiled runner")
     queue = EpisodeTaskQueue(_queue_path(workspace))
     worker = DurableEpisodeWorker(queue, f"next-video-{os.getpid()}", _fixture_worker_handler)
     if once:

@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,33 @@ def run_next_video(*args: str) -> tuple[int, dict]:
         check=False,
     )
     return completed.returncode, json.loads(completed.stdout)
+
+
+def run_crashing_public_start(workspace: Path, packet: Path, checkpoint: str) -> subprocess.CompletedProcess:
+    """Crash a public API call without adding a production CLI test switch."""
+    program = """
+import os
+from pathlib import Path
+from src.hybrid import autonomous_cli, next_video
+checkpoint = os.environ.pop('NEXT_VIDEO_TEST_CHECKPOINT')
+def crash(name):
+    if name == checkpoint:
+        os._exit(93)
+autonomous_cli._start_checkpoint = crash
+next_video._start_checkpoint = crash
+next_video.start(Path(os.environ.pop('NEXT_VIDEO_TEST_WORKSPACE')), Path(os.environ.pop('NEXT_VIDEO_TEST_PACKET')), mode='TEST', concurrency=1)
+"""
+    return subprocess.run(
+        [str(PYTHON), "-c", program], cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": "", "NEXT_VIDEO_TEST_CHECKPOINT": checkpoint,
+             "NEXT_VIDEO_TEST_WORKSPACE": str(workspace), "NEXT_VIDEO_TEST_PACKET": str(packet)},
+        text=True, capture_output=True, check=False,
+    )
+
+
+def queue_row_count(workspace: Path) -> int:
+    with sqlite3.connect(workspace / "TEST" / "worker.sqlite3") as db:
+        return db.execute("SELECT COUNT(*) FROM episode_tasks").fetchone()[0]
 
 
 def compiled_packet(root: Path) -> Path:
@@ -92,18 +121,75 @@ def test_next_video_denies_live_and_concurrency_mutation_before_queue_write(tmp_
     code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet), "--concurrency", "2")
     assert code == 0, started
     queue_before = (workspace / "TEST" / "worker.sqlite3").read_bytes()
+    code, conflicting_start = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet), "--concurrency", "1")
+    assert code == 1 and conflicting_start["status"] == "BLOCKED"
+    assert (workspace / "TEST" / "worker.sqlite3").read_bytes() == queue_before
     code, changed = run_next_video("resume", "--workspace", str(workspace), "--request-id", started["request_id"], "--concurrency", "1")
     assert code == 1 and changed["status"] == "BLOCKED"
     assert (workspace / "TEST" / "worker.sqlite3").read_bytes() == queue_before
+
+
+@pytest.mark.parametrize("checkpoint", ("after_mkdir", "after_runner", "after_metadata", "after_queue"))
+def test_next_video_crashed_start_recovers_exact_packet_once_without_duplicate_queue(tmp_path, checkpoint):
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    crashed = run_crashing_public_start(workspace, packet, checkpoint)
+    assert crashed.returncode == 93, (crashed.stdout, crashed.stderr)
+
+    code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, started
+    code, replayed = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, replayed
+    assert replayed["request_id"] == started["request_id"]
+    assert queue_row_count(workspace) == 1
+    code, resumed = run_next_video("resume", "--workspace", str(workspace), "--request-id", started["request_id"])
+    assert code == 0, resumed
+
+
+def test_next_video_preexisting_namespace_without_intent_fails_closed_and_preserves_it(tmp_path):
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    from src.hybrid import autonomous_cli
+
+    packet_bytes = b"autonomous-compiled-test-v1\0" + b"".join(
+        (packet / name).read_bytes() for name in autonomous_cli.COMPILED_PACKET_FILES
+    )
+    root = workspace / "TC" / sha256(packet_bytes).hexdigest()[:16]
+    root.mkdir(parents=True)
+    sentinel = root / "do-not-overwrite"
+    sentinel.write_text("preserve", encoding="utf-8")
+    code, rejected = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 1, rejected
+    assert "legacy namespace" in rejected["error"]
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
+def test_next_video_two_fresh_cli_starts_share_one_request_and_queue_row(tmp_path):
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    command = [str(PYTHON), "-m", "src.cli.main", "next-video", "start", "--workspace", str(workspace), "--compiled-input", str(packet)]
+    environment = {**os.environ, "PYTHONPATH": ""}
+    first = subprocess.Popen(command, cwd=ROOT, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    second = subprocess.Popen(command, cwd=ROOT, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    results = [process.communicate(timeout=120) for process in (first, second)]
+    assert first.returncode == second.returncode == 0, results
+    documents = [json.loads(stdout) for stdout, _stderr in results]
+    assert documents[0]["request_id"] == documents[1]["request_id"]
+    assert queue_row_count(workspace) == 1
 
 
 def test_next_video_denies_production_root_descendants_and_resolved_alias_before_state_access(tmp_path, monkeypatch):
     from src.hybrid import next_video
 
     packet = compiled_packet(tmp_path / "packet")
-    for protected in ("C:/HermesStudio/production", r"C:\\HermesStudio\\production\\child"):
+    for protected in (
+        "C:/HermesStudio/production",
+        r"C:\\HermesStudio\\production\\child",
+        "C://HermesStudio//production//child",
+        r"c:\\HermesStudio\\production\\child\\..\\child",
+    ):
         with pytest.raises(ValueError, match="production root"):
             next_video.start(Path(protected), packet, mode="TEST", concurrency=1)
+    for unsupported in (r"\\server\\share", r"\\?\\C:\\HermesStudio\\production", "C:relative"):
+        with pytest.raises(ValueError, match="Windows path"):
+            next_video._workspace(unsupported)
     # Model a native junction resolving from a scratch spelling into production.
     monkeypatch.setattr(next_video.Path, "resolve", lambda self: Path("C:/HermesStudio/production/alias"))
     with pytest.raises(ValueError, match="production root"):
@@ -127,6 +213,65 @@ def test_next_video_status_uses_fenced_queue_snapshot_not_forged_runner_state(tm
     assert projected["runner"]["snapshot"] == "CURRENT"
     assert projected["publication"] == "DISABLED"
     assert before == after
+
+
+def test_next_video_worker_rejects_forged_terminal_runner_before_done_projection(tmp_path):
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, started
+    request_id = started["request_id"]
+    runner_path = workspace / "TC" / request_id[:16] / "runner" / "runner.json"
+    document = json.loads(runner_path.read_text(encoding="utf-8"))
+    document["state"] = "PUBLISHED"
+    runner_path.write_text(json.dumps(document), encoding="utf-8")
+
+    code, rejected = run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 1, rejected
+    assert "terminal publication state" in rejected["error"]
+    code, projected = run_next_video("status", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, projected
+    assert projected["queue"]["status"] == "PENDING"
+    assert projected["queue"]["next_action"] == "RESUME"
+    assert projected["queue"]["state"] != "PUBLISHED"
+
+
+def test_next_video_worker_rejects_forged_ready_terminal_before_done_projection(tmp_path):
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, started
+    request_id = started["request_id"]
+    runner_path = workspace / "TC" / request_id[:16] / "runner" / "runner.json"
+    document = json.loads(runner_path.read_text(encoding="utf-8"))
+    document["state"] = "READY_TO_PUBLISH"
+    runner_path.write_text(json.dumps(document), encoding="utf-8")
+
+    code, rejected = run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 1, rejected
+    assert "durable gate evidence" in rejected["error"]
+    assert queue_row_count(workspace) == 1
+    code, projected = run_next_video("status", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, projected
+    assert projected["queue"]["status"] == "PENDING"
+
+
+def test_next_video_real_hash_bound_gates_reach_disabled_publication_terminal(tmp_path):
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, started
+    request_id = started["request_id"]
+    assert run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)[0] == 0
+    from src.hybrid.autonomous_cli import _approve_compiled_gate
+
+    _approve_compiled_gate(workspace, request_id, "thumbnail")
+    assert run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)[0] == 0
+    _approve_compiled_gate(workspace, request_id, "video")
+    code, terminal = run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, terminal
+    assert terminal["status"] == "DONE"
+    code, projected = run_next_video("status", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, projected
+    assert projected["queue"]["state"] == "READY_TO_PUBLISH"
+    assert projected["publication"] == "DISABLED"
 
 
 def test_next_video_status_fails_closed_when_snapshot_missing_or_invalid(tmp_path):

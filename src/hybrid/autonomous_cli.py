@@ -36,6 +36,14 @@ TEST_COMPILED_PROVIDER = "test-local-fixture"
 TEST_COMPILED_COST = Decimal("0.01")
 
 
+def _start_checkpoint(_name: str) -> None:
+    """Acceptance tests may monkeypatch this in-process hook to simulate death.
+
+    It deliberately has no CLI option or environment toggle, so production
+    invocation cannot request a crash path.
+    """
+
+
 def parse_prompt(prompt):
     lines, fields = prompt.splitlines(), {}
     for line in lines[1:]:
@@ -573,24 +581,91 @@ def _stage_compiled(adapter, document):
     )
 
 
+def _compiled_start_paths(root: Path, rid: str) -> tuple[Path, Path]:
+    parent = _reject_reparse_path(root.parent)
+    return (
+        _reject_reparse_path(parent / f".{rid[:16]}.admission.lock"),
+        _reject_reparse_path(parent / f".{rid[:16]}.start-intent.json"),
+    )
+
+
+def _compiled_start_intent(root: Path, rid: str, seed: bytes, reject_scene: str | None, concurrency: int) -> dict:
+    return {
+        "schema": "compiled-start-intent/v2",
+        "request_id": rid,
+        "seed_sha256": sha256(seed).hexdigest(),
+        "reject_scene": reject_scene,
+        "provider_concurrency": concurrency,
+    }
+
+
+def _read_exact_start_intent(path: Path, expected: dict) -> dict:
+    actual = _compiled_json(_reject_reparse_path(path))
+    if not isinstance(actual, dict) or any(actual.get(key) != value for key, value in expected.items()):
+        raise ValueError("start intent does not bind this packet/mode/concurrency")
+    if actual.get("phase") not in {"ADMITTING", "READY"} or set(actual) != set(expected) | {"phase"}:
+        raise ValueError("start intent schema is invalid")
+    return actual
+
+
+def _write_start_intent(path: Path, expected: dict, phase: str) -> None:
+    _atomic_json(_reject_reparse_path(path), expected | {"phase": phase})
+
+
+def finalize_compiled_start(workspace: Path, rid: str, *, provider_concurrency: int, reject_scene: str | None = None) -> None:
+    """Mark an admission ready only after its caller's durable receipts exist."""
+    root = _compiled_root(_reject_reparse_path(Path(workspace)), rid)
+    lock_path, parent_intent = _compiled_start_paths(root, rid)
+    with file_lock(lock_path):
+        parent = _compiled_json(parent_intent)
+        root_document = _compiled_json(_reject_reparse_path(root / "start-intent.json"))
+        for document in (parent, root_document):
+            if (document.get("schema"), document.get("request_id"), document.get("reject_scene"), document.get("provider_concurrency")) != (
+                "compiled-start-intent/v2", rid, reject_scene, provider_concurrency
+            ):
+                raise ValueError("start intent does not bind this packet/mode/concurrency")
+        _write_start_intent(parent_intent, {key: parent[key] for key in parent if key != "phase"}, "READY")
+        _write_start_intent(root / "start-intent.json", {key: root_document[key] for key in root_document if key != "phase"}, "READY")
+
+
 def start_compiled(workspace: Path, packet: Path, reject_scene: str | None, *, provider_concurrency: int = 1):
+    """Recover one exact TEST admission in its final namespace under one lock."""
     from src.hybrid.compiled import CompiledEpisode
 
     packet = _reject_reparse_path(Path(packet))
-    # Parse and validate the literal episode storage key before deriving a
-    # workspace path, creating a directory, or constructing any SQLite service.
     packet_files = tuple(_reject_reparse_path(packet / name) for name in COMPILED_PACKET_FILES)
     CompiledEpisode.load(packet_files[0])
     seed = b"autonomous-compiled-test-v1\0" + b"".join(path.read_bytes() for path in packet_files)
-    rid, root = sha256(seed).hexdigest(), _compiled_root(workspace, sha256(seed).hexdigest())
-    if root.exists():
-        raise ValueError("request namespace already exists; never overwrite")
-    root.mkdir(parents=True)
-    snapshot, compiled_sha = _snapshot_compiled_input(packet, root / "inputs")
-    _atomic_json(root / "compiled-harness.json", {"kind": "compiled-test", "mode": "TEST", "request_id": rid, "compiled_episode_id": CompiledEpisode.load(root / "inputs" / "compiled.json").episode_id, "input_sha256": snapshot["input_sha256"], "policy_sha256": snapshot["policy_sha256"], "compiled_sha256": compiled_sha, "source_manifest_sha256": Manifest.load(root / "inputs" / "manifest.json").checksum, "test_reject_scene": reject_scene})
-    # Reload only after metadata exists: this proves the fresh-process reconstruction contract.
-    _, adapter, _ = _load_compiled(workspace, rid, provider_concurrency=provider_concurrency)
-    document = adapter.start()
+    rid = sha256(seed).hexdigest()
+    workspace = _reject_reparse_path(Path(workspace))
+    root = _compiled_root(workspace, rid)
+    lock_path, parent_intent = _compiled_start_paths(root, rid)
+    admission = _compiled_start_intent(root, rid, seed, reject_scene, provider_concurrency)
+    with file_lock(lock_path):
+        if parent_intent.exists():
+            _read_exact_start_intent(parent_intent, admission)
+        elif root.exists():
+            raise ValueError("existing partial legacy namespace requires explicit quarantine or reconciliation")
+        else:
+            _write_start_intent(parent_intent, admission, "ADMITTING")
+        if not root.exists():
+            root.mkdir(parents=True)
+            _start_checkpoint("after_mkdir")
+        root_intent = root / "start-intent.json"
+        if root_intent.exists():
+            _read_exact_start_intent(root_intent, admission)
+        elif any(root.iterdir()):
+            raise ValueError("existing partial legacy namespace requires explicit quarantine or reconciliation")
+        else:
+            _write_start_intent(root_intent, admission, "ADMITTING")
+        harness = root / "compiled-harness.json"
+        if not harness.exists():
+            snapshot, compiled_sha = _snapshot_compiled_input(packet, root / "inputs")
+            _atomic_json(harness, {"kind": "compiled-test", "mode": "TEST", "request_id": rid, "compiled_episode_id": CompiledEpisode.load(root / "inputs" / "compiled.json").episode_id, "input_sha256": snapshot["input_sha256"], "policy_sha256": snapshot["policy_sha256"], "compiled_sha256": compiled_sha, "source_manifest_sha256": Manifest.load(root / "inputs" / "manifest.json").checksum, "test_reject_scene": reject_scene})
+        _root, adapter, document = _load_compiled(workspace, rid, provider_concurrency=provider_concurrency)
+        if document is None:
+            document = adapter.start()
+        _start_checkpoint("after_runner")
     return _compiled_public(root, adapter, document)
 
 
