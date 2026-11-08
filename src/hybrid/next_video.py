@@ -39,6 +39,9 @@ def _concurrency(value: int) -> int:
 
 def _workspace(value: Path | str) -> Path:
     """Reject the literal production root before any state or packet access."""
+    literal = str(value).replace("\\", "/").rstrip("/").casefold()
+    if literal == "c:/hermesstudio/production":
+        raise ValueError("next-video TEST facade rejects the production root")
     workspace = Path(value).resolve()
     if workspace.as_posix().rstrip("/").casefold() == "c:/hermesstudio/production":
         raise ValueError("next-video TEST facade rejects the production root")

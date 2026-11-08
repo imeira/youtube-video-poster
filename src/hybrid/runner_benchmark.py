@@ -237,7 +237,9 @@ async def run_actual_runner_benchmark(
     """Run bounded TEST fixture measurements and persist a self-described JSON."""
     if type(repeats) is not int or not 1 <= repeats <= 10:
         raise ValueError("repeats must be a bounded integer from 1 through 10")
-    latencies = fake_latency_s or {"fast": 0.1, "slow": 0.5}
+    # Default fixture latency keeps the bounded-concurrency signal larger than
+    # local filesystem and scheduler noise; it remains TEST-only.
+    latencies = fake_latency_s or {"fast": 0.5, "slow": 1.0}
     if set(latencies) != {"fast", "slow"} or any(
         type(value) not in {int, float} or value < 0 or not math.isfinite(value)
         for value in latencies.values()
