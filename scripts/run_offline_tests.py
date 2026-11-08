@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 _socketpair_active = False
 _socketpair = socket.socketpair
 PROTECTED_EPISODES = Path("C:/HermesStudio/episodes").resolve(strict=False)
+PROTECTED_PRODUCTION = Path("C:/HermesStudio/production").resolve(strict=False)
 
 
 def local_socketpair(*args, **kwargs):
@@ -28,7 +29,12 @@ def is_protected_path(value):
         candidate = Path(os.fsdecode(value)).resolve(strict=False)
     except (OSError, TypeError, ValueError):
         return False
-    return candidate == PROTECTED_EPISODES or PROTECTED_EPISODES in candidate.parents
+    return (
+        candidate == PROTECTED_EPISODES
+        or PROTECTED_EPISODES in candidate.parents
+        or candidate == PROTECTED_PRODUCTION
+        or PROTECTED_PRODUCTION in candidate.parents
+    )
 
 
 def is_loopback_socket_event(event, args):
@@ -53,7 +59,7 @@ def audit(event, args):
         if isinstance(value, (str, bytes, os.PathLike)):
             path = Path(os.fsdecode(value)).resolve(strict=False)
             if is_protected_path(path):
-                raise RuntimeError("Protected episode directory")
+                raise RuntimeError("Protected production directory")
             if path.name.lower() == ".env" or path.name.lower().startswith(".env."):
                 raise RuntimeError("Secret file access disabled")
 

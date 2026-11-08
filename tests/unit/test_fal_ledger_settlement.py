@@ -6,6 +6,8 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
@@ -195,6 +197,92 @@ async def test_authenticated_offline_readback_writes_one_canonical_receipt_and_r
         assert db.execute("SELECT COUNT(*) FROM settlement_receipts").fetchone()[0] == 1
 
 
+
+@pytest.mark.asyncio
+async def test_direct_executor_cannot_complete_copied_settlement_in_submitted_or_complete_state(tmp_path):
+    """Copied valid job, ledger, and receipt data cannot mint completion authority."""
+    from src.hybrid.billing_reconciler import FalLedgerSettlementService
+
+    class AuthenticatedOfflineFixture(LoopbackFalBillingFixture):
+        authority = "TRANSPORT_AUTHENTICATED_FAL_READBACK"
+
+    assert tmp_path.resolve() != Path("C:/HermesStudio/production").resolve()
+    executor, job, _ = await _bound_receipt(tmp_path)
+    ledger = executor._standing_ledger
+    fixture = AuthenticatedOfflineFixture(
+        pricing_pages=[],
+        billing_pages=[{"billing_events": [_event(job.request_id, job.endpoint)], "next_cursor": None, "has_more": False}],
+    )
+    service = FalLedgerSettlementService(
+        ledger,
+        executor,
+        FalBillingConsumer(fixture),
+        clock=lambda: END,
+    )
+    await service.reconcile(job.request_id, start=START, end=END)
+    assert len(fixture.billing_queries) == 1
+    assert fixture.pricing_queries == []
+    media = tmp_path / "copied-valid-quarantine.png"
+    media.write_bytes(b"durable media bytes")
+
+    executor._change(job.request_id, status="SUBMITTED")
+    submitted_before = executor.inspect(job.request_id)
+    with pytest.raises(PermissionError, match="repository-owned completion validation"):
+        executor.complete_settled_recovery(job, media)
+    assert executor.inspect(job.request_id) == submitted_before
+
+    executor._change(job.request_id, status="COMPLETE", result=str(media), result_sha256=sha256(media.read_bytes()).hexdigest())
+    complete_before = executor.inspect(job.request_id)
+    with pytest.raises(PermissionError, match="repository-owned completion validation"):
+        executor.complete_settled_recovery(job, media)
+    assert executor.inspect(job.request_id) == complete_before
+    assert ledger.verified_settlement_receipt(job.request_id)["claim"]["state"] == "SETTLED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", [
+    "complete_settled_recovery", "_complete_verified_settled_recovery",
+])
+async def test_completion_entrypoints_reject_copied_settled_files_even_with_constructor_lambda(
+    tmp_path, method_name,
+):
+    """Neither public nor renamed mechanics accepts caller-installed authority."""
+    from src.hybrid.billing_reconciler import FalLedgerSettlementService
+
+    executor, job, _ = await _bound_receipt(tmp_path)
+    ledger = executor._standing_ledger
+    await FalLedgerSettlementService(
+        ledger,
+        executor,
+        FalBillingConsumer(LoopbackFalBillingFixture(
+            pricing_pages=[], billing_pages=[{
+                "billing_events": [_event(job.request_id, job.endpoint)],
+                "next_cursor": None, "has_more": False,
+            }],
+        )),
+        clock=lambda: END,
+    ).reconcile(job.request_id, start=START, end=END)
+    media = tmp_path / "known-binding-copied-media.png"
+    media.write_bytes(b"fixture bytes")
+    executor._change(job.request_id, status="SUBMITTED")
+    copied = Executor(
+        tmp_path / "copied-executor.sqlite3", Config(limit=Decimal(1)),
+        standing_ledger=ledger,
+        _jaco_final_admission_verifier=lambda *_args: None,
+        _jaco_production_binding={
+            "kind": "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION",
+            "auth_scope": "TEST_LOCAL_ONLY",
+        },
+    )
+    copied.database.write_bytes(executor.database.read_bytes())
+    before = copied.inspect(job.request_id)
+
+    with pytest.raises(PermissionError, match="repository-owned completion validation"):
+        getattr(copied, method_name)(job, media)
+
+    assert copied.inspect(job.request_id) == before
+
+
 @pytest.mark.asyncio
 async def test_same_billed_event_with_different_utc_windows_keeps_one_canonical_settlement_receipt(tmp_path):
     from src.hybrid.billing_reconciler import FalLedgerSettlementService
@@ -301,8 +389,8 @@ async def test_inexact_money_or_stale_window_marks_claim_unknown_without_settlem
         clock=lambda: END + timedelta(seconds=301),
     ).reconcile(job.request_id, start=START, end=END)
     assert result["status"] == "SETTLED"
-    # estimate metadata is non-authoritative; the fresh readback total settled.
-    assert stale["status"] == "UNKNOWN"
+    # Existing canonical settlement is read locally and never triggers another billing GET.
+    assert stale["status"] == "SETTLED"
     assert ledger.exposure()["episode_usd"] == {"TEST-EP": "0.045001"}
 
 

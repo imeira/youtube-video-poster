@@ -403,6 +403,15 @@ class ModelSheetV3BillingVerifier(JacoFinalAdmissionContractVerifier):
         ):
             raise SettlementDenied("model-sheet v3 settlement binding mismatch")
 
+    def verify_completion(self, receipt: dict, binding: dict, claim: dict) -> None:
+        """Revalidate the same fixed scope after canonical settlement only."""
+        if (not isinstance(claim, dict) or claim.get("state") != "SETTLED"
+                or not isinstance(claim.get("actual_usd"), str)):
+            raise SettlementDenied("model-sheet v3 completion requires canonical settlement")
+        reserved = dict(claim)
+        reserved["state"], reserved["actual_usd"] = "RESERVED", None
+        self.verify(receipt, binding, reserved)
+
 
 def _canonical_hash(document: dict) -> str:
     return sha256(
@@ -573,6 +582,15 @@ class FalLedgerSettlementService:
                 "FAL_READBACK_V2", binding["auth_scope"],
                 binding["provider_request_id"], binding["authority_mode"]):
             raise SettlementDenied("standing-ledger settlement binding mismatch")
+        if claim.get("state") == "SETTLED":
+            try:
+                verified = self.ledger.verified_settlement_receipt(local_request_id)
+            except BudgetDenied as exc:
+                raise SettlementDenied("canonical settled receipt is invalid") from exc
+            return {"request_id": local_request_id, "status": "SETTLED",
+                    "receipt_sha256": verified["receipt_sha256"], "claim": verified["claim"]}
+        if claim.get("state") != "RESERVED":
+            raise SettlementDenied("standing-ledger claim is not reservable for billing readback")
         if (
             self.jaco_final_admission_verifier is not None
             and self.jaco_final_admission_verifier.matches_scope(binding["auth_scope"])

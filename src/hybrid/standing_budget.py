@@ -347,6 +347,33 @@ class StandingBudgetLedger:
                 raise BudgetDenied('reservation does not exist')
             return self._claim(row)
 
+    def verified_settlement_receipt(self, request_id):
+        """Re-open one canonical settled receipt without provider transport."""
+        if not isinstance(request_id, str) or not request_id:
+            raise BudgetDenied('request id required')
+        with self._transaction() as db:
+            row = db.execute('SELECT * FROM claims WHERE request_id=?', (request_id,)).fetchone()
+            receipt_row = db.execute(
+                'SELECT receipt_sha256, actual, receipt_body, provenance FROM settlement_receipts WHERE request_id=?',
+                (request_id,),
+            ).fetchone()
+        if row is None or receipt_row is None or row['state'] != 'SETTLED' or row['actual'] is None:
+            raise BudgetDenied('canonical settled receipt is unavailable')
+        receipt, actual, receipt_sha256 = validate_canonical_settlement_receipt(receipt_row['receipt_body'])
+        if (
+            receipt_row['receipt_sha256'] != receipt_sha256
+            or receipt_row['actual'] != actual
+            or receipt_row['provenance'] != receipt['provenance']
+            or row['actual'] != actual
+            or row['settlement_mode'] != 'FAL_READBACK_V2'
+            or (row['request_id'], row['provider'], row['provider_request_id'], row['auth_scope'], row['authority_mode']) != (
+                receipt['local_request_id'], receipt['endpoint_id'], receipt['provider_request_id'],
+                receipt['auth_scope'], receipt['authority_mode'],
+            )
+        ):
+            raise BudgetDenied('canonical settled receipt binding mismatch')
+        return {'claim': self._claim(row), 'receipt': receipt, 'receipt_sha256': receipt_sha256}
+
     def _set_billing_snapshot_generation(self, request_id, generation):
         if type(generation) is not int or generation < 1:
             raise BudgetDenied('billing snapshot generation must be a positive integer')

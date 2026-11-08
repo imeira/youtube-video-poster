@@ -195,6 +195,7 @@ def test_reconcile_cli_fresh_process_bootstrap_uses_real_durable_settlement_only
     script = r'''
 import asyncio
 import json
+import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -285,8 +286,21 @@ async def run(case, root):
         print(json.dumps({"code": code, "queries": fixture.billing_queries}))
         return
     first = await main(argv, client_factory=lambda _: fixture)
+    with sqlite3.connect(root / "ledger.sqlite3") as db:
+        first_receipt_sha, first_actual = db.execute(
+            "SELECT receipt_sha256, actual FROM settlement_receipts WHERE request_id=?", (job.request_id,)
+        ).fetchone()
     second = await main(argv, client_factory=lambda _: fixture)
-    print(json.dumps({"codes": [first, second], "queries": fixture.billing_queries}))
+    with sqlite3.connect(root / "ledger.sqlite3") as db:
+        receipt_sha, actual = db.execute(
+            "SELECT receipt_sha256, actual FROM settlement_receipts WHERE request_id=?", (job.request_id,)
+        ).fetchone()
+    claim = StandingBudgetLedger(root / "ledger.sqlite3", policy_sha256="a" * 64,
+                                 episode_limit_usd="1", month_limit_usd="1",
+                                 experiment_limit_usd="1", mode="TEST").claim(job.request_id)
+    print(json.dumps({"codes": [first, second], "queries": fixture.billing_queries,
+                      "first_receipt_sha": first_receipt_sha, "first_actual": first_actual,
+                      "receipt_sha": receipt_sha, "actual": actual, "claim": claim}))
 
 
 asyncio.run(run(sys.argv[1], Path(sys.argv[2])))
@@ -306,7 +320,14 @@ asyncio.run(run(sys.argv[1], Path(sys.argv[2])))
     assert completed.returncode == 0, completed.stderr
     assert [report["status"] for report in reports[:2]] == ["SETTLED", "SETTLED"]
     assert reports[2]["codes"] == [0, 0]
-    assert len(reports[2]["queries"]) == 2  # same event is read back twice; durable receipt remains canonical
+    # A verified canonical receipt is the only settled replay shortcut: the
+    # second fresh CLI invocation may not re-read billing.
+    assert len(reports[2]["queries"]) == 1
+    assert reports[2]["actual"] == 45_000
+    assert reports[2]["claim"]["state"] == "SETTLED"
+    assert reports[2]["claim"]["actual_usd"] == "0.045000"
+    assert reports[2]["first_actual"] == reports[2]["actual"] == 45_000
+    assert reports[2]["first_receipt_sha"] == reports[2]["receipt_sha"]
     with sqlite3.connect(positive_root / "ledger.sqlite3") as db:
         rows = db.execute("SELECT actual, receipt_body FROM settlement_receipts").fetchall()
     assert len(rows) == 1
@@ -458,6 +479,8 @@ print(json.dumps({"codes":[first,second,foreign], "posts":provider.posts, "queri
     report = reports[3]
     assert report["codes"] == [0, 0, 1]
     assert report["posts"] == 1
-    assert report["queries"] == 2
+    # The second CLI process reopens the canonical receipt; it must not issue a
+    # second billing GET merely because its in-memory service is fresh.
+    assert report["queries"] == 1
     assert report["snapshot"] is True
     assert report["receipts"] == 1
