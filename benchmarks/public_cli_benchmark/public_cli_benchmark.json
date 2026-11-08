@@ -1,0 +1,1203 @@
+{
+  "fixture_latency_s": {
+    "FAST": 0.15,
+    "SLOW": 0.35
+  },
+  "measurement_scope": "LOCAL_MONOTONIC_WALL_TIME",
+  "median_by_concurrency": {
+    "1": {
+      "worker_wall_time_s": 12.29700000000048
+    },
+    "2": {
+      "worker_wall_time_s": 11.45299999999952
+    }
+  },
+  "mode": "TEST_ONLY_EXPLICIT_FIXTURE_PROVIDER",
+  "packet_sha256": {
+    "compiled.json": "5c608b78b932d79113d4853e1ba42a3ab5995c6de2df28bb5f8fbf96ee2e03e8",
+    "manifest.json": "58a927c23ea47c18e4517458ca24c0dc987a1b065152ea6c43d5843ac0f70666",
+    "policy.json": "88dade572d1c19b88520af856b07cc48b0417cb8164aa1faa47a67baee398524",
+    "sheet.binding.json": "fdd4c3441565a90da3b4b54449399d57b0ba734d194bf4cdb688f70a2c50a93d"
+  },
+  "production_claim": "NONE",
+  "real_cost_gain": "NOT_MEASURED",
+  "repeats": 3,
+  "same_hash_packet": true,
+  "samples": {
+    "concurrency_1": [
+      {
+        "cache_hits": 2,
+        "commands": {
+          "fresh_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-1\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:46:31.480670+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "d34ddc42cc7824443fa234bcf01202e5e83a0894d1cf555da257dd2db4c61ce6",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167191.4693854,
+                "worker_id": "next-video-4300"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner_state": "WAITING_THUMBNAIL_APPROVAL"
+            },
+            "stdout_sha256": "a9fcfd538dd577ebf9ad7fa93f13686890448c0ed5b7925875996551746df941",
+            "wall_time_s": 7.359000000000378
+          },
+          "start": {
+            "argv": [
+              "studio",
+              "next-video",
+              "start",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-1\\workspace",
+              "--compiled-input",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\same-hash-packet",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "note": "Local TEST/offline factory evidence only; no LIVE readiness or publication authority.",
+              "publication": "DISABLED",
+              "queued": {
+                "next_action": "RESUME",
+                "state": "READY",
+                "status": "PENDING"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            },
+            "stdout_sha256": "685ae75be9c35bd27c401f565150bef48b6108bc921c0a86ab5fdf6531eda20d",
+            "wall_time_s": 7.07799999999952
+          },
+          "status": {
+            "argv": [
+              "studio",
+              "next-video",
+              "status",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-1\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:46:31.480670+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "d34ddc42cc7824443fa234bcf01202e5e83a0894d1cf555da257dd2db4c61ce6",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167191.4693854,
+                "worker_id": "next-video-4300"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner": {
+                "fencing_token": 1,
+                "generation": "2026-11-08T19:46:31.480670+00:00",
+                "identity_sha256": "be78949171104ecb9c2a4ac1ea17b096b68d38e8795520dbfda9e51b72c601a1",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "d34ddc42cc7824443fa234bcf01202e5e83a0894d1cf555da257dd2db4c61ce6",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "VERIFIED_LOCAL_STATUS_ONLY"
+              }
+            },
+            "stdout_sha256": "b4924835def3043e9bf953df0a7ca15080b5d4ee84b27ea6e8a5069043cb2121",
+            "wall_time_s": 7.15599999999904
+          },
+          "tamper_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-1\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 1,
+            "result": {
+              "error": "persisted QA does not bind the exact completed artifact",
+              "mode": "TEST",
+              "status": "BLOCKED"
+            },
+            "stdout_sha256": "da4c0e76d0372b0590fa7d2b5906fe143e56d25be8b31ccfd20d6d1733a75799",
+            "wall_time_s": 6.96900000000096
+          },
+          "worker": {
+            "argv": [
+              "studio",
+              "next-video",
+              "worker",
+              "--once",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-1\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 0,
+            "result": {
+              "attempts": 1,
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "fencing_token": 1,
+              "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+              "kind": "compiled",
+              "lease_epoch": 1,
+              "mode": "TEST",
+              "next_action": "HUMAN_THUMBNAIL",
+              "publication": "DISABLED",
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "root": "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-1\\workspace",
+              "state": "WAITING_THUMBNAIL_APPROVAL",
+              "status": "WAITING",
+              "updated_at": 1794167191.4693854,
+              "worker_id": "next-video-4300"
+            },
+            "stdout_sha256": "57e3848b63e4e31ffe8ee1419061c2a3a9499000cd807042b55db8a185017255",
+            "wall_time_s": 13.71900000000096
+          }
+        },
+        "concurrency": 1,
+        "fresh_resume_submit_count": 0,
+        "initial_submit_count": 2,
+        "peak_inflight": 1,
+        "qa_durations_s": {
+          "FAST": 0.10900000000037835,
+          "SLOW": 0.09400000000096043
+        },
+        "queue_wait_s": {
+          "FAST": 14871.765,
+          "SLOW": 14871.078
+        },
+        "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+        "status_snapshot": "CURRENT",
+        "tamper_cache_rejected": true,
+        "tamper_submit_count": 0,
+        "worker_wall_time_s": 13.71900000000096
+      },
+      {
+        "cache_hits": 2,
+        "commands": {
+          "fresh_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-2\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:47:10.220808+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "6fc3fb8993b91ff0faa2cb6b8e8e4787e8aff4e3eea3d03925ec2d4d5ffaacc8",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167230.2075722,
+                "worker_id": "next-video-18872"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner_state": "WAITING_THUMBNAIL_APPROVAL"
+            },
+            "stdout_sha256": "87d44600fb019b349d7612d0b05e595044cfa9d1e0f0be545b1f8f96daaa2d4b",
+            "wall_time_s": 5.843999999999141
+          },
+          "start": {
+            "argv": [
+              "studio",
+              "next-video",
+              "start",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-2\\workspace",
+              "--compiled-input",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\same-hash-packet",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "note": "Local TEST/offline factory evidence only; no LIVE readiness or publication authority.",
+              "publication": "DISABLED",
+              "queued": {
+                "next_action": "RESUME",
+                "state": "READY",
+                "status": "PENDING"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            },
+            "stdout_sha256": "685ae75be9c35bd27c401f565150bef48b6108bc921c0a86ab5fdf6531eda20d",
+            "wall_time_s": 6.186999999999898
+          },
+          "status": {
+            "argv": [
+              "studio",
+              "next-video",
+              "status",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-2\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:47:10.220808+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "6fc3fb8993b91ff0faa2cb6b8e8e4787e8aff4e3eea3d03925ec2d4d5ffaacc8",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167230.2075722,
+                "worker_id": "next-video-18872"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner": {
+                "fencing_token": 1,
+                "generation": "2026-11-08T19:47:10.220808+00:00",
+                "identity_sha256": "eeffd3ef69762d44fdad2ec64921bdf1e69441b7a6ac3a4163d7f37341fd1d16",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "6fc3fb8993b91ff0faa2cb6b8e8e4787e8aff4e3eea3d03925ec2d4d5ffaacc8",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "VERIFIED_LOCAL_STATUS_ONLY"
+              }
+            },
+            "stdout_sha256": "c9180ab14946cdaa6cd25ff664493a5f79c8d0fb1e6360f80aeeb71e5e7166e4",
+            "wall_time_s": 5.5
+          },
+          "tamper_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-2\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 1,
+            "result": {
+              "error": "persisted QA does not bind the exact completed artifact",
+              "mode": "TEST",
+              "status": "BLOCKED"
+            },
+            "stdout_sha256": "da4c0e76d0372b0590fa7d2b5906fe143e56d25be8b31ccfd20d6d1733a75799",
+            "wall_time_s": 5.110000000000582
+          },
+          "worker": {
+            "argv": [
+              "studio",
+              "next-video",
+              "worker",
+              "--once",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-2\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 0,
+            "result": {
+              "attempts": 1,
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "fencing_token": 1,
+              "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+              "kind": "compiled",
+              "lease_epoch": 1,
+              "mode": "TEST",
+              "next_action": "HUMAN_THUMBNAIL",
+              "publication": "DISABLED",
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "root": "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-2\\workspace",
+              "state": "WAITING_THUMBNAIL_APPROVAL",
+              "status": "WAITING",
+              "updated_at": 1794167230.2075722,
+              "worker_id": "next-video-18872"
+            },
+            "stdout_sha256": "8974ffb6228f90acb1f11b410a453363e5f5bb5419544016c459d139f3b84753",
+            "wall_time_s": 10.938000000000102
+          }
+        },
+        "concurrency": 1,
+        "fresh_resume_submit_count": 0,
+        "initial_submit_count": 2,
+        "peak_inflight": 1,
+        "qa_durations_s": {
+          "FAST": 0.09399999999914144,
+          "SLOW": 0.09399999999914144
+        },
+        "queue_wait_s": {
+          "FAST": 14910.859,
+          "SLOW": 14911.296
+        },
+        "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+        "status_snapshot": "CURRENT",
+        "tamper_cache_rejected": true,
+        "tamper_submit_count": 0,
+        "worker_wall_time_s": 10.938000000000102
+      },
+      {
+        "cache_hits": 2,
+        "commands": {
+          "fresh_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-3\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:47:44.143563+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "edb34ef82c96e872dd443ea0406cbf4945764804f167ad94945c6055d9893041",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167264.133338,
+                "worker_id": "next-video-34704"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner_state": "WAITING_THUMBNAIL_APPROVAL"
+            },
+            "stdout_sha256": "60e689114ec438d324ec9a32879e7928e69c60b35889bb32ed1381c1a3242043",
+            "wall_time_s": 5.406000000000859
+          },
+          "start": {
+            "argv": [
+              "studio",
+              "next-video",
+              "start",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-3\\workspace",
+              "--compiled-input",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\same-hash-packet",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "note": "Local TEST/offline factory evidence only; no LIVE readiness or publication authority.",
+              "publication": "DISABLED",
+              "queued": {
+                "next_action": "RESUME",
+                "state": "READY",
+                "status": "PENDING"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            },
+            "stdout_sha256": "685ae75be9c35bd27c401f565150bef48b6108bc921c0a86ab5fdf6531eda20d",
+            "wall_time_s": 5.139999999999418
+          },
+          "status": {
+            "argv": [
+              "studio",
+              "next-video",
+              "status",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-3\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:47:44.143563+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "edb34ef82c96e872dd443ea0406cbf4945764804f167ad94945c6055d9893041",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167264.133338,
+                "worker_id": "next-video-34704"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner": {
+                "fencing_token": 1,
+                "generation": "2026-11-08T19:47:44.143563+00:00",
+                "identity_sha256": "53c4c180876fbb9e4ef8d41770cc14a3bf5c941eb73bb33a235debbef923c1fd",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "edb34ef82c96e872dd443ea0406cbf4945764804f167ad94945c6055d9893041",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "VERIFIED_LOCAL_STATUS_ONLY"
+              }
+            },
+            "stdout_sha256": "0d03a873210d70b79cf0b03d0b4a5c3069d64cea528aefcac87bb74d111ee79b",
+            "wall_time_s": 5.75
+          },
+          "tamper_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-3\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 1,
+            "result": {
+              "error": "persisted QA does not bind the exact completed artifact",
+              "mode": "TEST",
+              "status": "BLOCKED"
+            },
+            "stdout_sha256": "da4c0e76d0372b0590fa7d2b5906fe143e56d25be8b31ccfd20d6d1733a75799",
+            "wall_time_s": 5.15599999999904
+          },
+          "worker": {
+            "argv": [
+              "studio",
+              "next-video",
+              "worker",
+              "--once",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-3\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "1"
+            ],
+            "exit_code": 0,
+            "result": {
+              "attempts": 1,
+              "concurrency": 1,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "fencing_token": 1,
+              "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+              "kind": "compiled",
+              "lease_epoch": 1,
+              "mode": "TEST",
+              "next_action": "HUMAN_THUMBNAIL",
+              "publication": "DISABLED",
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "root": "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_1\\sample-3\\workspace",
+              "state": "WAITING_THUMBNAIL_APPROVAL",
+              "status": "WAITING",
+              "updated_at": 1794167264.133338,
+              "worker_id": "next-video-34704"
+            },
+            "stdout_sha256": "a78d32af615d61d053d2e105d4bffe43e4d071c456a6a2987743d200c871cc5d",
+            "wall_time_s": 12.29700000000048
+          }
+        },
+        "concurrency": 1,
+        "fresh_resume_submit_count": 0,
+        "initial_submit_count": 2,
+        "peak_inflight": 1,
+        "qa_durations_s": {
+          "FAST": 0.125,
+          "SLOW": 0.125
+        },
+        "queue_wait_s": {
+          "FAST": 14944.812,
+          "SLOW": 14944.093
+        },
+        "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+        "status_snapshot": "CURRENT",
+        "tamper_cache_rejected": true,
+        "tamper_submit_count": 0,
+        "worker_wall_time_s": 12.29700000000048
+      }
+    ],
+    "concurrency_2": [
+      {
+        "cache_hits": 2,
+        "commands": {
+          "fresh_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-1\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:48:17.868911+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "bfd4058002b2143b8b17a4866f382332e68ae836a9790d4b6daad36410056a2b",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167297.8546133,
+                "worker_id": "next-video-39664"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner_state": "WAITING_THUMBNAIL_APPROVAL"
+            },
+            "stdout_sha256": "f5840b71863460d7198f254864f18253f9bd33f769bca0dd3742e5668644d07b",
+            "wall_time_s": 4.718999999999141
+          },
+          "start": {
+            "argv": [
+              "studio",
+              "next-video",
+              "start",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-1\\workspace",
+              "--compiled-input",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\same-hash-packet",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "note": "Local TEST/offline factory evidence only; no LIVE readiness or publication authority.",
+              "publication": "DISABLED",
+              "queued": {
+                "next_action": "RESUME",
+                "state": "READY",
+                "status": "PENDING"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            },
+            "stdout_sha256": "dc80664e4d3301f109d60b05a08b8aa9151b10494e206591ba766f3a61ba1555",
+            "wall_time_s": 6.031000000000859
+          },
+          "status": {
+            "argv": [
+              "studio",
+              "next-video",
+              "status",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-1\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:48:17.868911+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "bfd4058002b2143b8b17a4866f382332e68ae836a9790d4b6daad36410056a2b",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167297.8546133,
+                "worker_id": "next-video-39664"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner": {
+                "fencing_token": 1,
+                "generation": "2026-11-08T19:48:17.868911+00:00",
+                "identity_sha256": "8c6e29a4c2f6b21de4df69348fa9b294786d3fdd11918aa09a7bcd78d19d456f",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "bfd4058002b2143b8b17a4866f382332e68ae836a9790d4b6daad36410056a2b",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "VERIFIED_LOCAL_STATUS_ONLY"
+              }
+            },
+            "stdout_sha256": "3d69a8e0177d7149fb39dea21d4a8998779d98fbf979095475beb5cf4673b0c5",
+            "wall_time_s": 4.984000000000378
+          },
+          "tamper_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-1\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 1,
+            "result": {
+              "error": "persisted QA does not bind the exact completed artifact",
+              "mode": "TEST",
+              "status": "BLOCKED"
+            },
+            "stdout_sha256": "da4c0e76d0372b0590fa7d2b5906fe143e56d25be8b31ccfd20d6d1733a75799",
+            "wall_time_s": 5.281000000000859
+          },
+          "worker": {
+            "argv": [
+              "studio",
+              "next-video",
+              "worker",
+              "--once",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-1\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 0,
+            "result": {
+              "attempts": 1,
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "fencing_token": 1,
+              "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+              "kind": "compiled",
+              "lease_epoch": 1,
+              "mode": "TEST",
+              "next_action": "HUMAN_THUMBNAIL",
+              "publication": "DISABLED",
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "root": "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-1\\workspace",
+              "state": "WAITING_THUMBNAIL_APPROVAL",
+              "status": "WAITING",
+              "updated_at": 1794167297.8546133,
+              "worker_id": "next-video-39664"
+            },
+            "stdout_sha256": "83001e981e7983348338b6d0335a96a300cea0ef61894964bbc0d2fa5b226feb",
+            "wall_time_s": 11.453999999999724
+          }
+        },
+        "concurrency": 2,
+        "fresh_resume_submit_count": 0,
+        "initial_submit_count": 2,
+        "peak_inflight": 2,
+        "qa_durations_s": {
+          "FAST": 0.125,
+          "SLOW": 0.11000000000058208
+        },
+        "queue_wait_s": {
+          "FAST": 14978.125,
+          "SLOW": 14978.328
+        },
+        "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+        "status_snapshot": "CURRENT",
+        "tamper_cache_rejected": true,
+        "tamper_submit_count": 0,
+        "worker_wall_time_s": 11.453999999999724
+      },
+      {
+        "cache_hits": 2,
+        "commands": {
+          "fresh_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-2\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:48:50.573748+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "a5077f4a905d84f2079fcac8d0e632639f8c51e1dc6c17249204bbcc6d064d05",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167330.5630298,
+                "worker_id": "next-video-19048"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner_state": "WAITING_THUMBNAIL_APPROVAL"
+            },
+            "stdout_sha256": "8d12141417498cd4e42162cd0b7e00cc2b67fd9ed708dd939495ddbb0c659dcb",
+            "wall_time_s": 4.54700000000048
+          },
+          "start": {
+            "argv": [
+              "studio",
+              "next-video",
+              "start",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-2\\workspace",
+              "--compiled-input",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\same-hash-packet",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "note": "Local TEST/offline factory evidence only; no LIVE readiness or publication authority.",
+              "publication": "DISABLED",
+              "queued": {
+                "next_action": "RESUME",
+                "state": "READY",
+                "status": "PENDING"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            },
+            "stdout_sha256": "dc80664e4d3301f109d60b05a08b8aa9151b10494e206591ba766f3a61ba1555",
+            "wall_time_s": 6.281000000000859
+          },
+          "status": {
+            "argv": [
+              "studio",
+              "next-video",
+              "status",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-2\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:48:50.573748+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "a5077f4a905d84f2079fcac8d0e632639f8c51e1dc6c17249204bbcc6d064d05",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167330.5630298,
+                "worker_id": "next-video-19048"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner": {
+                "fencing_token": 1,
+                "generation": "2026-11-08T19:48:50.573748+00:00",
+                "identity_sha256": "ce7be567821f6ff1bd3c62ade6e22855f8d81d101a8ddfa54df28a1898d02632",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "a5077f4a905d84f2079fcac8d0e632639f8c51e1dc6c17249204bbcc6d064d05",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "VERIFIED_LOCAL_STATUS_ONLY"
+              }
+            },
+            "stdout_sha256": "2de2c1262c0cd5968e8ba18a432f44fbab75127dfda29043a3a4f80cd2b1e4c6",
+            "wall_time_s": 5.0
+          },
+          "tamper_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-2\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 1,
+            "result": {
+              "error": "persisted QA does not bind the exact completed artifact",
+              "mode": "TEST",
+              "status": "BLOCKED"
+            },
+            "stdout_sha256": "da4c0e76d0372b0590fa7d2b5906fe143e56d25be8b31ccfd20d6d1733a75799",
+            "wall_time_s": 5.390999999999622
+          },
+          "worker": {
+            "argv": [
+              "studio",
+              "next-video",
+              "worker",
+              "--once",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-2\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 0,
+            "result": {
+              "attempts": 1,
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "fencing_token": 1,
+              "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+              "kind": "compiled",
+              "lease_epoch": 1,
+              "mode": "TEST",
+              "next_action": "HUMAN_THUMBNAIL",
+              "publication": "DISABLED",
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "root": "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-2\\workspace",
+              "state": "WAITING_THUMBNAIL_APPROVAL",
+              "status": "WAITING",
+              "updated_at": 1794167330.5630298,
+              "worker_id": "next-video-19048"
+            },
+            "stdout_sha256": "8be29beb4ab139534d1bd33400250590ecd5b7009525b2c3fb225161c7203438",
+            "wall_time_s": 11.45299999999952
+          }
+        },
+        "concurrency": 2,
+        "fresh_resume_submit_count": 0,
+        "initial_submit_count": 2,
+        "peak_inflight": 2,
+        "qa_durations_s": {
+          "FAST": 0.0930000000007567,
+          "SLOW": 0.10899999999855936
+        },
+        "queue_wait_s": {
+          "FAST": 15011.0,
+          "SLOW": 15011.218
+        },
+        "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+        "status_snapshot": "CURRENT",
+        "tamper_cache_rejected": true,
+        "tamper_submit_count": 0,
+        "worker_wall_time_s": 11.45299999999952
+      },
+      {
+        "cache_hits": 2,
+        "commands": {
+          "fresh_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-3\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:49:22.950469+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "9f6431cfb92f7f657a7712b71f4ce11adf0f0ae58d9bfa2340869c4fae3872f5",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167362.9382854,
+                "worker_id": "next-video-37540"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner_state": "WAITING_THUMBNAIL_APPROVAL"
+            },
+            "stdout_sha256": "bd0619caad82f2033a8b421d7e008a40cc5d2e4f21acc3c039663a87bcaa4dbd",
+            "wall_time_s": 4.92200000000048
+          },
+          "start": {
+            "argv": [
+              "studio",
+              "next-video",
+              "start",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-3\\workspace",
+              "--compiled-input",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\same-hash-packet",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "note": "Local TEST/offline factory evidence only; no LIVE readiness or publication authority.",
+              "publication": "DISABLED",
+              "queued": {
+                "next_action": "RESUME",
+                "state": "READY",
+                "status": "PENDING"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            },
+            "stdout_sha256": "dc80664e4d3301f109d60b05a08b8aa9151b10494e206591ba766f3a61ba1555",
+            "wall_time_s": 6.313000000000102
+          },
+          "status": {
+            "argv": [
+              "studio",
+              "next-video",
+              "status",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-3\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710"
+            ],
+            "exit_code": 0,
+            "result": {
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "mode": "TEST",
+              "publication": "DISABLED",
+              "queue": {
+                "attempts": 1,
+                "authority": "LOCAL_STATUS_ONLY",
+                "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+                "fencing_token": 1,
+                "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+                "generated_at_utc": "2026-11-08T19:49:22.950469+00:00",
+                "kind": "compiled",
+                "lease_epoch": 1,
+                "next_action": "HUMAN_THUMBNAIL",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "9f6431cfb92f7f657a7712b71f4ce11adf0f0ae58d9bfa2340869c4fae3872f5",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "WAITING",
+                "updated_at": 1794167362.9382854,
+                "worker_id": "next-video-37540"
+              },
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "runner": {
+                "fencing_token": 1,
+                "generation": "2026-11-08T19:49:22.950469+00:00",
+                "identity_sha256": "5e395001a20615239135b2866760a5c5abd9eb04f975200fdd2118fd1ca961cc",
+                "snapshot": "CURRENT",
+                "snapshot_sha256": "9f6431cfb92f7f657a7712b71f4ce11adf0f0ae58d9bfa2340869c4fae3872f5",
+                "state": "WAITING_THUMBNAIL_APPROVAL",
+                "status": "VERIFIED_LOCAL_STATUS_ONLY"
+              }
+            },
+            "stdout_sha256": "6ba130de5c6a650ca61578836c724dda4804d3828c505ff2e23233d3ef35cd16",
+            "wall_time_s": 4.406000000000859
+          },
+          "tamper_resume": {
+            "argv": [
+              "studio",
+              "next-video",
+              "resume",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-3\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 1,
+            "result": {
+              "error": "persisted QA does not bind the exact completed artifact",
+              "mode": "TEST",
+              "status": "BLOCKED"
+            },
+            "stdout_sha256": "da4c0e76d0372b0590fa7d2b5906fe143e56d25be8b31ccfd20d6d1733a75799",
+            "wall_time_s": 5.265999999999622
+          },
+          "worker": {
+            "argv": [
+              "studio",
+              "next-video",
+              "worker",
+              "--once",
+              "--workspace",
+              "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-3\\workspace",
+              "--request-id",
+              "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "--concurrency",
+              "2"
+            ],
+            "exit_code": 0,
+            "result": {
+              "attempts": 1,
+              "concurrency": 2,
+              "episode_id": "TEST-PUBLIC-CLI-BENCHMARK",
+              "fencing_token": 1,
+              "gate_hash": "3e112f138ffc8e1a1b6f356102e6bb658a6c408b81a53b7686cb1b7c652c14c8",
+              "kind": "compiled",
+              "lease_epoch": 1,
+              "mode": "TEST",
+              "next_action": "HUMAN_THUMBNAIL",
+              "publication": "DISABLED",
+              "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+              "root": "C:\\Users\\meira\\AppData\\Local\\hermes\\cache\\scratch\\public-cli-0da3fa32dbf6e480\\concurrency_2\\sample-3\\workspace",
+              "state": "WAITING_THUMBNAIL_APPROVAL",
+              "status": "WAITING",
+              "updated_at": 1794167362.9382854,
+              "worker_id": "next-video-37540"
+            },
+            "stdout_sha256": "1cadd9da98ec340c5dfd590bde3feafabe1824b1d024e918b945a3b5d77f8202",
+            "wall_time_s": 10.95299999999952
+          }
+        },
+        "concurrency": 2,
+        "fresh_resume_submit_count": 0,
+        "initial_submit_count": 2,
+        "peak_inflight": 2,
+        "qa_durations_s": {
+          "FAST": 0.10900000000037835,
+          "SLOW": 0.09399999999914144
+        },
+        "queue_wait_s": {
+          "FAST": 15043.546,
+          "SLOW": 15043.734
+        },
+        "request_id": "430831983d1c5954f344b06770b08b74201a36636df9c7439df4c8b666809710",
+        "status_snapshot": "CURRENT",
+        "tamper_cache_rejected": true,
+        "tamper_submit_count": 0,
+        "worker_wall_time_s": 10.95299999999952
+      }
+    ]
+  },
+  "schema": "next-video-public-cli-benchmark/v1"
+}

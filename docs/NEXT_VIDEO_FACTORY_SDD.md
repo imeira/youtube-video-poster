@@ -55,4 +55,4 @@ Perda, expiração ou cancelamento de lease deixa `UNKNOWN_REQUIRES_RECONCILIATI
 3. `status` durante/apos worker retorna a projeção `CURRENT` sem mutar arquivos da fila.
 4. `concurrency` padrão é 1; 2 e 32 são aceitos e persistidos; 0, 33 ou alteração no resume/worker são negados.
 5. `--mode LIVE`, endpoint externo/política LIVE e tentativa de publicação são negados antes de state write, reserva ou submit.
-6. Benchmark continua explicitamente TEST/local; reporta latência, concorrência, cache e submits e não é prova LIVE.
+6. O benchmark é um harness independente, explicitamente TEST/local, que executa subprocessos `studio next-video start -> worker --once -> status -> resume` em processo novo com o mesmo packet hash, concorrência 1 e 2, três amostras cada. Registra argv/exit codes, wall clock, fila/QA, cache, submits e rejeição de tamper; não chama helpers diretos do runner e não afirma speedup ou prontidão LIVE.

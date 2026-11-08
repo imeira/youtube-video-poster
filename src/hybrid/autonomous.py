@@ -2126,6 +2126,13 @@ class AutonomousCompiledTestAdapter:
             )
         return self.runner.start(self.packet(), jobs)
 
+    def validate_cached_qa(self) -> None:
+        """Revalidate persisted exact-byte QA without dispatching or mutating."""
+        document = self.runner._load()
+        for request_id, verdict in document.get("qa", {}).items():
+            if verdict.get("approved") is True:
+                self.runner._validate_persisted_qa(request_id, verdict)
+
     async def resume(
         self, provider, independent_qa: Callable[[dict], dict]
     ) -> dict[str, Any]:

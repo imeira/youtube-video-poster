@@ -127,6 +127,32 @@ class FixtureProvider:
                 raise RuntimeError("TEST fixture POST counter is invalid")
             _atomic_json(counter, {"posts": previous["posts"] + 1})
 
+    def _record_benchmark_event(self, event: str, scene: str) -> None:
+        """Emit bounded TEST-fixture timing evidence only when explicitly enabled."""
+        raw = os.environ.get("HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON")
+        if raw is None:
+            return
+        latencies = json.loads(raw)
+        if not isinstance(latencies, dict) or scene not in latencies:
+            raise RuntimeError("explicit TEST fixture latency map is invalid")
+        path = self.root / "fixture-events.jsonl"
+        with file_lock(self.root / "fixture-events.lock"):
+            previous = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+            record = {"sequence": len(previous) + 1, "event": event, "scene": scene, "monotonic_s": time.monotonic()}
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _test_latency(scene: str) -> float:
+        raw = os.environ.get("HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON")
+        if raw is None:
+            return 0.0
+        values = json.loads(raw)
+        value = values.get(scene) if isinstance(values, dict) else None
+        if type(value) not in {int, float} or value < 0 or value > 5:
+            raise RuntimeError("explicit TEST fixture latency must be bounded")
+        return float(value)
+
     def _image_result(self, job, rid):
         out = self.root / f"{rid}.TEST.png"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -141,7 +167,9 @@ class FixtureProvider:
     async def submit(self, job, rid, checkpoint):
         self.root.mkdir(parents=True, exist_ok=True)
         self._record_test_post()
+        self._record_benchmark_event("submit_started", job.scene)
         checkpoint(provider_id="TEST-" + rid[:12])
+        await asyncio.sleep(self._test_latency(job.scene))
         # Acceptance-only fault injection. It is unreachable without the
         # explicit TEST host flag and never constructs a network provider.
         if os.environ.get("HYBRID_TEST_CRASH_AFTER_CHECKPOINT") == "1":
@@ -159,8 +187,11 @@ class FixtureProvider:
                 ],
                 check=True,
             )
-            return ProviderResult(out, job.cost)
-        return self._image_result(job, rid)
+            result = ProviderResult(out, job.cost)
+        else:
+            result = self._image_result(job, rid)
+        self._record_benchmark_event("submit_completed", job.scene)
+        return result
 
     async def recover(self, job, rid, provider_id, partial, checkpoint):
         if provider_id != "TEST-" + rid[:12] or partial:
@@ -457,7 +488,7 @@ def _compiled_status(root: Path, rid: str) -> dict:
     }
 
 
-def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None):
+def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None, provider_concurrency: int = 1):
     from src.agents.director import DirectorAgent
     from src.hybrid.compiled import CompiledEpisode, OperationalPipeline
 
@@ -499,10 +530,16 @@ def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None):
     # Never pass packet bytes as authority into the factory after validation.
     factory_args = (pipeline, runner_workspace, compiled_policy_document())
     if ownership_assertion is None:
-        adapter = director.create_autonomous_compiled_test_adapter(*factory_args)
+        if provider_concurrency == 1:
+            adapter = director.create_autonomous_compiled_test_adapter(*factory_args)
+        else:
+            adapter = director.create_autonomous_compiled_test_adapter(
+                *factory_args, provider_concurrency=provider_concurrency
+            )
     else:
         adapter = director.create_autonomous_compiled_test_adapter(
-            *factory_args, ownership_assertion=ownership_assertion
+            *factory_args, ownership_assertion=ownership_assertion,
+            provider_concurrency=provider_concurrency,
         )
     # The runner state is another untrusted read.  Guard it after the factory
     # has selected only the internal TEST adapter and immediately before load.
@@ -512,7 +549,16 @@ def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None):
 
 def _compiled_image_qa(reject_scene: str | None = None):
     def verdict(receipt):
-        return {"approved": receipt["request"]["scene"] != reject_scene, "reviewer": "TEST local image assertion (not human)", "reviewer_identity": {"subject": "TEST-local-image-qa", "issuer": "TEST assertion, not human approval"}, "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": ["TEST_LOCAL_ASSERTION"]}
+        scene = receipt["request"]["scene"]
+        raw = os.environ.get("HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON")
+        if raw is not None:
+            provider_root = Path(receipt["result"]).parent
+            event_path = provider_root / "fixture-events.jsonl"
+            with file_lock(provider_root / "fixture-events.lock"):
+                previous = event_path.read_text(encoding="utf-8").splitlines()
+                with event_path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"sequence": len(previous) + 1, "event": "qa_completed", "scene": scene, "monotonic_s": time.monotonic()}, sort_keys=True) + "\n")
+        return {"approved": scene != reject_scene, "reviewer": "TEST local image assertion (not human)", "reviewer_identity": {"subject": "TEST-local-image-qa", "issuer": "TEST assertion, not human approval"}, "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": ["TEST_LOCAL_ASSERTION"]}
     return verdict
 
 
@@ -527,7 +573,7 @@ def _stage_compiled(adapter, document):
     )
 
 
-def start_compiled(workspace: Path, packet: Path, reject_scene: str | None):
+def start_compiled(workspace: Path, packet: Path, reject_scene: str | None, *, provider_concurrency: int = 1):
     from src.hybrid.compiled import CompiledEpisode
 
     packet = _reject_reparse_path(Path(packet))
@@ -543,7 +589,7 @@ def start_compiled(workspace: Path, packet: Path, reject_scene: str | None):
     snapshot, compiled_sha = _snapshot_compiled_input(packet, root / "inputs")
     _atomic_json(root / "compiled-harness.json", {"kind": "compiled-test", "mode": "TEST", "request_id": rid, "compiled_episode_id": CompiledEpisode.load(root / "inputs" / "compiled.json").episode_id, "input_sha256": snapshot["input_sha256"], "policy_sha256": snapshot["policy_sha256"], "compiled_sha256": compiled_sha, "source_manifest_sha256": Manifest.load(root / "inputs" / "manifest.json").checksum, "test_reject_scene": reject_scene})
     # Reload only after metadata exists: this proves the fresh-process reconstruction contract.
-    _, adapter, _ = _load_compiled(workspace, rid)
+    _, adapter, _ = _load_compiled(workspace, rid, provider_concurrency=provider_concurrency)
     document = adapter.start()
     return _compiled_public(root, adapter, document)
 
@@ -647,6 +693,10 @@ async def _fixture_worker_handler(_task: dict) -> dict:
             raise RuntimeError("configured workspace has no unique compiled runner for queue episode")
         root, adapter, document = _load_compiled(
             workspace, matches[0], ownership_assertion=_task["_lease_assertion"],
+            provider_concurrency=(
+                json.loads((_compiled_root(workspace, matches[0]) / "next-video.json").read_text(encoding="utf-8")).get("concurrency", 1)
+                if (_compiled_root(workspace, matches[0]) / "next-video.json").is_file() else 1
+            ),
         )
         if adapter.runner.episode_id != ownership.episode_id:
             raise RuntimeError("compiled runner episode identity does not match queue lease")

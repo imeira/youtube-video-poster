@@ -1,24 +1,31 @@
-# Actual autonomous runner TEST benchmark
+# Public `studio next-video` CLI TEST benchmark
 
 ## Scope
 
-This result was produced by `python -m src.hybrid.runner_benchmark --output-dir benchmarks/actual_runner_benchmark --repeats 3`. It invokes the public `AutonomousTwoGateRunner.start()` and `resume()` APIs with the same two-node independent DAG and the same hash-bound input assets for each sample.
+Generated with:
 
-The fixture transport is local-only and TEST-only. Its explicit asynchronous delays were `fast=0.1s` and `slow=0.5s`. The measurements are local monotonic wall time; they are not provider latency, delivery, billing, quality, or production-cost measurements.
+```text
+python -m src.hybrid.runner_benchmark --output-dir benchmarks/public_cli_benchmark --repeats 3
+```
 
-## Measured results
+This standalone harness invokes real public CLI subprocesses for every sample:
+`start -> worker --once -> status -> fresh-process resume`. It creates the existing two-scene compiled TEST fixture once, reuses its same packet hashes for concurrency `1` and `2`, and runs three samples per setting.
 
-| Provider concurrency | Runs | Median wall time (s) | Max in-flight observed | Submit count/run |
-|---:|---:|---:|---:|---:|
-| 1 | 3 | 0.984000 | 1 | 2 |
-| 2 | 3 | 0.750000 | 2 | 2 |
+The harness sets only `HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON` (`SLOW=0.35s`, `FAST=0.15s`) on the existing `FixtureProvider`. It uses a native scratch directory for `TMP`, `TEMP`, and `TMPDIR`, rejects `C:/HermesStudio/production`, makes no network/provider/credential call, and is not a production command.
 
-For every concurrency-2 sample, the independent QA timestamp for `fast` preceded completion of the unrelated `slow` transport request. The exact-hash fresh resume made zero submissions in all six samples. After changing a completed asset, the persisted QA was rejected and the fresh fake transport made zero submissions in all six samples.
+## Actual results
 
-The JSON records per-sample wall time, queue wait, QA timestamps, peak in-flight work, actual fixture submit counts, resume-cache count, and tamper result:
+| Persisted runner concurrency | Samples | Median worker wall time (s) |
+|---:|---:|---:|
+| 1 | 3 | 12.297000 |
+| 2 | 3 | 11.453000 |
 
-- [`actual_runner_benchmark.json`](actual_runner_benchmark/actual_runner_benchmark.json)
+Each recorded sample includes the actual public argv, exit codes, command wall times, same packet hashes, fixture queue waits, QA durations, peak in-flight submits, initial submit count, fresh-resume submit count, cache-hit count, and current status snapshot. All six initial workers made two TEST fixture submits. Every fresh-process resume made zero submits. For every sample, tampering with a completed TEST fixture asset caused public `resume` to reject cached QA and made zero additional submits.
+
+The observed median is an environment-specific local TEST result. This benchmark deliberately makes **no speedup assertion**: it records serialization/concurrency evidence instead of asserting flaky timing. It makes no provider throughput, quality, delivery, billing, or production-cost claim.
+
+- [`public_cli_benchmark.json`](public_cli_benchmark/public_cli_benchmark.json)
 
 ## Boundary
 
-`real_cost_gain` is `NOT_MEASURED`; no USD saving, provider claim, or production throughput claim is made. The older `benchmark_rolling_vs_barrier` thread/sleep comparison is deprecated because it does not execute the autonomous runner and cannot establish scheduler acceptance.
+`production_claim` is `NONE` and `real_cost_gain` is `NOT_MEASURED`. The older direct-runner and thread/sleep comparisons are not façade acceptance evidence and must not be used as a public-CLI throughput claim.

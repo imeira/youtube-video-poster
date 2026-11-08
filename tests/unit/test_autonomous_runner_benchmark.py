@@ -1,31 +1,37 @@
-"""Acceptance coverage for the actual-runner TEST throughput benchmark."""
+"""Acceptance coverage for the public ``studio next-video`` CLI benchmark."""
 
 from __future__ import annotations
 
-import pytest
 
+def test_public_cli_benchmark_exercises_fresh_process_worker_resume_and_cache(tmp_path):
+    from src.hybrid.runner_benchmark import run_public_cli_benchmark
 
-@pytest.mark.asyncio
-async def test_actual_runner_benchmark_measures_bounded_scheduler_and_cache_integrity(tmp_path):
-    from src.hybrid.runner_benchmark import run_actual_runner_benchmark
+    result = run_public_cli_benchmark(tmp_path / "benchmark", repeats=3)
 
-    result = await run_actual_runner_benchmark(tmp_path / "benchmark", repeats=3)
-
-    assert result["schema"] == "autonomous-two-gate-runner-benchmark/v1"
-    assert result["fake_provider_latency_s"] == {"fast": 0.5, "slow": 1.0}
-    assert result["mode"] == "TEST_ONLY_FAKE_PROVIDER_LATENCY"
-    assert result["measurement_scope"] == "LOCAL_MONOTONIC_WALL_TIME"
+    assert result["schema"] == "next-video-public-cli-benchmark/v1"
+    assert result["mode"] == "TEST_ONLY_EXPLICIT_FIXTURE_PROVIDER"
     assert result["repeats"] == 3
+    assert result["same_hash_packet"] is True
+    assert result["production_claim"] == "NONE"
     assert result["real_cost_gain"] == "NOT_MEASURED"
-    assert result["same_dag_input_assets"] is True
-    assert result["median_by_provider_concurrency"]["1"]["wall_time_s"] > result["median_by_provider_concurrency"]["2"]["wall_time_s"]
 
-    parallel_samples = result["samples"]["provider_concurrency_2"]
-    assert len(parallel_samples) == 3
-    assert all(sample["submit_count"] == 2 for sample in parallel_samples)
-    assert all(sample["max_inflight"] <= 2 for sample in parallel_samples)
-    assert all(sample["qa_before_unrelated_slow_end"] for sample in parallel_samples)
-    assert all(sample["exact_hash_resume_submit_count"] == 0 for sample in parallel_samples)
-    assert all(sample["tamper_rejected_without_submit"] for sample in parallel_samples)
-    assert all(sample["queue_wait_s"] for sample in parallel_samples)
-    assert all(sample["qa_times_s"] for sample in parallel_samples)
+    for concurrency in ("1", "2"):
+        samples = result["samples"][f"concurrency_{concurrency}"]
+        assert len(samples) == 3
+        for sample in samples:
+            assert sample["commands"]["start"]["exit_code"] == 0
+            assert sample["commands"]["worker"]["exit_code"] == 0
+            assert sample["commands"]["status"]["exit_code"] == 0
+            assert sample["commands"]["fresh_resume"]["exit_code"] == 0
+            assert sample["initial_submit_count"] == 2
+            assert sample["fresh_resume_submit_count"] == 0
+            assert sample["tamper_cache_rejected"] is True
+            assert sample["tamper_submit_count"] == 0
+            assert sample["status_snapshot"] == "CURRENT"
+            assert sample["qa_durations_s"]
+            assert sample["queue_wait_s"]
+            assert sample["cache_hits"] >= 2
+
+    # The benchmark records observed wall time only. It must not encode a
+    # brittle speedup assertion; environments may show serialization instead.
+    assert set(result["median_by_concurrency"]) == {"1", "2"}

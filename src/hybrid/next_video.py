@@ -98,9 +98,9 @@ def start(workspace: Path, packet: Path, *, mode: str, concurrency: int) -> dict
     workspace = _workspace(workspace)
     # Existing validation snapshots the packet and denies non-TEST/external
     # policy before any queue, executor submission, or worker construction.
-    started = start_compiled(workspace, Path(packet), None)
+    started = start_compiled(workspace, Path(packet), None, provider_concurrency=concurrency)
     request_id = _request_id(started["request_id"])
-    root, adapter, _document = _load_compiled(workspace, request_id)
+    root, adapter, _document = _load_compiled(workspace, request_id, provider_concurrency=concurrency)
     metadata = {
         "schema": _SCHEMA,
         "mode": "TEST",
@@ -167,9 +167,14 @@ def resume(workspace: Path, request_id: str, *, concurrency: int | None) -> dict
     _assert_persisted_concurrency(metadata, concurrency)
     # Re-open/re-hash the packet and runner in a fresh process but do not open
     # the queue or submit.  The fenced worker is the only mutation authority.
-    _root, adapter, document = _load_compiled(workspace, request_id)
+    _root, adapter, document = _load_compiled(
+        workspace, request_id, provider_concurrency=metadata["concurrency"]
+    )
     if adapter.runner.episode_id != metadata["episode_id"] or adapter.pipeline.episode.checksum != metadata["compiled_sha256"]:
         raise ValueError("next-video metadata no longer binds the compiled runner")
+    # Fresh-process resume is read-only but must never report a stale cached QA
+    # pass after the exact completed bytes have changed.
+    adapter.validate_cached_qa()
     projected = EpisodeTaskQueue.read_status(_queue_path(workspace), metadata["episode_id"])
     return {
         "mode": "TEST", "request_id": request_id, "episode_id": metadata["episode_id"],
