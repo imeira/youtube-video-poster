@@ -48,7 +48,7 @@ def _qualified_test_root(root, monkeypatch):
         "financial_baseline": {"currency": "USD", "total_episode_cap": "10.00", "remaining_usd": "10.00", "pending_usd": "0.00", "source_sha256": financial_sha},
     })
     authority = {"schema": "jaco-derived-operation-authority/v2", "status": "READY_FOR_INDEPENDENT_PARENT_REVIEW_NO_RESERVATION_NO_POST", "operation_id": production.OPERATION_ID, "episode_id": production.EPISODE_ID, "predecessor_operation_id": "", "executor_predecessor_request_id": "", "executor_category": "first", "migration_reason": "INITIAL_THREE_VIEW_PREFLIGHT", "non_reuse": True, "mode": "TEST", "policy_path": str(policy), "policy_sha256": sha256(policy.read_bytes()).hexdigest(), "preflight_path": str(preflight), "preflight_sha256": sha256(preflight.read_bytes()).hexdigest(), "maximum_next_cost_usd": "0.048", "canonical_ledger": {"path": str(root / "ledger" / "standing-budget.sqlite3"), "financial_policy_sha256": financial_sha, "operation_policy_sha256": sha256(policy.read_bytes()).hexdigest(), "financial_source": {"path": str(financial), "sha256": financial_sha}}}
-    qualification = {"schema": "jaco-test-deployment-qualification/v2", "status": "QUALIFIED", "operation_id": production.OPERATION_ID, "episode_id": production.EPISODE_ID, "policy_sha256": authority["policy_sha256"], "operation_policy_sha256": authority["policy_sha256"], "preflight_sha256": authority["preflight_sha256"], "mode": "TEST", "authorization": "TEST_FIXTURE_CONSENT_ONLY", "review_packet_schema": "jaco-fal-flux3-successor-benchmark/3", "reviewer": "LOCAL_PROCESS_REVIEW_AUTOMATED_V1", "ci_digest_sha256": "0" * 64, "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(), "financial_policy_sha256": financial_sha, "consent_fixture": {"kind": "TEST_ONLY_CONSENT_FIXTURE"}}
+    qualification = {"schema": "jaco-test-deployment-qualification/v2", "status": "QUALIFIED", "operation_id": production.OPERATION_ID, "episode_id": production.EPISODE_ID, "policy_sha256": authority["policy_sha256"], "operation_policy_sha256": authority["policy_sha256"], "preflight_sha256": authority["preflight_sha256"], "mode": "TEST", "authorization": "TEST_FIXTURE_CONSENT_ONLY", "review_packet_schema": "jaco-fal-flux3-successor-benchmark/3", "reviewer": "LOCAL_PROCESS_REVIEW_AUTOMATED_V1", "ci_digest_sha256": "0" * 64, "execution_code_sha256": production._execution_source_sha256(), "financial_policy_sha256": financial_sha, "consent_fixture": {"kind": "TEST_ONLY_CONSENT_FIXTURE"}}
     qualification_path = _write(root / "standing-policy" / production.QUALIFICATION_PATH.name, qualification)
     authority["deployment_qualification"] = {"path": str(qualification_path), "sha256": sha256(qualification_path.read_bytes()).hexdigest()}
     return _write(root / "standing-policy" / production.AUTHORITY_PATH.name, authority)
@@ -142,7 +142,7 @@ def _actual_v1_policy_three_view_root(root, monkeypatch):
                                  "supersedes_for_future_operations_only": "JACO_USER_EXECUTION_MANDATE/2 one-shot canary"},
     })
     authority = {"schema": "jaco-derived-operation-authority/v2", "status": "READY_FOR_INDEPENDENT_PARENT_REVIEW_NO_RESERVATION_NO_POST", "operation_id": production.OPERATION_ID, "episode_id": production.EPISODE_ID, "predecessor_operation_id": "", "executor_predecessor_request_id": "", "executor_category": "first", "migration_reason": "INITIAL_THREE_VIEW_PREFLIGHT", "non_reuse": True, "mode": "TEST", "policy_path": str(policy), "policy_sha256": sha256(policy.read_bytes()).hexdigest(), "preflight_path": str(preflight), "preflight_sha256": sha256(preflight.read_bytes()).hexdigest(), "maximum_next_cost_usd": "0.048", "canonical_ledger": {"path": str(root / "ledger" / "standing-budget.sqlite3"), "financial_policy_sha256": financial_sha, "operation_policy_sha256": sha256(policy.read_bytes()).hexdigest(), "financial_source": {"path": str(financial), "sha256": financial_sha}}}
-    qualification = {"schema": "jaco-test-deployment-qualification/v2", "status": "QUALIFIED", "operation_id": production.OPERATION_ID, "episode_id": production.EPISODE_ID, "policy_sha256": authority["policy_sha256"], "operation_policy_sha256": authority["policy_sha256"], "preflight_sha256": authority["preflight_sha256"], "mode": "TEST", "authorization": "TEST_FIXTURE_CONSENT_ONLY", "review_packet_schema": "jaco-fal-flux3-successor-benchmark/3", "reviewer": "LOCAL_PROCESS_REVIEW_AUTOMATED_V1", "ci_digest_sha256": "0" * 64, "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(), "financial_policy_sha256": financial_sha, "consent_fixture": {"kind": "TEST_ONLY_CONSENT_FIXTURE"}}
+    qualification = {"schema": "jaco-test-deployment-qualification/v2", "status": "QUALIFIED", "operation_id": production.OPERATION_ID, "episode_id": production.EPISODE_ID, "policy_sha256": authority["policy_sha256"], "operation_policy_sha256": authority["policy_sha256"], "preflight_sha256": authority["preflight_sha256"], "mode": "TEST", "authorization": "TEST_FIXTURE_CONSENT_ONLY", "review_packet_schema": "jaco-fal-flux3-successor-benchmark/3", "reviewer": "LOCAL_PROCESS_REVIEW_AUTOMATED_V1", "ci_digest_sha256": "0" * 64, "execution_code_sha256": production._execution_source_sha256(), "financial_policy_sha256": financial_sha, "consent_fixture": {"kind": "TEST_ONLY_CONSENT_FIXTURE"}}
     qualification_path = _write(root / "standing-policy" / production.QUALIFICATION_PATH.name, qualification)
     authority["deployment_qualification"] = {"path": str(qualification_path), "sha256": sha256(qualification_path.read_bytes()).hexdigest()}
     return _write(root / "standing-policy" / production.AUTHORITY_PATH.name, authority)
@@ -163,7 +163,7 @@ def _qualified_live_root(root, monkeypatch):
         "schema": "jaco-protected-deployment-qualification/v2",
         "mode": "LIVE",
         "authorization": "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY",
-        "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+        "execution_code_sha256": production._execution_source_sha256(),
     })
     del qualification["consent_fixture"]
     _write(qualification_path, qualification)
@@ -626,7 +626,7 @@ def test_versioned_technical_amendment_preserves_hash_gate(tmp_path, monkeypatch
     amended = dict(prior)
     amended.update({
         "schema": "jaco-protected-deployment-qualification/v3",
-        "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+        "execution_code_sha256": production._execution_source_sha256(),
         "technical_deployment_amendment": {
             "schema": "jaco-technical-deployment-amendment/v1",
             "kind": "EXECUTION_CODE_HASH_SUCCESSOR_ONLY",
@@ -634,7 +634,7 @@ def test_versioned_technical_amendment_preserves_hash_gate(tmp_path, monkeypatch
             "prior_qualification_sha256": prior_sha,
             "prior_qualification_bytes_sha256": prior_sha,
             "prior_execution_code_sha256": production.PRIOR_QUALIFIED_EXECUTION_SHA256,
-            "new_execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+            "new_execution_code_sha256": production._execution_source_sha256(),
             "review_ci_provenance_sha256": prior["ci_digest_sha256"],
             "operation_policy_sha256": prior["operation_policy_sha256"],
             "financial_policy_sha256": prior["financial_policy_sha256"],
@@ -769,7 +769,7 @@ def _amended_live_recovery_child(
         amended = dict(prior)
         amended.update({
             "schema": "jaco-protected-deployment-qualification/v3",
-            "execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+            "execution_code_sha256": production._execution_source_sha256(),
             "technical_deployment_amendment": {
                 "schema": "jaco-technical-deployment-amendment/v1",
                 "kind": "EXECUTION_CODE_HASH_SUCCESSOR_ONLY",
@@ -777,7 +777,7 @@ def _amended_live_recovery_child(
                 "prior_qualification_sha256": prior_sha,
                 "prior_qualification_bytes_sha256": prior_sha,
                 "prior_execution_code_sha256": production.PRIOR_QUALIFIED_EXECUTION_SHA256,
-                "new_execution_code_sha256": sha256(Path(production.__file__).read_bytes()).hexdigest(),
+                "new_execution_code_sha256": production._execution_source_sha256(),
                 "review_ci_provenance_sha256": prior["ci_digest_sha256"],
                 "operation_policy_sha256": prior["operation_policy_sha256"],
                 "financial_policy_sha256": prior["financial_policy_sha256"],

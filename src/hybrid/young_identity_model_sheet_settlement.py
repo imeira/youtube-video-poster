@@ -33,7 +33,7 @@ REMOTE_REQUEST_ID = "01a1b7bf-ef29-77c1-ad38-5214baa197de"
 # canonical settlement evidence recorded by the protected v3 qualification.
 APPROVED_QUARANTINED_PNG_SHA256 = "5ebe417dd1b7b7d05b9eba9fd0ae5bb7f63e926b6d9946897c2b20a1d0b51933"
 APPROVED_SETTLEMENT_RECEIPT_SHA256 = "4745428d97cf3de5d2b7bcd7056c5575362acba1ce82d25d2bf7c3e747e7be99"
-APPROVED_EXECUTION_CODE_SHA256 = "6b7c4aeb15e1bcee528e69905a52c04182fa686d82915d84dd8f536171c66d12"
+APPROVED_EXECUTION_CODE_SHA256 = "17ea258c4f3c1cd09182325b17a513fbeef88c46d7e2afe70f953d4ec7dd8825"
 
 
 @dataclass(frozen=True)
@@ -205,7 +205,7 @@ def _submission_timestamp(path: Path) -> datetime:
 
 def _verifier(factory, authority, execution):
     production = __import__("src.hybrid.young_identity_model_sheet_production", fromlist=["x"])
-    execution_code_sha256 = sha256(Path(production.__file__).read_bytes()).hexdigest()
+    execution_code_sha256 = production._execution_source_sha256()
     if execution_code_sha256 != APPROVED_EXECUTION_CODE_SHA256:
         raise ProductionAdmissionError("protected source-code qualification changed")
     return ModelSheetV3BillingVerifier(

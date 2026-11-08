@@ -18,11 +18,18 @@ import pytest
 # or fixture payload changes.  They are not LIVE authority or production config.
 TEST_FIXTURE_MEDIA_BYTES = b"hermetic canonical model-sheet media"
 TEST_FIXTURE_MEDIA_SHA256 = "bbac93dee93c278c2f6e7cd59c82aea5f07eb5623332a168cc6d0efc441c85fd"
-TEST_FIXTURE_PRODUCTION_SOURCE_SHA256 = "6b7c4aeb15e1bcee528e69905a52c04182fa686d82915d84dd8f536171c66d12"
+TEST_FIXTURE_PRODUCTION_SOURCE_SHA256 = "17ea258c4f3c1cd09182325b17a513fbeef88c46d7e2afe70f953d4ec7dd8825"
 TEST_FIXTURE_AUTH_SCOPE = "JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001:c997b15604f763b9e02832b4b84a01ce89bf66b43916da9803a67dc5928848bd"
 TEST_FIXTURE_PROVIDER_RECEIPT_JSON = ("{\"actual_billed_amount\":\"UNKNOWN_UNTIL_BILLING_RECONCILIATION\",\"kind\":\"PNG_RESULT\",\"sha256\":\"bbac93dee93c278c2f6e7cd59c82aea5f07eb5623332a168cc6d0efc441c85fd\"}")
 TEST_FIXTURE_SETTLEMENT_RECEIPT_JSON = ("{\"auth_scope\":\"JACO_GEN28_YOUNG_IDENTITY_MODEL_SHEET_001:c997b15604f763b9e02832b4b84a01ce89bf66b43916da9803a67dc5928848bd\",\"authority\":\"TRANSPORT_AUTHENTICATED_FAL_READBACK\",\"authority_mode\":\"LIVE\",\"cost_total_micro_usd\":\"48000\",\"currency\":\"USD\",\"endpoint_id\":\"blackforestlabs/flux-3/text-to-image\",\"evidence_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"local_request_id\":\"c81bec2124005d306d2f843ac7b5d5c747feb254d090610582d79099f0535cc1\",\"provenance\":\"FAL_BILLING_READBACK\",\"provider_request_id\":\"01a1b7bf-ef29-77c1-ad38-5214baa197de\",\"schema\":2}")
 TEST_FIXTURE_SETTLEMENT_RECEIPT_SHA256 = "624a59731fa4df41778ee7656be63f712e835aef673611b3d9382db822bd04a0"
+
+
+def test_execution_source_digest_is_checkout_newline_stable():
+    """The approved source pin represents code, not Git checkout line endings."""
+    import src.hybrid.young_identity_model_sheet_production as production
+
+    assert production._execution_source_sha256() == "17ea258c4f3c1cd09182325b17a513fbeef88c46d7e2afe70f953d4ec7dd8825"
 
 
 def test_failed_readonly_guard_never_constructs_ledger_or_resolves_credential(monkeypatch, tmp_path):
@@ -336,7 +343,7 @@ import src.hybrid.young_identity_model_sheet_production as production
 import src.hybrid.young_identity_model_sheet_settlement as settlement
 # TEST-backed LIVE-mode codepath simulation only: fixed fixture pins isolate the
 # production module without supplying LIVE authority, roots, credentials, or I/O.
-assert sha256(Path(production.__file__).read_bytes()).hexdigest() == {TEST_FIXTURE_PRODUCTION_SOURCE_SHA256!r}
+assert production._execution_source_sha256() == {TEST_FIXTURE_PRODUCTION_SOURCE_SHA256!r}
 assert sha256((root / 'execution' / production.OPERATION_ID / 'provider-receipt.quarantine.png').read_bytes()).hexdigest() == {TEST_FIXTURE_MEDIA_SHA256!r}
 with __import__('sqlite3').connect(root / 'ledger' / 'standing-budget.sqlite3') as db:
     assert db.execute('SELECT receipt_sha256 FROM settlement_receipts WHERE request_id=?', (settlement.LOCAL_REQUEST_ID,)).fetchone()[0] == {TEST_FIXTURE_SETTLEMENT_RECEIPT_SHA256!r}
@@ -356,7 +363,7 @@ def test_public_live_fixture_settles_then_completes_in_guarded_fresh_cli_process
     import src.hybrid.young_identity_model_sheet_production as production
     import src.hybrid.young_identity_model_sheet_settlement as settlement
 
-    assert sha256(Path(production.__file__).read_bytes()).hexdigest() == TEST_FIXTURE_PRODUCTION_SOURCE_SHA256
+    assert production._execution_source_sha256() == TEST_FIXTURE_PRODUCTION_SOURCE_SHA256
     module = "tests.unit.test_young_identity_model_sheet_production"
     submit = [sys.executable, "-c", f"from {module} import _amended_live_recovery_child as f; import sys; f(sys.argv[1], sys.argv[2], sys.argv[3])", str(tmp_path), "submit", settlement.REMOTE_REQUEST_ID]
     first = subprocess.run(submit, text=True, capture_output=True, check=False, timeout=60)

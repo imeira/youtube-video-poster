@@ -76,6 +76,11 @@ def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
 
 
+def _execution_source_sha256() -> str:
+    """Hash source code canonically, independent of Git checkout line endings."""
+    return sha256(Path(__file__).read_bytes().replace(bytes((13, 10)), bytes((10,)))).hexdigest()
+
+
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -355,7 +360,7 @@ class YoungIdentityModelSheetProduction:
                 or q.get("review_packet_schema") != "jaco-fal-flux3-successor-benchmark/3"
                 or q.get("reviewer") != "LOCAL_PROCESS_REVIEW_AUTOMATED_V1"
                 or _digest(q.get("ci_digest_sha256"), "CI digest") != q["ci_digest_sha256"]
-                or _digest(q.get("execution_code_sha256"), "execution code digest") != sha256(Path(__file__).read_bytes()).hexdigest()
+                or _digest(q.get("execution_code_sha256"), "execution code digest") != _execution_source_sha256()
                 or q.get("authorization") != ("TEST_FIXTURE_CONSENT_ONLY" if is_test else "STANDING_USER_AUTHORIZATION_PROTECTED_POLICY")
                 or (is_test and (not self._test_only or q.get("consent_fixture", {}).get("kind") != "TEST_ONLY_CONSENT_FIXTURE"))
                 or (not is_test and self._test_only)):
