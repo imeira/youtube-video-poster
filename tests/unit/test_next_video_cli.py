@@ -254,6 +254,33 @@ def test_next_video_worker_rejects_forged_ready_terminal_before_done_projection(
     assert projected["queue"]["status"] == "PENDING"
 
 
+def test_next_video_worker_rejects_shape_valid_matching_hash_gate_forgery(tmp_path):
+    """A caller-controlled runner document cannot mint the two TEST gates."""
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, started
+    request_id = started["request_id"]
+    assert run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)[0] == 0
+    runner_path = workspace / "TC" / request_id[:16] / "runner" / "runner.json"
+    document = json.loads(runner_path.read_text(encoding="utf-8"))
+    document["state"] = "READY_TO_PUBLISH"
+    document["gates"] = {
+        kind: {
+            "artifact_path": media["path"], "artifact_sha256": media["sha256"],
+            "approved": True, "reviewer": "forged matching hash",
+        }
+        for kind, media in document["media"].items()
+    }
+    runner_path.write_text(json.dumps(document), encoding="utf-8")
+
+    code, rejected = run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 1, rejected
+    code, projected = run_next_video("status", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, projected
+    assert projected["queue"]["status"] == "WAITING"
+    assert projected["queue"]["next_action"] == "HUMAN_THUMBNAIL"
+
+
 def test_next_video_real_hash_bound_gates_reach_disabled_publication_terminal(tmp_path):
     workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
     code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
@@ -272,6 +299,31 @@ def test_next_video_real_hash_bound_gates_reach_disabled_publication_terminal(tm
     assert code == 0, projected
     assert projected["queue"]["state"] == "READY_TO_PUBLISH"
     assert projected["publication"] == "DISABLED"
+
+
+def test_next_video_terminal_rejects_gate_receipt_with_foreign_episode_or_artifact(tmp_path):
+    workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
+    code, started = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet))
+    assert code == 0, started
+    request_id = started["request_id"]
+    assert run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)[0] == 0
+    from src.hybrid.autonomous_cli import _approve_compiled_gate
+
+    _approve_compiled_gate(workspace, request_id, "thumbnail")
+    assert run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)[0] == 0
+    _approve_compiled_gate(workspace, request_id, "video")
+    receipt_path = workspace / "TC" / request_id[:16] / "gate-receipts" / "video.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["episode_id"] = "TEST-FOREIGN"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    code, rejected = run_next_video("worker", "--once", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 1, rejected
+    assert "gate receipt" in rejected["error"]
+    code, projected = run_next_video("status", "--workspace", str(workspace), "--request-id", request_id)
+    assert code == 0, projected
+    assert projected["queue"]["status"] == "PENDING"
+    assert projected["queue"]["next_action"] == "RESUME"
 
 
 def test_next_video_status_fails_closed_when_snapshot_missing_or_invalid(tmp_path):

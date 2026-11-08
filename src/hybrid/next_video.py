@@ -21,8 +21,8 @@ from src.hybrid.autonomous_cli import (
     _load_compiled,
     _serve_test_host,
     _start_checkpoint,
-    finalize_compiled_start,
     start_compiled,
+    validate_compiled_gate_receipts,
 )
 from src.hybrid.worker import DurableEpisodeWorker, EpisodeTaskQueue
 
@@ -76,7 +76,7 @@ def _workspace(value: Path | str) -> Path:
     return workspace
 
 
-def _deny_terminal_publication_state(document: dict | None) -> None:
+def _deny_terminal_publication_state(workspace: Path, request_id: str, document: dict | None) -> None:
     """Reject publication attempts; admit only hash-bound TEST gate completion."""
     if not isinstance(document, dict):
         raise TypeError("compiled runner state is missing or invalid")
@@ -101,6 +101,7 @@ def _deny_terminal_publication_state(document: dict | None) -> None:
                 raise ValueError("ready TEST terminal gate bytes do not match")
         except OSError as error:
             raise ValueError("ready TEST terminal gate artifact is unavailable") from error
+    validate_compiled_gate_receipts(workspace, request_id, document)
 
 
 def _metadata_path(workspace: Path, request_id: str) -> Path:
@@ -141,33 +142,34 @@ def start(workspace: Path, packet: Path, *, mode: str, concurrency: int) -> dict
     workspace = _workspace(workspace)
     # Existing validation snapshots the packet and denies non-TEST/external
     # policy before any queue, executor submission, or worker construction.
-    started = start_compiled(workspace, Path(packet), None, provider_concurrency=concurrency)
+    queued: dict = {}
+
+    def persist_public_admission(root: Path, adapter, _document: dict) -> None:
+        request_id = _request_id(json.loads((root / "compiled-harness.json").read_text(encoding="utf-8"))["request_id"])
+        metadata = {
+            "schema": _SCHEMA, "mode": "TEST", "request_id": request_id,
+            "episode_id": adapter.runner.episode_id, "concurrency": concurrency,
+            "compiled_sha256": adapter.pipeline.episode.checksum,
+            "policy_sha256": adapter.runner.policy.digest,
+        }
+        metadata_path = root / "next-video.json"
+        if metadata_path.exists():
+            if _metadata(workspace, request_id) != metadata:
+                raise ValueError("next-video metadata does not bind this start request")
+        else:
+            _atomic_json(metadata_path, metadata)
+        _start_checkpoint("after_metadata")
+        queued.update(EpisodeTaskQueue(_queue_path(workspace)).enqueue(adapter.runner.episode_id, str(workspace), "compiled"))
+        _start_checkpoint("after_queue")
+
+    # The request's non-reentrant admission lock spans snapshot, runner,
+    # public metadata, queue row, and READY intent; no public start can observe
+    # or complete only a prefix of this saga.
+    started = start_compiled(workspace, Path(packet), None, provider_concurrency=concurrency, on_admission=persist_public_admission)
     request_id = _request_id(started["request_id"])
-    root, adapter, _document = _load_compiled(workspace, request_id, provider_concurrency=concurrency)
-    metadata = {
-        "schema": _SCHEMA,
-        "mode": "TEST",
-        "request_id": request_id,
-        "episode_id": adapter.runner.episode_id,
-        "concurrency": concurrency,
-        "compiled_sha256": adapter.pipeline.episode.checksum,
-        "policy_sha256": adapter.runner.policy.digest,
-    }
-    metadata_path = root / "next-video.json"
-    if metadata_path.exists():
-        if _metadata(workspace, request_id) != metadata:
-            raise ValueError("next-video metadata does not bind this start request")
-    else:
-        _atomic_json(metadata_path, metadata)
-    _start_checkpoint("after_metadata")
-    queue = EpisodeTaskQueue(_queue_path(workspace))
-    queued = queue.enqueue(adapter.runner.episode_id, str(workspace), "compiled")
-    _start_checkpoint("after_queue")
-    # The admission stays non-public until the snapshot, harness, runner,
-    # public metadata, and idempotent durable queue row all exist.
-    finalize_compiled_start(workspace, request_id, provider_concurrency=concurrency)
+    metadata = _metadata(workspace, request_id)
     return {
-        "mode": "TEST", "request_id": request_id, "episode_id": adapter.runner.episode_id,
+        "mode": "TEST", "request_id": request_id, "episode_id": metadata["episode_id"],
         "concurrency": concurrency, "queued": {key: queued[key] for key in ("status", "next_action", "state")},
         "publication": "DISABLED",
         "note": "Local TEST/offline factory evidence only; no LIVE readiness or publication authority.",
@@ -223,7 +225,7 @@ def resume(workspace: Path, request_id: str, *, concurrency: int | None) -> dict
     _root, adapter, document = _load_compiled(
         workspace, request_id, provider_concurrency=metadata["concurrency"]
     )
-    _deny_terminal_publication_state(document)
+    _deny_terminal_publication_state(workspace, request_id, document)
     if adapter.runner.episode_id != metadata["episode_id"] or adapter.pipeline.episode.checksum != metadata["compiled_sha256"]:
         raise ValueError("next-video metadata no longer binds the compiled runner")
     # Fresh-process resume is read-only but must never report a stale cached QA
@@ -247,7 +249,7 @@ def worker(workspace: Path, request_id: str, *, once: bool, concurrency: int | N
         workspace, request_id, provider_concurrency=persisted
     )
     adapter.validate_cached_qa()
-    _deny_terminal_publication_state(document)
+    _deny_terminal_publication_state(workspace, request_id, document)
     if adapter.runner.episode_id != metadata["episode_id"] or adapter.pipeline.episode.checksum != metadata["compiled_sha256"]:
         raise ValueError("next-video metadata no longer binds the compiled runner")
     queue = EpisodeTaskQueue(_queue_path(workspace))

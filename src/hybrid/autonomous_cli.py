@@ -612,23 +612,29 @@ def _write_start_intent(path: Path, expected: dict, phase: str) -> None:
     _atomic_json(_reject_reparse_path(path), expected | {"phase": phase})
 
 
+def _finalize_compiled_start_locked(root: Path, rid: str, *, provider_concurrency: int, reject_scene: str | None = None) -> None:
+    """Finish an admission while its non-reentrant request lock is held."""
+    _lock_path, parent_intent = _compiled_start_paths(root, rid)
+    parent = _compiled_json(parent_intent)
+    root_document = _compiled_json(_reject_reparse_path(root / "start-intent.json"))
+    for document in (parent, root_document):
+        if (document.get("schema"), document.get("request_id"), document.get("reject_scene"), document.get("provider_concurrency")) != (
+            "compiled-start-intent/v2", rid, reject_scene, provider_concurrency
+        ):
+            raise ValueError("start intent does not bind this packet/mode/concurrency")
+    _write_start_intent(parent_intent, {key: parent[key] for key in parent if key != "phase"}, "READY")
+    _write_start_intent(root / "start-intent.json", {key: root_document[key] for key in root_document if key != "phase"}, "READY")
+
+
 def finalize_compiled_start(workspace: Path, rid: str, *, provider_concurrency: int, reject_scene: str | None = None) -> None:
     """Mark an admission ready only after its caller's durable receipts exist."""
     root = _compiled_root(_reject_reparse_path(Path(workspace)), rid)
-    lock_path, parent_intent = _compiled_start_paths(root, rid)
+    lock_path, _parent_intent = _compiled_start_paths(root, rid)
     with file_lock(lock_path):
-        parent = _compiled_json(parent_intent)
-        root_document = _compiled_json(_reject_reparse_path(root / "start-intent.json"))
-        for document in (parent, root_document):
-            if (document.get("schema"), document.get("request_id"), document.get("reject_scene"), document.get("provider_concurrency")) != (
-                "compiled-start-intent/v2", rid, reject_scene, provider_concurrency
-            ):
-                raise ValueError("start intent does not bind this packet/mode/concurrency")
-        _write_start_intent(parent_intent, {key: parent[key] for key in parent if key != "phase"}, "READY")
-        _write_start_intent(root / "start-intent.json", {key: root_document[key] for key in root_document if key != "phase"}, "READY")
+        _finalize_compiled_start_locked(root, rid, provider_concurrency=provider_concurrency, reject_scene=reject_scene)
 
 
-def start_compiled(workspace: Path, packet: Path, reject_scene: str | None, *, provider_concurrency: int = 1):
+def start_compiled(workspace: Path, packet: Path, reject_scene: str | None, *, provider_concurrency: int = 1, on_admission=None):
     """Recover one exact TEST admission in its final namespace under one lock."""
     from src.hybrid.compiled import CompiledEpisode
 
@@ -666,6 +672,9 @@ def start_compiled(workspace: Path, packet: Path, reject_scene: str | None, *, p
         if document is None:
             document = adapter.start()
         _start_checkpoint("after_runner")
+        if on_admission is not None:
+            on_admission(root, adapter, document)
+        _finalize_compiled_start_locked(root, rid, provider_concurrency=provider_concurrency, reject_scene=reject_scene)
     return _compiled_public(root, adapter, document)
 
 
@@ -860,6 +869,76 @@ def _worker_episode_id(root: Path) -> str:
     return episode_id
 
 
+def _compiled_gate_receipt_path(root: Path, kind: str) -> Path:
+    if kind not in {"thumbnail", "video"}:
+        raise ValueError("compiled gate kind is invalid")
+    return root / "gate-receipts" / f"{kind}.json"
+
+
+def _write_compiled_gate_receipt(root: Path, request_id: str, document: dict, kind: str) -> None:
+    """Persist TEST gate provenance outside mutable ``runner.json``.
+
+    The runner remains operational state, so it cannot alone authorize the
+    terminal queue transition.  This receipt is only written by the leased
+    approval entrypoint after the canonical runner transition succeeded.
+    """
+    gate = document.get("gates", {}).get(kind, {})
+    media = document.get("media", {}).get(kind, {})
+    receipt = {
+        "schema": "compiled-test-gate-receipt/v1",
+        "request_id": request_id,
+        "episode_id": document.get("episode_id"),
+        "kind": kind,
+        "artifact_path": media.get("path"),
+        "artifact_sha256": media.get("sha256"),
+        "approved": gate.get("approved"),
+        "reviewer": gate.get("reviewer"),
+    }
+    if (not isinstance(receipt["episode_id"], str) or not receipt["episode_id"]
+            or not isinstance(receipt["artifact_path"], str)
+            or not isinstance(receipt["artifact_sha256"], str)
+            or receipt["approved"] is not True
+            or not isinstance(receipt["reviewer"], str) or not receipt["reviewer"].strip()):
+        raise RuntimeError("canonical TEST gate did not produce a complete receipt")
+    path = _compiled_gate_receipt_path(root, kind)
+    if path.exists():
+        if _compiled_json(_reject_reparse_path(path)) != receipt:
+            raise RuntimeError("compiled TEST gate receipt is immutable")
+        return
+    _atomic_json(path, receipt)
+    if _compiled_json(_reject_reparse_path(path)) != receipt:
+        raise RuntimeError("compiled TEST gate receipt readback mismatch")
+
+
+def validate_compiled_gate_receipts(workspace: Path, request_id: str, document: dict) -> None:
+    """Require independently persisted leased gate receipts for terminal TEST state."""
+    root = _compiled_root(_reject_reparse_path(Path(workspace)), request_id)
+    if document.get("state") != "READY_TO_PUBLISH":
+        return
+    for kind in ("thumbnail", "video"):
+        receipt = _compiled_json(_reject_reparse_path(_compiled_gate_receipt_path(root, kind)))
+        required = {
+            "schema", "request_id", "episode_id", "kind", "artifact_path",
+            "artifact_sha256", "approved", "reviewer",
+        }
+        gate = document.get("gates", {}).get(kind, {})
+        media = document.get("media", {}).get(kind, {})
+        if (set(receipt) != required
+                or receipt.get("schema") != "compiled-test-gate-receipt/v1"
+                or receipt.get("request_id") != request_id
+                or receipt.get("episode_id") != document.get("episode_id")
+                or receipt.get("kind") != kind
+                or receipt.get("approved") is not True
+                or not isinstance(receipt.get("reviewer"), str) or not receipt["reviewer"].strip()
+                or receipt.get("artifact_path") != media.get("path")
+                or receipt.get("artifact_sha256") != media.get("sha256")
+                or any(receipt.get(key) != gate.get(key) for key in ("artifact_path", "artifact_sha256", "approved", "reviewer"))):
+            raise ValueError("ready TEST terminal lacks independently persisted gate receipt")
+        artifact = _reject_reparse_path(Path(receipt["artifact_path"]))
+        if sha256(_compiled_read_bytes(artifact)).hexdigest() != receipt["artifact_sha256"]:
+            raise ValueError("ready TEST terminal gate receipt artifact bytes do not match")
+
+
 def _approve_compiled_gate(workspace: Path, request_id: str, kind: str):
     """Mutate one gate only under the queue's existing episode lease."""
     from src.hybrid.autonomous import RunnerOwnership
@@ -906,6 +985,8 @@ def _approve_compiled_gate(workspace: Path, request_id: str, kind: str):
         artifact = _reject_reparse_path(Path(gate.get("artifact_path", "")))
         if not isinstance(digest, str) or sha256(_compiled_read_bytes(artifact)).hexdigest() != digest:
             raise RuntimeError("approval receipt is not bound to the current durable artifact")
+        assert_current(ownership)
+        _write_compiled_gate_receipt(root, request_id, document, kind)
         assert_current(ownership)
         queue.wake_gate(episode_id, kind)
         return root, adapter, document

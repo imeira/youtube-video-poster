@@ -14,7 +14,7 @@ A fachada somente compõe o `Director`/pacote compilado existente, `AutonomousCo
 - manifesto, áudio, timeline e receipts reabertos/re-hashados pelos componentes compilados existentes;
 - `concurrency`: inteiro persistido, padrão `1`, intervalo fechado `1..32`.
 
-`start` grava primeiro um intent hash-bound e toma um lock exclusivo por request. O intent recupera cada fase no mesmo namespace final (sem mover artefatos com caminhos absolutos): snapshot, harness, runner, metadados públicos e `enqueue` idempotente. Somente depois de todos os receipts duráveis o intent fica `READY`. Um namespace legado/parcial sem esse intent falha fechado e exige quarentena/reconciliação explícita; nunca é sobrescrito silenciosamente. `resume`, `status` e `worker` recebem o request ID literal SHA-256; nunca procuram um episódio por texto, tema ou nome de personagem.
+`start` grava primeiro um intent hash-bound e toma um lock exclusivo por request. Esse mesmo lock não reentrante cobre toda a saga pública no namespace final (sem mover artefatos com caminhos absolutos): snapshot, harness, runner, metadados públicos, `enqueue` idempotente e a transição do intent para `READY`. Logo, um segundo processo com o mesmo hash espera a saga contínua e nunca observa/admite somente metadata, fila ou `READY`; crash resume o mesmo intent exato. Um namespace legado/parcial sem esse intent falha fechado e exige quarentena/reconciliação explícita; nunca é sobrescrito silenciosamente. `resume`, `status` e `worker` recebem o request ID literal SHA-256; nunca procuram um episódio por texto, tema ou nome de personagem.
 
 ## Estados fechados e transições
 
@@ -22,7 +22,7 @@ A fila durável é a única projeção de trabalho:
 
 `PENDING/RESUME -> RUNNING -> WAITING/HUMAN_THUMBNAIL -> PENDING/RESUME -> WAITING/HUMAN_VIDEO -> PENDING/RESUME -> DONE/TERMINAL`.
 
-O runner associado usa seus estados fechados já existentes, incluindo `WAITING_THUMBNAIL_APPROVAL`, `WAITING_VIDEO_APPROVAL`, `READY_TO_PUBLISH`, `REJECTED` e `UNKNOWN_REQUIRES_RECONCILIATION`. Os únicos waits humanos são thumbnail, depois vídeo; a aprovação e a publicação não são parte desta fachada.
+O runner associado usa seus estados fechados já existentes, incluindo `WAITING_THUMBNAIL_APPROVAL`, `WAITING_VIDEO_APPROVAL`, `READY_TO_PUBLISH`, `REJECTED` e `UNKNOWN_REQUIRES_RECONCILIATION`. Os únicos waits humanos são thumbnail, depois vídeo; a aprovação e a publicação não são parte desta fachada. A transição TEST para `READY_TO_PUBLISH` exige, além do estado operacional, dois receipts fechados e write-once no journal de gate, criados no entrypoint leased de aprovação e vinculados a request ID, episódio, tipo, reviewer e às identidades exatas de thumbnail/vídeo staged. `runner.json` sozinho, mesmo com hashes coincidentes, não pode fazer a fila `DONE`.
 
 Antes de cada mutação da fila, o writer publica `WRITER_IN_PROGRESS`; após commit, publica snapshot `CURRENT`. O resultado de cada submit, QA e render permanece nos receipts hash-bound do runner/pipeline. `status` lê somente o snapshot JSON da fila e a projeção compilada de arquivos; não abre SQLite, WAL ou cria estado.
 
