@@ -6,6 +6,7 @@ stays reserved and requires reconciliation; it must never be blindly resubmitted
 
 import asyncio
 import hashlib
+import importlib
 import json
 import sqlite3
 import time
@@ -427,8 +428,9 @@ class Executor:
             # The marker is not a Python capability.  Reopen the repository-fixed
             # operation document on every admission/recovery and compare it to
             # the canonical ledger claim before any provider effect.
-            from src.hybrid.qualified_episode_operation import validate_generic_admission_marker
-
+            validate_generic_admission_marker = importlib.import_module(
+                "src.hybrid.qualified_episode_operation"
+            ).validate_generic_admission_marker
             validate_generic_admission_marker(job, generic_marker, claim)
             generic_final_admission = True
         jaco_final_admission = False
@@ -583,8 +585,9 @@ class Executor:
             claim = self._standing_ledger.claim(job.request_id)
         except Exception as exc:
             raise PermissionError("generic admission requires configured reservation") from exc
-        from src.hybrid.qualified_episode_operation import build_generic_admission_marker
-
+        build_generic_admission_marker = importlib.import_module(
+            "src.hybrid.qualified_episode_operation"
+        ).build_generic_admission_marker
         marker = build_generic_admission_marker(operation_id, job, claim)
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
