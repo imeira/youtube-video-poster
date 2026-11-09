@@ -203,10 +203,6 @@ def load_qualified_operation(operation_id: str) -> dict[str, Any]:
         "TEST_CONTROLLED_TRANSPORT",
     }:
         raise QualifiedEpisodeOperationError("qualified provider kind is unsupported")
-    if document["mode"] == "LIVE" and kind != "FAL_FLUX_TEXT_TO_IMAGE":
-        raise QualifiedEpisodeOperationError(
-            "LIVE currently supports only qualified FAL text-to-image"
-        )
     if document["mode"] == "TEST" and kind != "TEST_CONTROLLED_TRANSPORT":
         raise QualifiedEpisodeOperationError("TEST operations require controlled transport")
     return document
