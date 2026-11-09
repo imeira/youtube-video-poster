@@ -82,7 +82,7 @@ def test_operator_readiness_reports_protected_loader_failure_without_enablement(
 
     assert report["status"] == "BLOCKED"
     assert report["live_enabled"] is False
-    assert "protected operation" in report["reason"]
+    assert report["reason"] == "generic canonical binding is not provisioned"
 
 
 def _job(tmp_path: Path) -> Job:

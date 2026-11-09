@@ -56,8 +56,8 @@ class GenericLiveOperationResolver:
     def readiness(self, operation_id: str) -> dict:
         operation_id = self._operation_id(operation_id)
         # This is a bounded read-only preflight integration, never admission.
-        # The absent production locator falls through to the legacy blocked
-        # projection so existing operator diagnostics remain compatible.
+        # Do not fall back to the legacy readiness reader: it can only inspect
+        # descriptor structure and is not a generic LIVE trust anchor.
         from src.hybrid.generic_live_preflight import (
             GenericLivePreflightBlocked,
             GenericLivePreflightVerifier,
@@ -66,11 +66,13 @@ class GenericLiveOperationResolver:
             return GenericLivePreflightVerifier.production().verify(
                 operation_id, now=0
             )
-        except GenericLivePreflightBlocked:
-            from src.hybrid.qualified_episode_operation import (
-                qualified_operation_readiness,
-            )
-            return qualified_operation_readiness(operation_id)
+        except GenericLivePreflightBlocked as error:
+            return {
+                "operation_id": operation_id,
+                "status": "BLOCKED",
+                "live_enabled": False,
+                "reason": str(error),
+            }
 
     async def admit(self, operation_id: str) -> dict:
         operation_id = self._operation_id(operation_id)
