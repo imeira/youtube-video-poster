@@ -9,6 +9,7 @@ exercise the same source-owned transcript and ledger reads.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import stat
@@ -87,6 +88,61 @@ def _no_reparse(path: Path, label: str) -> None:
             raise CanonicalOperationBindingError(f"{label} traverses a reparse point")
 
 
+def _identity(path: Path, label: str) -> tuple[int, int, int, int]:
+    """Return a stable regular-file/dir identity without following a link."""
+    _no_reparse(path, label)
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise CanonicalOperationBindingError(f"{label} is unavailable") from error
+    if stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    ):
+        raise CanonicalOperationBindingError(f"{label} traverses a reparse point")
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _require_no_sqlite_sidecars(path: Path, label: str) -> None:
+    """WAL/SHM means a main-db-only snapshot could silently be stale."""
+    for suffix in ("-wal", "-shm"):
+        sidecar = path.with_name(path.name + suffix)
+        try:
+            sidecar.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise CanonicalOperationBindingError(f"{label} sidecar inspection failed") from error
+        raise CanonicalOperationBindingError(f"{label} WAL/SHM sidecar is present")
+
+
+def _stable_bytes(path: Path, label: str) -> bytes:
+    """Capture bytes from one no-follow descriptor and detect replacement."""
+    before = _identity(path, label)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise CanonicalOperationBindingError(f"{label} is unavailable") from error
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != before[:2]:
+            raise CanonicalOperationBindingError(f"{label} changed before descriptor capture")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after_descriptor = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after = _identity(path, label)
+    if before != after or (after_descriptor.st_dev, after_descriptor.st_ino, after_descriptor.st_size) != after[:3]:
+        raise CanonicalOperationBindingError(f"{label} changed during snapshot capture")
+    return b"".join(chunks)
+
+
 def _literal_child(root: Path, name: object, label: str) -> Path:
     if not isinstance(name, str) or not name or any(part in name for part in ("/", "\\", ":", "..")):
         raise CanonicalOperationBindingError(f"{label} is not a literal source-owned locator")
@@ -96,9 +152,8 @@ def _literal_child(root: Path, name: object, label: str) -> Path:
 
 
 def _json(path: Path, label: str) -> tuple[dict[str, Any], str]:
-    _no_reparse(path, label)
     try:
-        raw = path.read_bytes()
+        raw = _stable_bytes(path, label)
         document = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_pairs,
             parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
@@ -116,15 +171,30 @@ def _closed(document: object, fields: set[str], label: str) -> dict[str, Any]:
     return document
 
 
+def _read_sqlite_snapshot(path: Path, label: str) -> sqlite3.Connection:
+    """Open only verifier-captured bytes; never let SQLite open source paths."""
+    _require_no_sqlite_sidecars(path, label)
+    raw = _stable_bytes(path, label)
+    _require_no_sqlite_sidecars(path, label)
+    try:
+        database = sqlite3.connect(":memory:")
+        database.deserialize(raw)
+        return database
+    except (sqlite3.Error, ValueError) as error:
+        try:
+            database.close()
+        except UnboundLocalError:
+            pass
+        raise CanonicalOperationBindingError(f"{label} snapshot is unavailable") from error
+
+
 def _read_transcript(path: Path, consent: dict[str, Any]) -> None:
     assistant_id = consent["adjacent_assistant_message_id"]
     user_id = consent["user_message_id"]
     if type(assistant_id) is not int or type(user_id) is not int or user_id != assistant_id + 1:
         raise CanonicalOperationBindingError("canonical transcript message IDs are not adjacent")
-    _no_reparse(path, "canonical transcript")
     try:
-        uri = f"file:{path.resolve().as_posix()}?mode=ro&immutable=1"
-        database = sqlite3.connect(uri, uri=True)
+        database = _read_sqlite_snapshot(path, "canonical transcript")
         try:
             rows = database.execute(
                 "SELECT id, session_id, role, content FROM messages WHERE id IN (?, ?) ORDER BY id",
@@ -153,10 +223,8 @@ def _read_transcript(path: Path, consent: dict[str, Any]) -> None:
 
 
 def _read_ledger(path: Path, financial_sha256: str) -> None:
-    _no_reparse(path, "canonical financial ledger")
     try:
-        uri = f"file:{path.resolve().as_posix()}?mode=ro&immutable=1"
-        database = sqlite3.connect(uri, uri=True)
+        database = _read_sqlite_snapshot(path, "canonical financial ledger")
         try:
             row = database.execute("SELECT binding FROM policy WHERE id = 1").fetchone()
         finally:
@@ -176,9 +244,11 @@ def verify_canonical_operation_binding(
     """Verify one complete canonical chain and return immutable bound evidence.
 
     ``binding`` is a data parameter to keep the verifier reusable; production
-    must obtain it from the fixed registry.  The function has no dispatch or
-    mutation capability and opens both SQLite inputs with immutable read-only
-    URI mode.
+    must obtain it from the fixed registry. The function has no dispatch or
+    mutation capability. SQLite reads deserialize verifier-captured bytes into
+    memory after rejecting WAL/SHM sidecars; it never opens source databases
+    through SQLite and never writes, checkpoints, or deletes source state. A
+    future active-database path needs a separate canonical backup producer.
     """
     if not isinstance(binding, CanonicalOperationBinding):
         raise CanonicalOperationBindingError("canonical binding type is required")
@@ -189,6 +259,9 @@ def verify_canonical_operation_binding(
     policy_path = _literal_child(root, binding.authority_name, "operation authority")
     financial_path = _literal_child(root, binding.financial_name, "financial policy")
     ledger_path = _literal_child(root, binding.ledger_name, "financial ledger")
+    root_identity = _identity(root, "canonical root")
+    _require_no_sqlite_sidecars(Path(transcript_path), "canonical transcript")
+    _require_no_sqlite_sidecars(ledger_path, "canonical financial ledger")
     policy, policy_sha = _json(policy_path, "operation authority")
     financial, financial_sha = _json(financial_path, "financial policy")
     if policy_sha != _sha(binding.authority_sha256, "operation authority"):
@@ -225,6 +298,10 @@ def verify_canonical_operation_binding(
     ):
         raise CanonicalOperationBindingError("financial policy scope is invalid")
     _read_ledger(ledger_path, financial_sha)
+    _require_no_sqlite_sidecars(Path(transcript_path), "canonical transcript")
+    _require_no_sqlite_sidecars(ledger_path, "canonical financial ledger")
+    if _identity(root, "canonical root") != root_identity:
+        raise CanonicalOperationBindingError("canonical root changed during verification")
     return {
         "schema": "generic-canonical-binding-evidence/v1",
         "operation_id": operation_id,
@@ -235,6 +312,9 @@ def verify_canonical_operation_binding(
         "canonical_message_ids": {"assistant": consent["adjacent_assistant_message_id"], "user": consent["user_message_id"]},
         "financial": {"currency": "USD", "maximum_usd": maximum_usd},
         "read_only": True,
+        "status": "TEST_BOUND_EVIDENCE",
+        "authority": "NONE",
+        "live_authority": False,
     }
 
 

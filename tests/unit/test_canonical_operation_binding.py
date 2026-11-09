@@ -94,6 +94,58 @@ def test_verifies_source_owned_transcript_and_financial_ledger_read_only(tmp_pat
     assert not list(tmp_path.glob("*.sqlite3-shm"))
 
 
+def test_public_binding_verifier_labels_fixture_evidence_test_only(tmp_path):
+    from src.hybrid.canonical_operation_binding import (
+        verify_canonical_operation_binding,
+    )
+
+    binding, transcript, _policy, _financial = _fixture(tmp_path)
+
+    evidence = verify_canonical_operation_binding(binding, transcript_path=transcript)
+
+    assert evidence["status"] == "TEST_BOUND_EVIDENCE"
+    assert evidence["authority"] == "NONE"
+    assert evidence["live_authority"] is False
+
+
+@pytest.mark.parametrize("database_name", ["canonical-state.sqlite3", "ledger.sqlite3"])
+def test_rejects_any_present_wal_or_shm_before_reading_either_database(tmp_path, database_name):
+    from src.hybrid.canonical_operation_binding import (
+        verify_canonical_operation_binding,
+    )
+
+    binding, transcript, _policy, _financial = _fixture(tmp_path)
+    database = tmp_path / database_name
+    sidecar = database.with_name(database.name + "-wal")
+    sidecar.write_bytes(b"present WAL means the source snapshot is not immutable")
+
+    with pytest.raises(PermissionError, match="WAL|sidecar"):
+        verify_canonical_operation_binding(binding, transcript_path=transcript)
+
+
+@pytest.mark.parametrize("database_name", ["canonical-state.sqlite3", "ledger.sqlite3"])
+def test_rejects_committed_wal_revocation_for_each_canonical_database(tmp_path, database_name):
+    from src.hybrid.canonical_operation_binding import (
+        verify_canonical_operation_binding,
+    )
+
+    binding, transcript, _policy, _financial = _fixture(tmp_path)
+    database_path = tmp_path / database_name
+    writer = sqlite3.connect(database_path)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+        if database_name == "canonical-state.sqlite3":
+            writer.execute("UPDATE messages SET content = 'REVOKED' WHERE id = 18")
+        else:
+            writer.execute("UPDATE policy SET binding = ? WHERE id = 1", ("{}",))
+        writer.commit()
+        assert database_path.with_name(database_path.name + "-wal").exists()
+        with pytest.raises(PermissionError, match="WAL|sidecar"):
+            verify_canonical_operation_binding(binding, transcript_path=transcript)
+    finally:
+        writer.close()
+
+
 def test_rejects_fabricated_packet_even_when_every_claim_hash_is_rebound(tmp_path):
     from src.hybrid.canonical_operation_binding import (
         CanonicalOperationBinding,
@@ -136,17 +188,12 @@ def test_rejects_foreign_scope_before_financial_admission(tmp_path):
         verify_canonical_operation_binding(foreign, transcript_path=transcript)
 
 
-def test_public_live_preflight_returns_only_binding_evidence_when_fixed_binding_is_provisioned(tmp_path, monkeypatch):
+def test_public_live_preflight_rejects_caller_constructed_binding_without_issuer_receipt(tmp_path, monkeypatch):
     from src.hybrid import generic_live_canonical_config as config
     from src.hybrid.generic_live_preflight import GenericLivePreflightVerifier
 
     binding, _transcript, _policy, _financial = _fixture(tmp_path)
     monkeypatch.setattr(config, "GENERIC_CANONICAL_BINDINGS", {binding.operation_id: binding})
 
-    result = GenericLivePreflightVerifier.production().verify(binding.operation_id, now=0)
-
-    assert result["status"] == "CANONICAL_BINDING_VERIFIED"
-    assert result["live_enabled"] is False
-    assert result["dispatch_permitted"] is False
-    assert set(result["blocked"]) == {"quote", "independent_review", "license"}
-    assert result["canonical_binding"]["operation_policy_sha256"] != result["canonical_binding"]["financial_policy_sha256"]
+    with pytest.raises(PermissionError, match="issuer.*unprovisioned"):
+        GenericLivePreflightVerifier.production().verify(binding.operation_id, now=0)

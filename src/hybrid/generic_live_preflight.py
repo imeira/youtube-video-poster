@@ -223,6 +223,14 @@ class GenericLivePreflightVerifier:
             evidence = verify_fixed_canonical_operation_binding(binding)
         except PermissionError as error:
             raise GenericLivePreflightBlocked(str(error)) from error
+        # A binding constructed by a caller (or a self-hashed fixture) proves
+        # only byte consistency.  Generic LIVE issuance must be supplied by a
+        # separately provisioned canonical Hermes/Telegram receipt producer;
+        # no such producer is configured for this generic route yet.
+        if evidence.get("authority") != "CANONICAL_ISSUER_RECEIPT":
+            raise GenericLivePreflightBlocked(
+                "canonical issuer receipt is unprovisioned; TEST-bound evidence is not LIVE authority"
+            )
         return {
             "schema": "generic-live-preflight/v3",
             "operation_id": operation_id,
