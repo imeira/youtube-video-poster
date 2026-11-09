@@ -168,17 +168,15 @@ def _verify_test_packet(root: Path, operation_id: str, *, now: int) -> dict[str,
 
 
 def _generic_canonical_binding(operation_id: str) -> object:
-    """Return only a reviewed generic binding; never inspect episode authority.
-
-    A future implementation may invoke pure, parameterized validators selected
-    by this fixed binding.  It must not compose an episode factory or open an
-    operation-specific authority, transcript, or ledger as generic readiness.
-    """
+    """Return a repository-owned fixed binding for one literal operation only."""
+    from src.hybrid.canonical_operation_binding import CanonicalOperationBinding
     from src.hybrid.generic_live_canonical_config import GENERIC_CANONICAL_BINDINGS
 
     binding = GENERIC_CANONICAL_BINDINGS.get(operation_id)
     if binding is None:
         raise GenericLivePreflightBlocked("generic canonical binding is not provisioned")
+    if not isinstance(binding, CanonicalOperationBinding) or binding.operation_id != operation_id:
+        raise GenericLivePreflightBlocked("generic canonical binding is invalid")
     return binding
 
 
@@ -217,5 +215,25 @@ class GenericLivePreflightVerifier:
             raise GenericLivePreflightBlocked("verification clock must be an integer")
         if self._domain == "TEST":
             return _verify_test_packet(self._root, operation_id, now=now)
-        _generic_canonical_binding(operation_id)
-        raise GenericLivePreflightBlocked("generic LIVE verifier is not implemented")
+        binding = _generic_canonical_binding(operation_id)
+        try:
+            from src.hybrid.canonical_operation_binding import (
+                verify_fixed_canonical_operation_binding,
+            )
+            evidence = verify_fixed_canonical_operation_binding(binding)
+        except PermissionError as error:
+            raise GenericLivePreflightBlocked(str(error)) from error
+        return {
+            "schema": "generic-live-preflight/v3",
+            "operation_id": operation_id,
+            "status": "CANONICAL_BINDING_VERIFIED",
+            "live_enabled": False,
+            "dispatch_permitted": False,
+            "canonical_binding": evidence,
+            "blocked": {
+                "quote": "MISSING_PROVIDER_QUOTE",
+                "independent_review": "MISSING_INDEPENDENT_REVIEW",
+                "license": "MISSING_LICENSE_PROVENANCE",
+            },
+            "reason": "canonical mandate and financial binding verified; quote/review/license remain blocked",
+        }
