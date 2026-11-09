@@ -285,6 +285,10 @@ class QualifiedEpisodeOperation:
 def build_qualified_episode_operation(operation_id: str) -> QualifiedEpisodeOperation:
     """Build only from a validated protected document and fixed provider mapping."""
     document = load_qualified_operation(operation_id)
+    if document["mode"] == "LIVE":
+        # Generic LIVE qualification is intentionally unavailable: do not open a
+        # ledger, executor, credential-bearing provider, or transport first.
+        raise QualifiedEpisodeOperationError("generic LIVE qualification is unprovisioned")
     root = ProtectedOperationLocator.production().root
     payload_path = _relative(root, document["payload"]["path"], "payload")
     payload, payload_sha = _read_json(payload_path, "payload")
@@ -320,6 +324,46 @@ def _ledger_path(ledger: object) -> str:
     return str(path)
 
 
+def _canonical_storage_path(path: object, label: str) -> str:
+    """Return a reparse-free canonical SQLite path without accepting aliases."""
+    if not isinstance(path, Path):
+        raise QualifiedEpisodeOperationError(f"{label} path is required")
+    existing = path
+    while not existing.exists():
+        if existing.parent == existing:
+            raise QualifiedEpisodeOperationError(f"{label} path is unavailable")
+        existing = existing.parent
+    _no_reparse(existing)
+    return os.path.normcase(str(path.resolve(strict=False)))
+
+
+def validate_intrinsic_generic_storage(
+    job: Job, executor_database: object, ledger: object
+) -> None:
+    """Require the closed document's exact executor and ledger before I/O."""
+    if type(job) is not QualifiedGenericJob:
+        raise QualifiedEpisodeOperationError("generic storage requires a qualified generic job")
+    operation_id = _literal_operation_id(job.operation_id)
+    document = load_qualified_operation(operation_id)
+    root = ProtectedOperationLocator.production().root
+    expected_executor = _canonical_storage_path(
+        _relative(root, document["executor_database"], "executor database"),
+        "canonical executor database",
+    )
+    expected_ledger = _canonical_storage_path(
+        _relative(root, document["ledger_database"], "ledger database"),
+        "canonical ledger database",
+    )
+    if (
+        _canonical_storage_path(executor_database, "executor database") != expected_executor
+        or _canonical_storage_path(getattr(ledger, "path", None), "ledger database")
+        != expected_ledger
+    ):
+        raise QualifiedEpisodeOperationError(
+            "generic operation storage does not match fixed canonical paths"
+        )
+
+
 def _claim_evidence(claim: object) -> dict[str, Any]:
     required = {
         "request_id", "episode_id", "provider", "month", "reserved_usd", "state",
@@ -341,9 +385,12 @@ def _claim_evidence(claim: object) -> dict[str, Any]:
     return dict(claim)
 
 
-def _marker_for_claim(operation_id: str, job: Job, ledger: object, claim: object) -> dict[str, Any]:
+def _marker_for_claim(
+    operation_id: str, job: Job, executor_database: Path, ledger: object, claim: object
+) -> dict[str, Any]:
     """Build the complete immutable record from fixed document and configured ledger."""
     operation_id = _literal_operation_id(operation_id)
+    validate_intrinsic_generic_storage(job, executor_database, ledger)
     if getattr(job, "operation_id", None) != operation_id:
         raise QualifiedEpisodeOperationError("operation document does not match prepared job origin")
     document = load_qualified_operation(operation_id)
@@ -394,18 +441,23 @@ def _marker_for_claim(operation_id: str, job: Job, ledger: object, claim: object
         "authority_mode": job.mode,
         "input_kind": job.input_kind,
         "payload_sha256": job.intent_input_sha256,
+        "executor_canonical_path": _canonical_storage_path(executor_database, "executor database"),
         "ledger_canonical_path": _ledger_path(ledger),
         "ledger_binding": dict(binding),
         "reservation_claim": claim,
     }
 
 
-def build_generic_admission_marker(operation_id: str, job: Job, ledger: object) -> dict[str, Any]:
+def build_generic_admission_marker(
+    operation_id: str, job: Job, executor_database: Path, ledger: object
+) -> dict[str, Any]:
     """Create a write-once marker from the configured canonical ledger only."""
     claim_reader = getattr(ledger, "claim", None)
     if not callable(claim_reader):
         raise QualifiedEpisodeOperationError("configured canonical ledger claim reader is required")
-    return _marker_for_claim(operation_id, job, ledger, claim_reader(job.request_id))
+    return _marker_for_claim(
+        operation_id, job, executor_database, ledger, claim_reader(job.request_id)
+    )
 
 
 def validate_prepared_generic_origin(job: Job, row: object, operation_id: str) -> None:
@@ -425,7 +477,9 @@ def validate_prepared_generic_origin(job: Job, row: object, operation_id: str) -
         raise QualifiedEpisodeOperationError("operation document does not match generic job contract")
 
 
-def validate_generic_admission_marker(job: Job, marker: object, ledger: object, row: object) -> None:
+def validate_generic_admission_marker(
+    job: Job, marker: object, executor_database: Path, ledger: object, row: object
+) -> None:
     """Validate closed operation, ledger source, and recovery claim before I/O."""
     if not isinstance(marker, dict) or not isinstance(row, dict):
         raise QualifiedEpisodeOperationError("generic admission marker and executor row are required")
@@ -433,7 +487,9 @@ def validate_generic_admission_marker(job: Job, marker: object, ledger: object, 
     if row.get("generic_operation_id") != operation_id:
         raise QualifiedEpisodeOperationError("operation document does not match prepared job origin")
     reservation_claim = marker.get("reservation_claim")
-    expected = _marker_for_claim(operation_id, job, ledger, reservation_claim)
+    expected = _marker_for_claim(
+        operation_id, job, executor_database, ledger, reservation_claim
+    )
     if marker != expected:
         raise QualifiedEpisodeOperationError("generic admission marker is forged or stale")
     claim_reader = getattr(ledger, "claim", None)

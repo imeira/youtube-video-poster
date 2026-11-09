@@ -136,8 +136,8 @@ class Executor:
         _jaco_final_admission_verifier=None,
         _jaco_production_binding: dict | None = None,
     ):
-        self.database = Path(database)
-        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self._database = Path(database)
+        self._database.parent.mkdir(parents=True, exist_ok=True)
         self.config = config
         self.prior_spend = money(prior_spend)
         self.cas = cas
@@ -172,6 +172,22 @@ class Executor:
         self.lock_dir = self.database.with_suffix(".locks")
         self.lock_dir.mkdir(exist_ok=True)
         self._initialize()
+
+    @property
+    def database(self) -> Path:
+        """The constructor-selected database is immutable after composition."""
+        return self._database
+
+    def _verify_intrinsic_generic_storage(self, job: Job) -> None:
+        """Bind generic admission to the fixed document's two SQLite stores."""
+        if not isinstance(getattr(job, "operation_id", None), str) or not job.operation_id:
+            return
+        if type(self) is not Executor:
+            raise PermissionError("generic admission requires the canonical Executor class")
+        verifier = importlib.import_module(
+            "src.hybrid.qualified_episode_operation"
+        ).validate_intrinsic_generic_storage
+        verifier(job, self.database, self._standing_ledger)
 
     def _initialize(self):
         """Serialize schema/WAL bootstrap without reconfiguring open WAL stores."""
@@ -432,7 +448,7 @@ class Executor:
                 "src.hybrid.qualified_episode_operation"
             ).validate_generic_admission_marker
             validate_generic_admission_marker(
-                job, generic_marker, self._standing_ledger, row
+                job, generic_marker, self.database, self._standing_ledger, row
             )
             generic_final_admission = True
         jaco_final_admission = False
@@ -579,6 +595,7 @@ class Executor:
         compares it to the already-reserved configured ledger claim.
         """
         job = deepcopy(job)
+        self._verify_intrinsic_generic_storage(job)
         row = self.inspect(job.request_id)
         if row is None or row.get("status") != "PREPARED":
             raise RuntimeError("only a prepared executor intent can be generically admitted")
@@ -595,7 +612,7 @@ class Executor:
             "src.hybrid.qualified_episode_operation"
         ).build_generic_admission_marker
         marker = build_generic_admission_marker(
-            operation_id, job, self._standing_ledger
+            operation_id, job, self.database, self._standing_ledger
         )
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -970,6 +987,7 @@ class Executor:
                 "explicit scene, endpoint and positive maximum cost required"
             )
         self._validate_input_contract(job)
+        self._verify_intrinsic_generic_storage(job)
         authenticated_binding = self._configured_authenticated_budget_binding(job)
         if authenticated_binding is None:
             jaco_live = (
@@ -1181,7 +1199,7 @@ class Executor:
                     "src.hybrid.qualified_episode_operation"
                 ).validate_generic_admission_marker
                 validate_generic_admission_marker(
-                    job, generic_marker, self._standing_ledger, existing
+                    job, generic_marker, self.database, self._standing_ledger, existing
                 )
             if existing and existing["status"] == "COMPLETE":
                 self._verify_receipt(existing)

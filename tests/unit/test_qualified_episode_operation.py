@@ -6,6 +6,8 @@ import hashlib
 import json
 import multiprocessing
 import os
+import shutil
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
@@ -28,6 +30,8 @@ def _operation(
     episode_id: str = "TEST-EPISODE-001",
     ledger_database: str = "state/ledger.sqlite3",
     ledger_policy_sha256: str = "a" * 64,
+    mode: str = "TEST",
+    provider_kind: str = "TEST_CONTROLLED_TRANSPORT",
 ) -> str:
     payload = {"prompt": "fixture only"}
     payload_path = root / "payload.json"
@@ -36,7 +40,7 @@ def _operation(
         "schema": "qualified-episode-operation/v1",
         "operation_id": operation_id,
         "episode_id": episode_id,
-        "mode": "TEST",
+        "mode": mode,
         "executor_database": "state/executor.sqlite3",
         "ledger_database": ledger_database,
         "ledger_policy_sha256": ledger_policy_sha256,
@@ -46,7 +50,7 @@ def _operation(
         "input_kind": "TEXT_TO_IMAGE",
         "payload": {"path": "payload.json", "sha256": payload_sha},
         "maximum_usd": "0.01",
-        "provider_kind": "TEST_CONTROLLED_TRANSPORT",
+        "provider_kind": provider_kind,
     }
     return _write(root / "operations" / f"{operation_id}.json", operation)
 
@@ -211,3 +215,92 @@ def test_legacy_job_request_identity_is_unchanged():
         input_kind="TEXT_TO_IMAGE",
     )
     assert legacy.request_id == "4a25277ab08449334b22381c394198a009c615ce983932a1fda86b9fe24718c3"
+
+
+def test_generic_storage_boundary_rejects_substituted_executor_or_ledger_before_effects(monkeypatch, tmp_path):
+    """The fixed document, not a caller's object graph, owns both SQLite paths."""
+    import src.hybrid.qualified_episode_operation as subject
+    from src.hybrid.execution import Executor
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    root = tmp_path / "protected"
+    _operation(root, operation_id="TEST-OWNER-001")
+    monkeypatch.setattr(subject, "_PROTECTED_ROOT", root)
+    owner = subject.build_qualified_episode_operation("TEST-OWNER-001")
+    attacker_db = root / "attacker" / "executor.sqlite3"
+    attacker_ledger_path = root / "attacker" / "ledger.sqlite3"
+    attacker_ledger = StandingBudgetLedger(
+        attacker_ledger_path, policy_sha256="a" * 64,
+        episode_limit_usd="0.01", month_limit_usd="0.01", experiment_limit_usd="0.01", mode="TEST",
+    )
+    wrong_executor = Executor(attacker_db, Config(limit=Decimal("0.01"), concurrency=1), standing_ledger=owner.ledger)
+    wrong_executor_before = attacker_db.read_bytes()
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="storage"):
+        wrong_executor.prepare_intent(owner.job)
+    assert wrong_executor.inspect(owner.job.request_id) is None
+    assert attacker_db.read_bytes() == wrong_executor_before
+
+    both_wrong_db = root / "attacker" / "both.sqlite3"
+    both_wrong = Executor(both_wrong_db, Config(limit=Decimal("0.01"), concurrency=1), standing_ledger=attacker_ledger)
+    both_wrong_before = both_wrong_db.read_bytes()
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="storage"):
+        both_wrong.prepare_intent(owner.job)
+    assert both_wrong.inspect(owner.job.request_id) is None
+    assert both_wrong_db.read_bytes() == both_wrong_before
+
+    owner.executor.prepare_intent(owner.job)
+    owner_executor_before = owner.executor.database.read_bytes()
+    owner_ledger_before = owner.ledger.path.read_bytes()
+    attacker_ledger_before = attacker_ledger.path.read_bytes()
+    wrong_ledger_executor = Executor(owner.executor.database, Config(limit=Decimal("0.01"), concurrency=1), standing_ledger=attacker_ledger)
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="storage"):
+        wrong_ledger_executor.bind_prepared_generic_admission(owner.job, operation_id="TEST-OWNER-001")
+    assert owner.executor.inspect(owner.job.request_id).get("generic_admission_marker") is None
+    assert owner.executor.database.read_bytes() == owner_executor_before
+    assert owner.ledger.path.read_bytes() == owner_ledger_before
+    assert attacker_ledger.path.read_bytes() == attacker_ledger_before
+
+    copied_db = root / "attacker" / "copied-executor.sqlite3"
+    with sqlite3.connect(owner.executor.database) as database:
+        database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    source_bytes = owner.executor.database.read_bytes()
+    shutil.copyfile(owner.executor.database, copied_db)
+    assert copied_db.read_bytes() == source_bytes
+    copied_executor = Executor(copied_db, Config(limit=Decimal("0.01"), concurrency=1), standing_ledger=owner.ledger)
+    copied_before = copied_db.read_bytes()
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="storage"):
+        copied_executor.bind_prepared_generic_admission(owner.job, operation_id="TEST-OWNER-001")
+    assert copied_executor.inspect(owner.job.request_id).get("generic_admission_marker") is None
+    assert copied_db.read_bytes() == copied_before
+
+    owner.ledger.reserve(
+        owner.job.request_id, owner.document["episode_id"], owner.job.endpoint, owner.job.cost,
+        settlement_mode="FAL_READBACK_V2", auth_scope="TEST_LOCAL_ONLY",
+        provider_request_id="UNASSIGNED", authority_mode="TEST",
+    )
+    owner.executor.bind_prepared_generic_admission(owner.job, operation_id="TEST-OWNER-001")
+    owner.executor._checkpoint_provider_binding(owner.job.request_id, "TEST-remote")
+    with sqlite3.connect(owner.executor.database) as database:
+        database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    shutil.copyfile(owner.executor.database, copied_db)
+    copied_recovery = Executor(copied_db, Config(limit=Decimal("0.01"), concurrency=1), standing_ledger=owner.ledger)
+    journal_before = (root / "state" / "transport-journal.json").read_bytes() if (root / "state" / "transport-journal.json").exists() else b""
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="storage"):
+        asyncio.run(copied_recovery.run(owner.job, owner.provider))
+    assert ((root / "state" / "transport-journal.json").read_bytes() if (root / "state" / "transport-journal.json").exists() else b"") == journal_before
+
+
+def test_generic_live_operation_is_denied_before_reservation_or_transport(monkeypatch, tmp_path):
+    import src.hybrid.qualified_episode_operation as subject
+
+    root = tmp_path / "protected"
+    _operation(
+        root, operation_id="TEST-LIVE-001", mode="LIVE",
+        provider_kind="FAL_FLUX_IMAGE_EDIT",
+    )
+    monkeypatch.setattr(subject, "_PROTECTED_ROOT", root)
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="unprovisioned"):
+        subject.build_qualified_episode_operation("TEST-LIVE-001")
+    assert not (root / "state").exists()
+    assert not (root / "quarantine").exists()
