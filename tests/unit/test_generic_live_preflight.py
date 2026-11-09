@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -44,13 +44,39 @@ def _verify(root: Path, operation_id: str):
     return GenericLivePreflightVerifier.for_test(root).verify(operation_id, now=1_700_000_000)
 
 
+def _is_exact_operation_packet_path(
+    path: PurePath, root: PurePath, operation_id: str
+) -> bool:
+    try:
+        return path.relative_to(root).parts == ("operations", f"{operation_id}.json")
+    except ValueError:
+        return False
+
+
+@pytest.mark.parametrize(
+    ("path_type", "root_text"),
+    [(PurePosixPath, "/fixture"), (PureWindowsPath, "C:/fixture")],
+)
+def test_live_packet_read_guard_matches_only_logical_packet_path(path_type, root_text):
+    root = path_type(root_text)
+    operation_id = "LIVE-GENERIC-001"
+
+    assert _is_exact_operation_packet_path(
+        root / "operations" / f"{operation_id}.json", root, operation_id
+    )
+    assert not _is_exact_operation_packet_path(root / "payload.json", root, operation_id)
+    assert not _is_exact_operation_packet_path(
+        root / "operations" / operation_id / f"{operation_id}.json", root, operation_id
+    )
+
+
 def test_for_test_rejects_live_packet_before_reading_any_evidence(tmp_path, monkeypatch):
     (tmp_path / "operations").mkdir()
     operation_id = _fixture(tmp_path, mode="LIVE")
     from src.hybrid.generic_live_preflight import GenericLivePreflightVerifier
 
     def evidence_must_not_be_read(path):
-        if str(path).endswith(f"operations\\{operation_id}.json"):
+        if _is_exact_operation_packet_path(path, tmp_path, operation_id):
             return original_read_bytes(path)
         raise AssertionError("TEST verifier read LIVE supporting evidence")
 
