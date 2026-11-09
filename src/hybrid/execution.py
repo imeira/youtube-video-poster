@@ -6,6 +6,7 @@ stays reserved and requires reconciliation; it must never be blindly resubmitted
 
 import asyncio
 import hashlib
+import importlib
 import json
 import sqlite3
 import time
@@ -135,8 +136,8 @@ class Executor:
         _jaco_final_admission_verifier=None,
         _jaco_production_binding: dict | None = None,
     ):
-        self.database = Path(database)
-        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self._database = Path(database)
+        self._database.parent.mkdir(parents=True, exist_ok=True)
         self.config = config
         self.prior_spend = money(prior_spend)
         self.cas = cas
@@ -171,6 +172,22 @@ class Executor:
         self.lock_dir = self.database.with_suffix(".locks")
         self.lock_dir.mkdir(exist_ok=True)
         self._initialize()
+
+    @property
+    def database(self) -> Path:
+        """The constructor-selected database is immutable after composition."""
+        return self._database
+
+    def _verify_intrinsic_generic_storage(self, job: Job) -> None:
+        """Bind generic admission to the fixed document's two SQLite stores."""
+        if not isinstance(getattr(job, "operation_id", None), str) or not job.operation_id:
+            return
+        if type(self) is not Executor:
+            raise PermissionError("generic admission requires the canonical Executor class")
+        verifier = importlib.import_module(
+            "src.hybrid.qualified_episode_operation"
+        ).validate_intrinsic_generic_storage
+        verifier(job, self.database, self._standing_ledger)
 
     def _initialize(self):
         """Serialize schema/WAL bootstrap without reconfiguring open WAL stores."""
@@ -421,6 +438,19 @@ class Executor:
             raise PermissionError(
                 "prepared FAL submit ledger reservation value mismatch"
             )
+        generic_final_admission = False
+        generic_marker = row.get("generic_admission_marker")
+        if generic_marker is not None:
+            # The marker is not a Python capability.  Reopen the repository-fixed
+            # operation document on every admission/recovery and compare it to
+            # the canonical ledger claim before any provider effect.
+            validate_generic_admission_marker = importlib.import_module(
+                "src.hybrid.qualified_episode_operation"
+            ).validate_generic_admission_marker
+            validate_generic_admission_marker(
+                job, generic_marker, self.database, self._standing_ledger, row
+            )
+            generic_final_admission = True
         jaco_final_admission = False
         if job.endpoint == "blackforestlabs/flux-3/text-to-image":
             marker = row.get("final_admission_marker")
@@ -484,7 +514,7 @@ class Executor:
             jaco_final_admission = True
         authenticated = self._fresh_authenticated_budget_admission(job, row)
         if authenticated is None:
-            if jaco_final_admission:
+            if jaco_final_admission or generic_final_admission:
                 return
             # Legacy TEST ledger paths remain mechanically useful, but their
             # fixed local scope cannot be relabeled as bridge authority or LIVE.
@@ -554,6 +584,46 @@ class Executor:
             if prior is not None and prior != admission:
                 raise PermissionError("prepared executor admission marker is immutable")
             persisted["standing_ledger_admission"] = admission
+            self._put(db, persisted)
+        return self.inspect(job.request_id)
+
+    def bind_prepared_generic_admission(self, job: Job, *, operation_id: str) -> dict:
+        """Persist a fixed-loader-validated generic admission marker.
+
+        ``operation_id`` selects no caller authority: the validator reopens the
+        repository-fixed closed document, verifies its immutable evidence, and
+        compares it to the already-reserved configured ledger claim.
+        """
+        job = deepcopy(job)
+        self._verify_intrinsic_generic_storage(job)
+        row = self.inspect(job.request_id)
+        if row is None or row.get("status") != "PREPARED":
+            raise RuntimeError("only a prepared executor intent can be generically admitted")
+        validate_prepared_generic_origin = importlib.import_module(
+            "src.hybrid.qualified_episode_operation"
+        ).validate_prepared_generic_origin
+        validate_prepared_generic_origin(job, row, operation_id)
+        self._verify_prepared_fal_admission(job, row, require_admitted_marker=False)
+        try:
+            self._standing_ledger.claim(job.request_id)
+        except Exception as exc:
+            raise PermissionError("generic admission requires configured reservation") from exc
+        build_generic_admission_marker = importlib.import_module(
+            "src.hybrid.qualified_episode_operation"
+        ).build_generic_admission_marker
+        marker = build_generic_admission_marker(
+            operation_id, job, self.database, self._standing_ledger
+        )
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            found = db.execute("SELECT data FROM jobs WHERE id=?", (job.request_id,)).fetchone()
+            persisted = json.loads(found[0]) if found else None
+            if persisted is None or persisted.get("status") != "PREPARED":
+                raise RuntimeError("prepared executor intent changed during generic admission")
+            prior = persisted.get("generic_admission_marker")
+            if prior is not None and prior != marker:
+                raise PermissionError("generic admission marker is immutable")
+            persisted["generic_admission_marker"] = marker
             self._put(db, persisted)
         return self.inspect(job.request_id)
 
@@ -883,6 +953,12 @@ class Executor:
                     "provider_id": "",
                     "partial": "",
                     "cache_key": cache_key,
+                    **(
+                        {"generic_operation_id": job.operation_id}
+                        if isinstance(getattr(job, "operation_id", None), str)
+                        and job.operation_id
+                        else {}
+                    ),
                     "request": json.loads(json.dumps(asdict(job), default=str)),
                 },
             )
@@ -911,6 +987,7 @@ class Executor:
                 "explicit scene, endpoint and positive maximum cost required"
             )
         self._validate_input_contract(job)
+        self._verify_intrinsic_generic_storage(job)
         authenticated_binding = self._configured_authenticated_budget_binding(job)
         if authenticated_binding is None:
             jaco_live = (
@@ -1112,6 +1189,18 @@ class Executor:
         lock = self.locks.setdefault(job.request_id, asyncio.Lock())
         async with lock, file_slot([self.lock_dir / (job.request_id + ".lock")]):
             existing = self.inspect(job.request_id)
+            generic_marker = (
+                existing.get("generic_admission_marker")
+                if isinstance(existing, dict)
+                else None
+            )
+            if generic_marker is not None:
+                validate_generic_admission_marker = importlib.import_module(
+                    "src.hybrid.qualified_episode_operation"
+                ).validate_generic_admission_marker
+                validate_generic_admission_marker(
+                    job, generic_marker, self.database, self._standing_ledger, existing
+                )
             if existing and existing["status"] == "COMPLETE":
                 self._verify_receipt(existing)
                 return existing

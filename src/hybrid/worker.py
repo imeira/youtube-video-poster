@@ -365,7 +365,14 @@ class DurableEpisodeWorker:
         finally:
             stopped.set(); heartbeat.cancel(); await asyncio.gather(heartbeat, return_exceptions=True)
             if not retain:
-                self.leases.release(current, now=time.time())
+                # Completion/retry already performed an active-fence check.  A
+                # sub-second TTL may expire in the cleanup gap; never turn that
+                # completed durable transition into a host failure, and never
+                # delete a lease after another run has fenced it.
+                try:
+                    self.leases.release(current, now=time.time())
+                except RuntimeError:
+                    pass
 
     async def serve(self, *, stop: asyncio.Event | None = None, concurrency: int = 1):
         """Run a rolling bounded window of the existing fenced worker turns."""

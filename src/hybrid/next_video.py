@@ -266,7 +266,7 @@ def worker(workspace: Path, request_id: str, *, once: bool, concurrency: int | N
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "resume", "status", "worker"))
+    parser.add_argument("action", choices=("start", "resume", "status", "worker", "live-readiness"))
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--compiled-input", type=Path)
     parser.add_argument("--request-id")
@@ -275,7 +275,18 @@ def main(argv=None) -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     try:
-        if args.action == "start":
+        if args.action == "live-readiness":
+            if args.compiled_input is not None or args.request_id is not None or args.once or args.concurrency is not None or args.mode != "TEST":
+                parser.error("live-readiness accepts only --workspace and is not a LIVE execution command")
+            # Validate the workspace spelling for the same production-root deny,
+            # without creating or reading any workspace state.
+            _workspace(args.workspace)
+            from src.hybrid.generic_live_composition import (
+                GenericLiveCompositionRegistry,
+            )
+
+            result = GenericLiveCompositionRegistry.production().readiness("GENERIC-NEXT-VIDEO")
+        elif args.action == "start":
             if args.compiled_input is None or args.request_id is not None or args.once:
                 parser.error("start requires --compiled-input and accepts neither --request-id nor --once")
             result = start(args.workspace, args.compiled_input, mode=args.mode, concurrency=1 if args.concurrency is None else args.concurrency)

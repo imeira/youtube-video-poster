@@ -6,6 +6,10 @@ Este slice é uma única fachada pública, genérica e somente `TEST`, para oper
 
 A fachada somente compõe o `Director`/pacote compilado existente, `AutonomousCompiledTestAdapter`, `EpisodeTaskQueue` e `DurableEpisodeWorker`. Ela não cria um segundo runner, executor ou kernel de submit: o `Executor` já ligado ao pipeline é o único kernel.
 
+## Operator-only generic LIVE readiness
+
+`studio next-video live-readiness --workspace ROOT` is a no-write operator preflight for the generic protected composition registry. It does not resolve a packet, create a queue/executor/ledger, read credentials, reserve budget, construct a provider, or invoke provider/billing/TTS/GPU/delivery/publication operations. The fixed production registry is presently empty, so it returns `status=BLOCKED`, `live_enabled=false`, and the exact unresolved provider qualification, independent identity, quote/billing readback, license, canonical budget, image-reference, and real-TTS fields. It explicitly reports `UNRESOLVED_NO_AZURE`; this is not an Azure selection or a LIVE readiness claim.
+
 ## Entradas imutáveis e identidade
 
 - `--compiled-input`: diretório local com `compiled.json`, `manifest.json` e `policy.json`, copiado e hash-bound pelo adaptador existente;
