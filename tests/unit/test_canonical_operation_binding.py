@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -71,6 +74,9 @@ def _fixture(tmp_path: Path):
         financial_name="financial-policy.json", financial_sha256=financial_sha,
         ledger_name="ledger.sqlite3", transcript_path=transcript,
         operation_scope="IMAGE_GENERATION",
+        fixture_mode="TEST_OFFLINE_FROZEN",
+        expected_transcript_sha256=hashlib.sha256(transcript.read_bytes()).hexdigest(),
+        expected_ledger_sha256=hashlib.sha256(ledger.read_bytes()).hexdigest(),
     )
     return binding, transcript, policy, financial
 
@@ -106,6 +112,74 @@ def test_public_binding_verifier_labels_fixture_evidence_test_only(tmp_path):
     assert evidence["status"] == "TEST_BOUND_EVIDENCE"
     assert evidence["authority"] == "NONE"
     assert evidence["live_authority"] is False
+
+
+def test_requires_a_pinned_offline_test_fixture_manifest_before_any_source_read(tmp_path, monkeypatch):
+    """Arbitrary filesystem paths are not a canonical or LIVE capture interface."""
+    from src.hybrid.canonical_operation_binding import (
+        CanonicalOperationBinding,
+        verify_canonical_operation_binding,
+    )
+
+    binding, transcript, _policy, _financial = _fixture(tmp_path)
+    opened: list[object] = []
+    monkeypatch.setattr(os, "open", lambda *args, **kwargs: opened.append(args) or 0)
+    unbound = CanonicalOperationBinding(
+        operation_id=binding.operation_id,
+        root=binding.root,
+        authority_name=binding.authority_name,
+        authority_sha256=binding.authority_sha256,
+        financial_name=binding.financial_name,
+        financial_sha256=binding.financial_sha256,
+        ledger_name=binding.ledger_name,
+        transcript_path=transcript,
+        operation_scope=binding.operation_scope,
+        fixture_mode="UNBOUND",
+        expected_transcript_sha256="0" * 64,
+        expected_ledger_sha256="0" * 64,
+    )
+
+    with pytest.raises(PermissionError, match="offline TEST fixture"):
+        verify_canonical_operation_binding(unbound, transcript_path=transcript)
+    assert opened == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native junction behavior is Windows-only")
+def test_windows_junction_source_is_rejected_before_target_bytes_are_read(tmp_path):
+    """A real mklink /J ancestor must not be followed by the capture boundary."""
+    from src.hybrid.canonical_operation_binding import (
+        CanonicalOperationBinding,
+        verify_canonical_operation_binding,
+    )
+
+    target = tmp_path / "target"
+    target.mkdir()
+    binding, transcript, _policy, _financial = _fixture(target)
+    junction = tmp_path / "junction"
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode:
+        pytest.skip(f"mklink /J unavailable: {completed.stderr or completed.stdout}")
+    redirected = CanonicalOperationBinding(
+        operation_id=binding.operation_id,
+        root=junction,
+        authority_name=binding.authority_name,
+        authority_sha256=binding.authority_sha256,
+        financial_name=binding.financial_name,
+        financial_sha256=binding.financial_sha256,
+        ledger_name=binding.ledger_name,
+        transcript_path=junction / transcript.name,
+        operation_scope=binding.operation_scope,
+        fixture_mode="TEST_OFFLINE_FROZEN",
+        expected_transcript_sha256=hashlib.sha256(transcript.read_bytes()).hexdigest(),
+        expected_ledger_sha256=hashlib.sha256((target / "ledger.sqlite3").read_bytes()).hexdigest(),
+    )
+
+    with pytest.raises(PermissionError, match="reparse|unavailable"):
+        verify_canonical_operation_binding(redirected, transcript_path=redirected.transcript_path)
 
 
 @pytest.mark.parametrize("database_name", ["canonical-state.sqlite3", "ledger.sqlite3"])
@@ -161,7 +235,10 @@ def test_rejects_fabricated_packet_even_when_every_claim_hash_is_rebound(tmp_pat
         financial_sha256=binding.financial_sha256, ledger_name=binding.ledger_name,
         transcript_path=binding.transcript_path,
         operation_scope=binding.operation_scope,
-    )
+        fixture_mode=binding.fixture_mode,
+        expected_transcript_sha256=binding.expected_transcript_sha256,
+        expected_ledger_sha256=binding.expected_ledger_sha256,
+        )
 
     with pytest.raises(PermissionError, match="transcript"):
         verify_canonical_operation_binding(forged, transcript_path=transcript)
@@ -182,7 +259,10 @@ def test_rejects_foreign_scope_before_financial_admission(tmp_path):
         financial_sha256=binding.financial_sha256, ledger_name=binding.ledger_name,
         transcript_path=binding.transcript_path,
         operation_scope=binding.operation_scope,
-    )
+        fixture_mode=binding.fixture_mode,
+        expected_transcript_sha256=binding.expected_transcript_sha256,
+        expected_ledger_sha256=binding.expected_ledger_sha256,
+        )
 
     with pytest.raises(PermissionError, match="scope"):
         verify_canonical_operation_binding(foreign, transcript_path=transcript)

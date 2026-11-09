@@ -1,18 +1,18 @@
-"""Pure read-only validation of a fixed canonical operation binding.
+"""TEST-only verification of frozen, offline canonical fixture bytes.
 
-This module deliberately returns evidence only.  It does not construct an
-executor, reserve money, claim work, load credentials, or dispatch a provider.
-Production callers obtain ``CanonicalOperationBinding`` instances only from a
-repository-owned literal registry; test fixtures may call the pure verifier to
-exercise the same source-owned transcript and ledger reads.
+This module cannot read or attest a live database.  It validates only explicitly
+pinned fixture payloads for tests, returns TEST-bound evidence, and has no
+issuer, dispatch, provider, credential, reservation, or production capability.
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
 import sqlite3
 import stat
+import sys
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -40,6 +40,10 @@ class CanonicalOperationBinding:
     ledger_name: str
     transcript_path: Path
     operation_scope: str
+    # Frozen TEST fixtures only; arbitrary/live filesystem capture is rejected.
+    fixture_mode: str = "UNBOUND"
+    expected_transcript_sha256: str = ""
+    expected_ledger_sha256: str = ""
 
 
 def _pairs(items: list[tuple[str, object]]) -> dict[str, object]:
@@ -116,31 +120,135 @@ def _require_no_sqlite_sidecars(path: Path, label: str) -> None:
         raise CanonicalOperationBindingError(f"{label} WAL/SHM sidecar is present")
 
 
-def _stable_bytes(path: Path, label: str) -> bytes:
-    """Capture bytes from one no-follow descriptor and detect replacement."""
-    before = _identity(path, label)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+def _stable_bytes_posix(path: Path, label: str) -> bytes:
+    """Open an absolute path as a pinned dirfd chain; never resolve a final string."""
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise CanonicalOperationBindingError(f"{label} unsupported platform boundary")
+    absolute = path.absolute()
+    if not absolute.is_absolute() or not absolute.name:
+        raise CanonicalOperationBindingError(f"{label} is unavailable")
+    descriptors: list[int] = []
     try:
-        descriptor = os.open(path, flags)
+        current = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
+        descriptors.append(current)
+        for part in absolute.parent.relative_to(absolute.anchor).parts:
+            current = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current
+            )
+            descriptors.append(current)
+        final = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
+        descriptors.append(final)
+        if not stat.S_ISREG(os.fstat(final).st_mode):
+            raise CanonicalOperationBindingError(f"{label} is not a regular file")
+        chunks: list[bytes] = []
+        while chunk := os.read(final, 1024 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
     except OSError as error:
         raise CanonicalOperationBindingError(f"{label} is unavailable") from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _stable_bytes_windows(path: Path, label: str) -> bytes:
+    """Pin every ancestor HANDLE with no delete sharing before reading the file.
+
+    FILE_FLAG_OPEN_REPARSE_POINT applies only to each object opened, not to its
+    ancestors.  Opening and retaining every directory handle (without
+    FILE_SHARE_DELETE) prevents a junction swap between validation and the
+    final file handle.  All validation and reads are through Win32 HANDLEs;
+    ``os.open`` is deliberately never used on Windows.
+    """
+    if sys.platform != "win32":
+        raise CanonicalOperationBindingError(f"{label} unsupported platform boundary")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    create_file.restype = ctypes.c_void_p
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    get_information.restype = ctypes.c_int
+    read_file = kernel32.ReadFile
+    read_file.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p]
+    read_file.restype = ctypes.c_int
+    invalid = ctypes.c_void_p(-1).value
+    generic_read, file_list_directory = 0x80000000, 0x0001
+    share_read_write = 0x00000001 | 0x00000002  # deliberately excludes DELETE
+    open_existing, reparse, backup_semantics = 3, 0x00200000, 0x02000000
+    reparse_attribute, directory_attribute = 0x0400, 0x0010
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", ctypes.c_uint32),
+            ("creation_low", ctypes.c_uint32), ("creation_high", ctypes.c_uint32),
+            ("access_low", ctypes.c_uint32), ("access_high", ctypes.c_uint32),
+            ("write_low", ctypes.c_uint32), ("write_high", ctypes.c_uint32),
+            ("volume_serial", ctypes.c_uint32), ("size_high", ctypes.c_uint32),
+            ("size_low", ctypes.c_uint32), ("links", ctypes.c_uint32),
+            ("file_index_high", ctypes.c_uint32), ("file_index_low", ctypes.c_uint32),
+        ]
+
+    def handle_information(handle: int) -> FileInformation:
+        information = FileInformation()
+        if not get_information(handle, ctypes.byref(information)):
+            raise CanonicalOperationBindingError(f"{label} handle inspection failed")
+        return information
+
+    absolute = path.absolute()
+    if not absolute.is_absolute() or not absolute.name:
+        raise CanonicalOperationBindingError(f"{label} is unavailable")
+    ancestors = [Path(absolute.anchor)]
+    cursor = Path(absolute.anchor)
+    for part in absolute.parent.relative_to(absolute.anchor).parts:
+        cursor /= part
+        ancestors.append(cursor)
+    handles: list[int] = []
     try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != before[:2]:
-            raise CanonicalOperationBindingError(f"{label} changed before descriptor capture")
+        for ancestor in ancestors:
+            handle = create_file(str(ancestor), file_list_directory, share_read_write, None, open_existing, reparse | backup_semantics, None)
+            if handle == invalid:
+                raise CanonicalOperationBindingError(f"{label} ancestor handle is unavailable")
+            handles.append(handle)
+            information = handle_information(handle)
+            if information.attributes & reparse_attribute:
+                raise CanonicalOperationBindingError(f"{label} traverses a reparse point")
+        file_handle = create_file(str(absolute), generic_read, share_read_write, None, open_existing, reparse, None)
+        if file_handle == invalid:
+            raise CanonicalOperationBindingError(f"{label} is unavailable")
+        handles.append(file_handle)
+        information = handle_information(file_handle)
+        file_id = (information.volume_serial, information.file_index_high, information.file_index_low)
+        if (
+            information.attributes & (reparse_attribute | directory_attribute)
+            or file_id == (0, 0, 0)
+        ):
+            raise CanonicalOperationBindingError(f"{label} is not a regular non-reparse file")
         chunks: list[bytes] = []
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
+            buffer = ctypes.create_string_buffer(1024 * 1024)
+            count = ctypes.c_uint32()
+            if not read_file(file_handle, buffer, len(buffer), ctypes.byref(count), None):
+                raise CanonicalOperationBindingError(f"{label} read failed")
+            if not count.value:
                 break
-            chunks.append(chunk)
-        after_descriptor = os.fstat(descriptor)
+            chunks.append(buffer.raw[: count.value])
+        return b"".join(chunks)
     finally:
-        os.close(descriptor)
-    after = _identity(path, label)
-    if before != after or (after_descriptor.st_dev, after_descriptor.st_ino, after_descriptor.st_size) != after[:3]:
-        raise CanonicalOperationBindingError(f"{label} changed during snapshot capture")
-    return b"".join(chunks)
+        for handle in reversed(handles):
+            close_handle(handle)
+
+
+def _stable_bytes(path: Path, label: str) -> bytes:
+    """Read only via a platform-native no-follow/pinned boundary."""
+    if sys.platform == "win32":
+        return _stable_bytes_windows(path, label)
+    if os.name == "posix":
+        return _stable_bytes_posix(path, label)
+    raise CanonicalOperationBindingError(f"{label} unsupported platform boundary")
 
 
 def _literal_child(root: Path, name: object, label: str) -> Path:
@@ -241,17 +349,22 @@ def _read_ledger(path: Path, financial_sha256: str) -> None:
 def verify_canonical_operation_binding(
     binding: CanonicalOperationBinding, *, transcript_path: Path
 ) -> dict[str, Any]:
-    """Verify one complete canonical chain and return immutable bound evidence.
+    """Verify a frozen TEST fixture and return non-authoritative bound evidence.
 
-    ``binding`` is a data parameter to keep the verifier reusable; production
-    must obtain it from the fixed registry. The function has no dispatch or
-    mutation capability. SQLite reads deserialize verifier-captured bytes into
-    memory after rejecting WAL/SHM sidecars; it never opens source databases
-    through SQLite and never writes, checkpoints, or deletes source state. A
-    future active-database path needs a separate canonical backup producer.
+    This function rejects non-TEST fixture contracts before any file operation.
+    It intentionally does not provide live SQLite consistency: a transient or
+    persistent WAL writer is outside this verifier's authority.  SQLite only
+    deserializes already captured fixture bytes in memory; it never opens a
+    source database through SQLite, writes, checkpoints, or deletes source state.
     """
     if not isinstance(binding, CanonicalOperationBinding):
         raise CanonicalOperationBindingError("canonical binding type is required")
+    # This is intentionally not a live-source capture API. It cannot establish
+    # atomicity against a WAL writer, so reject before any path inspection/open.
+    if binding.fixture_mode != "TEST_OFFLINE_FROZEN":
+        raise CanonicalOperationBindingError("offline TEST fixture contract is required")
+    expected_transcript_sha = _sha(binding.expected_transcript_sha256, "expected transcript")
+    expected_ledger_sha = _sha(binding.expected_ledger_sha256, "expected ledger")
     operation_id = _literal(binding.operation_id, "operation ID")
     operation_scope = _literal(binding.operation_scope, "operation scope")
     root = Path(binding.root)
@@ -262,6 +375,11 @@ def verify_canonical_operation_binding(
     root_identity = _identity(root, "canonical root")
     _require_no_sqlite_sidecars(Path(transcript_path), "canonical transcript")
     _require_no_sqlite_sidecars(ledger_path, "canonical financial ledger")
+    # Integrity pins are TEST-fixture checks only, not live source authority.
+    if sha256(_stable_bytes(Path(transcript_path), "canonical transcript")).hexdigest() != expected_transcript_sha:
+        raise CanonicalOperationBindingError("canonical transcript fixture hash mismatch")
+    if sha256(_stable_bytes(ledger_path, "canonical financial ledger")).hexdigest() != expected_ledger_sha:
+        raise CanonicalOperationBindingError("canonical financial ledger fixture hash mismatch")
     policy, policy_sha = _json(policy_path, "operation authority")
     financial, financial_sha = _json(financial_path, "financial policy")
     if policy_sha != _sha(binding.authority_sha256, "operation authority"):
