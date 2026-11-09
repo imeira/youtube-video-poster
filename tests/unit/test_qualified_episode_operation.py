@@ -18,14 +18,19 @@ def _write(path: Path, value: object) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _operation(root: Path) -> str:
+def _operation(
+    root: Path,
+    *,
+    operation_id: str = "TEST-NEXT-VIDEO-001",
+    episode_id: str = "TEST-EPISODE-001",
+) -> str:
     payload = {"prompt": "fixture only"}
     payload_path = root / "payload.json"
     payload_sha = _write(payload_path, payload)
     operation = {
         "schema": "qualified-episode-operation/v1",
-        "operation_id": "TEST-NEXT-VIDEO-001",
-        "episode_id": "TEST-EPISODE-001",
+        "operation_id": operation_id,
+        "episode_id": episode_id,
         "mode": "TEST",
         "executor_database": "state/executor.sqlite3",
         "ledger_database": "state/ledger.sqlite3",
@@ -38,7 +43,7 @@ def _operation(root: Path) -> str:
         "maximum_usd": "0.01",
         "provider_kind": "TEST_CONTROLLED_TRANSPORT",
     }
-    return _write(root / "operations" / "TEST-NEXT-VIDEO-001.json", operation)
+    return _write(root / "operations" / f"{operation_id}.json", operation)
 
 
 def _fresh_process_worker(root_text: str, crash: bool, queue) -> None:
@@ -103,3 +108,57 @@ def test_missing_protected_configuration_fails_closed_without_creating_root(monk
     with pytest.raises(subject.QualifiedEpisodeOperationError, match="protected operation"):
         subject.build_qualified_episode_operation("TEST-NEXT-VIDEO-001")
     assert not root.exists()
+
+
+def test_foreign_closed_operation_cannot_bind_or_recover_owner_job(monkeypatch, tmp_path):
+    """A second valid document is not authority for the first operation's job."""
+    import src.hybrid.qualified_episode_operation as subject
+
+    root = tmp_path / "protected"
+    _operation(root, operation_id="TEST-OWNER-001")
+    _operation(root, operation_id="TEST-FOREIGN-002")
+    monkeypatch.setattr(subject, "_PROTECTED_ROOT", root)
+    operation = subject.build_qualified_episode_operation("TEST-OWNER-001")
+    operation.executor.prepare_intent(operation.job)
+    operation.ledger.reserve(
+        operation.job.request_id,
+        operation.document["episode_id"],
+        operation.job.endpoint,
+        operation.job.cost,
+        settlement_mode="FAL_READBACK_V2",
+        auth_scope="TEST_LOCAL_ONLY",
+        provider_request_id="UNASSIGNED",
+        authority_mode="TEST",
+    )
+    prepared = operation.executor.inspect(operation.job.request_id)
+    claim = operation.ledger.claim(operation.job.request_id)
+
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="origin"):
+        operation.executor.bind_prepared_generic_admission(
+            operation.job, operation_id="TEST-FOREIGN-002"
+        )
+    assert operation.executor.inspect(operation.job.request_id) == prepared
+    assert operation.ledger.claim(operation.job.request_id) == claim
+    assert not (root / "state" / "transport-journal.json").exists()
+
+    operation.executor.bind_prepared_generic_admission(
+        operation.job, operation_id="TEST-OWNER-001"
+    )
+    operation.executor._checkpoint_provider_binding(
+        operation.job.request_id, "TEST-remote"
+    )
+    with operation.executor._db() as db:
+        row = operation.executor.inspect(operation.job.request_id)
+        row["generic_admission_marker"]["operation_id"] = "TEST-FOREIGN-002"
+        db.execute(
+            "UPDATE jobs SET data=? WHERE id=?",
+            (json.dumps(row, sort_keys=True), operation.job.request_id),
+        )
+    tampered = operation.executor.inspect(operation.job.request_id)
+    claim = operation.ledger.claim(operation.job.request_id)
+
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="origin"):
+        asyncio.run(operation.executor.run(operation.job, operation.provider))
+    assert operation.executor.inspect(operation.job.request_id) == tampered
+    assert operation.ledger.claim(operation.job.request_id) == claim
+    assert not (root / "state" / "transport-journal.json").exists()

@@ -431,7 +431,9 @@ class Executor:
             validate_generic_admission_marker = importlib.import_module(
                 "src.hybrid.qualified_episode_operation"
             ).validate_generic_admission_marker
-            validate_generic_admission_marker(job, generic_marker, claim)
+            validate_generic_admission_marker(
+                job, generic_marker, self._standing_ledger, row
+            )
             generic_final_admission = True
         jaco_final_admission = False
         if job.endpoint == "blackforestlabs/flux-3/text-to-image":
@@ -582,13 +584,15 @@ class Executor:
             raise RuntimeError("only a prepared executor intent can be generically admitted")
         self._verify_prepared_fal_admission(job, row, require_admitted_marker=False)
         try:
-            claim = self._standing_ledger.claim(job.request_id)
+            self._standing_ledger.claim(job.request_id)
         except Exception as exc:
             raise PermissionError("generic admission requires configured reservation") from exc
         build_generic_admission_marker = importlib.import_module(
             "src.hybrid.qualified_episode_operation"
         ).build_generic_admission_marker
-        marker = build_generic_admission_marker(operation_id, job, claim)
+        marker = build_generic_admission_marker(
+            operation_id, job, self._standing_ledger
+        )
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             found = db.execute("SELECT data FROM jobs WHERE id=?", (job.request_id,)).fetchone()
@@ -928,6 +932,12 @@ class Executor:
                     "provider_id": "",
                     "partial": "",
                     "cache_key": cache_key,
+                    **(
+                        {"generic_operation_id": job.operation_id}
+                        if isinstance(getattr(job, "operation_id", None), str)
+                        and job.operation_id
+                        else {}
+                    ),
                     "request": json.loads(json.dumps(asdict(job), default=str)),
                 },
             )
@@ -1157,6 +1167,18 @@ class Executor:
         lock = self.locks.setdefault(job.request_id, asyncio.Lock())
         async with lock, file_slot([self.lock_dir / (job.request_id + ".lock")]):
             existing = self.inspect(job.request_id)
+            generic_marker = (
+                existing.get("generic_admission_marker")
+                if isinstance(existing, dict)
+                else None
+            )
+            if generic_marker is not None:
+                validate_generic_admission_marker = importlib.import_module(
+                    "src.hybrid.qualified_episode_operation"
+                ).validate_generic_admission_marker
+                validate_generic_admission_marker(
+                    job, generic_marker, self._standing_ledger, existing
+                )
             if existing and existing["status"] == "COMPLETE":
                 self._verify_receipt(existing)
                 return existing

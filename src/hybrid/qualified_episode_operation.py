@@ -129,7 +129,12 @@ def load_qualified_operation(operation_id: str) -> dict[str, Any]:
     }
     if set(document) != required or document.get("schema") != "qualified-episode-operation/v1":
         raise QualifiedEpisodeOperationError("closed qualified operation schema is required")
-    if document.get("operation_id") != operation_id or not _ID.fullmatch(str(document.get("episode_id", ""))):
+    if (
+        not isinstance(document.get("operation_id"), str)
+        or document["operation_id"] != operation_id
+        or not isinstance(document.get("episode_id"), str)
+        or not _ID.fullmatch(document["episode_id"])
+    ):
         raise QualifiedEpisodeOperationError("operation and episode identity mismatch")
     if document.get("mode") not in {"TEST", "LIVE"}:
         raise QualifiedEpisodeOperationError("explicit TEST or LIVE operation mode is required")
@@ -251,6 +256,7 @@ def build_qualified_episode_operation(operation_id: str) -> QualifiedEpisodeOper
         raise QualifiedEpisodeOperationError("payload changed while building operation")
     job = Job(document["scene"], document["category"], document["mode"], document["endpoint"], payload,
               None, Decimal(document["maximum_usd"]), input_kind=document["input_kind"])
+    object.__setattr__(job, "operation_id", operation_id)
     if job.input_kind != "TEXT_TO_IMAGE":
         raise QualifiedEpisodeOperationError("reference manifest qualification is required before IMAGE_EDIT construction")
     executor_path = _relative(root, document["executor_database"], "executor database")
@@ -267,33 +273,125 @@ def build_qualified_episode_operation(operation_id: str) -> QualifiedEpisodeOper
     return QualifiedEpisodeOperation(operation_id, document, root, executor, ledger, job, provider)
 
 
-def build_generic_admission_marker(operation_id: str, job: Job, claim: dict[str, Any]) -> dict[str, Any]:
-    """Create a write-once marker from a fixed-root document, never caller data."""
+def _ledger_path(ledger: object) -> str:
+    path = getattr(ledger, "path", None)
+    if not isinstance(path, Path):
+        raise QualifiedEpisodeOperationError("configured canonical ledger path is required")
+    return str(path)
+
+
+def _claim_evidence(claim: object) -> dict[str, Any]:
+    required = {
+        "request_id", "episode_id", "provider", "month", "reserved_usd", "state",
+        "actual_usd", "experiment", "settlement_mode", "auth_scope",
+        "provider_request_id", "authority_mode", "billing_snapshot_generation",
+    }
+    if not isinstance(claim, dict) or set(claim) != required:
+        raise QualifiedEpisodeOperationError("closed canonical ledger claim is required")
+    strings = required - {"actual_usd", "experiment", "billing_snapshot_generation"}
+    if any(type(claim[key]) is not str or not claim[key] for key in strings):
+        raise QualifiedEpisodeOperationError("canonical ledger claim type is invalid")
+    if claim["actual_usd"] is not None and type(claim["actual_usd"]) is not str:
+        raise QualifiedEpisodeOperationError("canonical ledger actual amount type is invalid")
+    if type(claim["experiment"]) is not bool or (
+        claim["billing_snapshot_generation"] is not None
+        and type(claim["billing_snapshot_generation"]) is not int
+    ):
+        raise QualifiedEpisodeOperationError("canonical ledger claim type is invalid")
+    return dict(claim)
+
+
+def _marker_for_claim(operation_id: str, job: Job, ledger: object, claim: object) -> dict[str, Any]:
+    """Build the complete immutable record from fixed document and configured ledger."""
+    operation_id = _literal_operation_id(operation_id)
+    if getattr(job, "operation_id", None) != operation_id:
+        raise QualifiedEpisodeOperationError("operation document does not match prepared job origin")
     document = load_qualified_operation(operation_id)
-    if (document["mode"] != job.mode or document["endpoint"] != job.endpoint
-            or document["scene"] != job.scene or document["category"] != job.category
-            or document["input_kind"] != job.input_kind
-            or document["payload"]["sha256"] != job.intent_input_sha256):
+    binding = getattr(ledger, "binding", None)
+    if not isinstance(binding, dict) or set(binding) not in ({
+        "schema", "policy_sha256", "mode", "currency", "authority", "episode", "month", "experiment",
+    }, {
+        "schema", "policy_sha256", "mode", "currency", "authority", "episode", "month", "experiment", "authorization_id",
+    }):
+        raise QualifiedEpisodeOperationError("configured canonical ledger binding is invalid")
+    if (
+        document["mode"] != job.mode
+        or document["endpoint"] != job.endpoint
+        or document["scene"] != job.scene
+        or document["category"] != job.category
+        or document["input_kind"] != job.input_kind
+        or document["payload"]["sha256"] != job.intent_input_sha256
+        or binding.get("policy_sha256") != document["ledger_policy_sha256"]
+        or binding.get("mode") != job.mode
+        or binding.get("currency") != "USD"
+    ):
         raise QualifiedEpisodeOperationError("operation immutable inputs do not match prepared job")
-    if not isinstance(claim, dict) or claim.get("request_id") != job.request_id:
-        raise QualifiedEpisodeOperationError("generic marker requires exact ledger claim")
-    _, document_sha = _read_json(_operation_path(ProtectedOperationLocator.production().root, operation_id), "protected operation")
-    return {"schema": 1, "kind": "GENERIC_CLOSED_ADMISSION", "operation_id": operation_id,
-            "operation_sha256": document_sha, "request_id": job.request_id,
-            "episode_id": document["episode_id"], "endpoint": job.endpoint,
-            "payload_sha256": job.intent_input_sha256, "input_kind": job.input_kind,
-            "auth_scope": claim.get("auth_scope"), "authority_mode": job.mode,
-            "reserved_usd": str(job.cost), "ledger_policy_sha256": document["ledger_policy_sha256"]}
+    claim = _claim_evidence(claim)
+    if (
+        claim["request_id"] != job.request_id
+        or claim["episode_id"] != document["episode_id"]
+        or claim["provider"] != job.endpoint
+        or claim["authority_mode"] != job.mode
+        or claim["settlement_mode"] != "FAL_READBACK_V2"
+        or claim["state"] != "RESERVED"
+        or claim["provider_request_id"] != "UNASSIGNED"
+        or Decimal(claim["reserved_usd"]) != job.cost
+    ):
+        raise QualifiedEpisodeOperationError("canonical ledger claim does not bind operation")
+    _, document_sha = _read_json(
+        _operation_path(ProtectedOperationLocator.production().root, operation_id),
+        "protected operation",
+    )
+    return {
+        "schema": 2,
+        "kind": "GENERIC_CLOSED_ADMISSION",
+        "operation_id": operation_id,
+        "operation_sha256": document_sha,
+        "operation_policy_sha256": document["ledger_policy_sha256"],
+        "request_id": job.request_id,
+        "episode_id": document["episode_id"],
+        "provider_endpoint": job.endpoint,
+        "authority_mode": job.mode,
+        "input_kind": job.input_kind,
+        "payload_sha256": job.intent_input_sha256,
+        "ledger_canonical_path": _ledger_path(ledger),
+        "ledger_binding": dict(binding),
+        "reservation_claim": claim,
+    }
 
 
-def validate_generic_admission_marker(job: Job, marker: object, claim: object) -> None:
-    """Reopen the fixed document and fail closed before submit or recovery I/O."""
-    if not isinstance(marker, dict) or not isinstance(claim, dict):
-        raise QualifiedEpisodeOperationError("generic admission marker and claim are required")
+def build_generic_admission_marker(operation_id: str, job: Job, ledger: object) -> dict[str, Any]:
+    """Create a write-once marker from the configured canonical ledger only."""
+    claim_reader = getattr(ledger, "claim", None)
+    if not callable(claim_reader):
+        raise QualifiedEpisodeOperationError("configured canonical ledger claim reader is required")
+    return _marker_for_claim(operation_id, job, ledger, claim_reader(job.request_id))
+
+
+def validate_generic_admission_marker(job: Job, marker: object, ledger: object, row: object) -> None:
+    """Validate closed operation, ledger source, and recovery claim before I/O."""
+    if not isinstance(marker, dict) or not isinstance(row, dict):
+        raise QualifiedEpisodeOperationError("generic admission marker and executor row are required")
     operation_id = _literal_operation_id(marker.get("operation_id"))
-    expected = build_generic_admission_marker(operation_id, job, claim)
+    if row.get("generic_operation_id") != operation_id:
+        raise QualifiedEpisodeOperationError("operation document does not match prepared job origin")
+    reservation_claim = marker.get("reservation_claim")
+    expected = _marker_for_claim(operation_id, job, ledger, reservation_claim)
     if marker != expected:
         raise QualifiedEpisodeOperationError("generic admission marker is forged or stale")
+    claim_reader = getattr(ledger, "claim", None)
+    if not callable(claim_reader):
+        raise QualifiedEpisodeOperationError("configured canonical ledger claim reader is required")
+    current = _claim_evidence(claim_reader(job.request_id))
+    provider_id = row.get("provider_id")
+    if provider_id:
+        if type(provider_id) is not str:
+            raise QualifiedEpisodeOperationError("executor provider identity is invalid")
+        settlement = row.get("settlement_binding")
+        if not isinstance(settlement, dict) or settlement.get("provider_request_id") != provider_id:
+            raise QualifiedEpisodeOperationError("executor provider identity does not bind recovery")
+    if current != reservation_claim:
+        raise QualifiedEpisodeOperationError("canonical ledger claim changed after admission")
 
 
 def qualified_operation_readiness(operation_id: str) -> dict[str, Any]:
