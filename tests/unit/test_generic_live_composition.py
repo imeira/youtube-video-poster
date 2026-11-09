@@ -45,7 +45,7 @@ def test_empty_protected_registry_fails_before_factory_or_executor_access(tmp_pa
 
     registry = GenericLiveCompositionRegistry.production()
     with pytest.raises(LiveCompositionBlocked, match="not qualified"):
-        asyncio.run(registry.admit("generic-next-video"))
+        asyncio.run(registry.admit("GENERIC-NEXT-VIDEO"))
     assert not list(tmp_path.iterdir())
 
 
@@ -75,23 +75,14 @@ def test_production_resolver_is_not_a_registry_and_rechecks_protected_loader(mon
     assert calls == []
 
 
-def test_operator_readiness_reports_exact_missing_live_bindings_without_enablement():
+def test_operator_readiness_reports_protected_loader_failure_without_enablement():
     from src.hybrid.generic_live_composition import GenericLiveCompositionRegistry
 
-    report = GenericLiveCompositionRegistry.production().readiness("generic-next-video")
+    report = GenericLiveCompositionRegistry.production().readiness("GENERIC-NEXT-VIDEO")
 
     assert report["status"] == "BLOCKED"
     assert report["live_enabled"] is False
-    assert report["missing"] == [
-        "provider_qualification",
-        "independent_identity_attestation",
-        "price_quote_and_billing_readback",
-        "license_attestation",
-        "canonical_budget_authority",
-        "image_reference_capability",
-        "real_tts_method",
-    ]
-    assert report["tts"] == "UNRESOLVED_PROTECTED_CONFIGURATION"
+    assert "protected operation" in report["reason"]
 
 
 def _job(tmp_path: Path) -> Job:

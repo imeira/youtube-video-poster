@@ -6,6 +6,7 @@ protected-operation resolver to reopen and validate the fixed composition.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,7 @@ _REQUIRED_BINDINGS = (
     "image_reference_capability",
     "real_tts_method",
 )
+_OPERATION_ID = re.compile(r"[A-Z][A-Z0-9_-]{2,159}\Z", re.ASCII)
 
 
 @dataclass(frozen=True)
@@ -47,27 +49,14 @@ class GenericLiveOperationResolver:
 
     @staticmethod
     def _operation_id(operation_id: str) -> str:
-        if not isinstance(operation_id, str) or not operation_id or len(operation_id) > 160:
-            raise LiveCompositionBlocked("protected operation ID is invalid")
+        if not isinstance(operation_id, str) or not _OPERATION_ID.fullmatch(operation_id):
+            raise LiveCompositionBlocked("literal protected operation ID is invalid")
         return operation_id
 
     def readiness(self, operation_id: str) -> dict:
         operation_id = self._operation_id(operation_id)
-        try:
-            from src.hybrid.qualified_episode_operation import (
-                qualified_operation_readiness,
-            )
-            return qualified_operation_readiness(operation_id)
-        except ModuleNotFoundError:
-            return {
-                "operation_id": operation_id,
-                "status": "BLOCKED",
-                "live_enabled": False,
-                "missing": list(_REQUIRED_BINDINGS),
-                "tts": "UNRESOLVED_PROTECTED_CONFIGURATION",
-                "image_references": "UNPROVISIONED",
-                "note": "Readiness is not provider, billing, credential, financial, media, or publication evidence.",
-            }
+        from src.hybrid.qualified_episode_operation import qualified_operation_readiness
+        return qualified_operation_readiness(operation_id)
 
     async def admit(self, operation_id: str) -> dict:
         operation_id = self._operation_id(operation_id)
@@ -76,7 +65,7 @@ class GenericLiveOperationResolver:
                 build_qualified_episode_operation,
             )
             operation = build_qualified_episode_operation(operation_id)
-        except (ModuleNotFoundError, OSError, ValueError, PermissionError) as error:
+        except (OSError, ValueError, PermissionError) as error:
             raise LiveCompositionBlocked("operation is not qualified by protected composition") from error
         return await operation.execute()
 

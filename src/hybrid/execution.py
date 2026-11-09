@@ -421,6 +421,15 @@ class Executor:
             raise PermissionError(
                 "prepared FAL submit ledger reservation value mismatch"
             )
+        generic_final_admission = False
+        generic_marker = row.get("generic_admission_marker")
+        if generic_marker is not None:
+            # The marker is not a Python capability.  Reopen the repository-fixed
+            # operation document on every admission/recovery and compare it to
+            # the canonical ledger claim before any provider effect.
+            from src.hybrid.qualified_episode_operation import validate_generic_admission_marker
+            validate_generic_admission_marker(job, generic_marker, claim)
+            generic_final_admission = True
         jaco_final_admission = False
         if job.endpoint == "blackforestlabs/flux-3/text-to-image":
             marker = row.get("final_admission_marker")
@@ -484,7 +493,7 @@ class Executor:
             jaco_final_admission = True
         authenticated = self._fresh_authenticated_budget_admission(job, row)
         if authenticated is None:
-            if jaco_final_admission:
+            if jaco_final_admission or generic_final_admission:
                 return
             # Legacy TEST ledger paths remain mechanically useful, but their
             # fixed local scope cannot be relabeled as bridge authority or LIVE.
@@ -554,6 +563,37 @@ class Executor:
             if prior is not None and prior != admission:
                 raise PermissionError("prepared executor admission marker is immutable")
             persisted["standing_ledger_admission"] = admission
+            self._put(db, persisted)
+        return self.inspect(job.request_id)
+
+    def bind_prepared_generic_admission(self, job: Job, *, operation_id: str) -> dict:
+        """Persist a fixed-loader-validated generic admission marker.
+
+        ``operation_id`` selects no caller authority: the validator reopens the
+        repository-fixed closed document, verifies its immutable evidence, and
+        compares it to the already-reserved configured ledger claim.
+        """
+        job = deepcopy(job)
+        row = self.inspect(job.request_id)
+        if row is None or row.get("status") != "PREPARED":
+            raise RuntimeError("only a prepared executor intent can be generically admitted")
+        self._verify_prepared_fal_admission(job, row, require_admitted_marker=False)
+        try:
+            claim = self._standing_ledger.claim(job.request_id)
+        except Exception as exc:
+            raise PermissionError("generic admission requires configured reservation") from exc
+        from src.hybrid.qualified_episode_operation import build_generic_admission_marker
+        marker = build_generic_admission_marker(operation_id, job, claim)
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            found = db.execute("SELECT data FROM jobs WHERE id=?", (job.request_id,)).fetchone()
+            persisted = json.loads(found[0]) if found else None
+            if persisted is None or persisted.get("status") != "PREPARED":
+                raise RuntimeError("prepared executor intent changed during generic admission")
+            prior = persisted.get("generic_admission_marker")
+            if prior is not None and prior != marker:
+                raise PermissionError("generic admission marker is immutable")
+            persisted["generic_admission_marker"] = marker
             self._put(db, persisted)
         return self.inspect(job.request_id)
 
