@@ -285,7 +285,7 @@ def main(argv=None) -> int:
                 GenericLiveCompositionRegistry,
             )
 
-            result = GenericLiveCompositionRegistry.production().readiness("generic-next-video")
+            result = GenericLiveCompositionRegistry.production().readiness("GENERIC-NEXT-VIDEO")
         elif args.action == "start":
             if args.compiled_input is None or args.request_id is not None or args.once:
                 parser.error("start requires --compiled-input and accepts neither --request-id nor --once")

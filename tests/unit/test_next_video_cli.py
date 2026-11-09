@@ -120,8 +120,8 @@ def test_next_video_live_readiness_is_operator_only_and_never_claims_enablement(
     assert code == 0, report
     assert report["status"] == "BLOCKED"
     assert report["live_enabled"] is False
-    assert report["tts"] == "UNRESOLVED_NO_AZURE"
-    assert "image_reference_capability" in report["missing"]
+    assert report["operation_id"] == "GENERIC-NEXT-VIDEO"
+    assert report["reason"] == "protected operation path is unavailable"
     assert not workspace.exists()
 
 
