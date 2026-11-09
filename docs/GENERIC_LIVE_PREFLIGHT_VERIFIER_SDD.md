@@ -1,33 +1,23 @@
-# SDD — bounded generic LIVE preflight verifier
+# SDD — bounded generic preflight verifier
 
-## Scope
+## Current boundary
 
-`GenericLivePreflightVerifier` is a read-only, data-driven verifier used before a future generic factory composition. It accepts only a literal ASCII operation ID. `production()` has no caller-provided root and consults the repository-owned `generic_live_canonical_config.GENERIC_CANONICAL_BINDINGS` SSOT before any protected-root access. That registry is intentionally empty today, so production readiness returns `BLOCKED: generic canonical binding is not provisioned` without opening a production file, SQLite transcript, ledger, credential, or episode authority. `for_test()` is a hermetic fixture seam and cannot make TEST evidence production authority.
+`GenericLivePreflightVerifier.production()` consults the repository-owned generic binding registry before any protected-root access. The registry is intentionally empty. Therefore every generic production request fails as `generic canonical binding is not provisioned` before opening a production file, SQLite database, credential, provider, reservation, or network client.
 
-It does **not** import or construct an executor, ledger, provider, credential, transport, billing client, reservation, GET/POST client, callback, or readiness token. Its output is a structured `generic-live-verified-bound-preflight/v1` artifact with `authority: NONE` and `dispatch_permitted: false`.
+`GenericLivePreflightVerifier.for_test()` is a hermetic TEST fixture reader. Its successful result is structural TEST evidence only: `authority: NONE` and `dispatch_permitted: false`. It cannot make TEST evidence LIVE authority.
 
-## Immutable input schema
+## Offline canonical fixture verifier
 
-The TEST-only closed `generic-live-operation-packet/v1` contains exactly: operation ID, mode `TEST`, episode ID, and path/SHA-256 descriptors for canonical consent, standing financial policy, independent local-process review, finite quote, license provenance, and exact wire payload. All descriptors are single-file literal names under the TEST root; no caller path is accepted. SHA-256 must be lowercase 64-hex. A packet whose mode is `LIVE` is rejected before any supporting evidence is read.
+`canonical_operation_binding.verify_canonical_operation_binding()` is explicitly **TEST-only**. It accepts only `TEST_OFFLINE_FROZEN` bindings that pin SHA-256 hashes for the transcript and ledger fixture byte payloads. It rejects every other mode before any source path inspection or open. It uses a byte payload to deserialize SQLite in memory and never lets SQLite open the fixture path.
 
-The verifier requires all evidence to bind the same operation/episode/payload. It validates:
+This is not a live-source capture, canonical issuer, producer, snapshot contract, or authorization verifier. A hash establishes fixture byte integrity only. It provides no live consistency guarantee: transient or persistent SQLite WAL state and an unauthorized writer are outside this boundary. A future LIVE design requires a separately reviewed, source-owned atomic snapshot producer and independently authenticated issuer receipt; neither is implemented.
 
-- canonical consent scope/status;
-- standing-policy consent hash, USD cap, operation and episode;
-- independent local-process review PASS plus all six evidence hashes;
-- finite quote's provider, endpoint, model, currency, cap, payload hash, and expiry;
-- license provenance's provider/model/license/payload status.
+For frozen fixture file reads, the verifier fails closed on unsupported platforms. POSIX uses an `O_DIRECTORY|O_NOFOLLOW` dirfd chain and relative final open. Windows opens each ancestor with `FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS`, verifies no reparse point, and holds handles without `FILE_SHARE_DELETE` through final safe-handle validation and read. `OPEN_REPARSE_POINT` on the final file alone is not treated as ancestor protection.
 
-Missing, malformed, hash-mismatched, expired, foreign-scope, forged-review, or mismatched-license evidence raises `GenericLivePreflightBlocked` before any external side effect.
+## Production status
 
-## Output schema
-
-A successful TEST result has exactly the immutable operation/episode and hashes for packet, consent, financial policy, review, quote, license, and payload, plus `status: VERIFIED`, `domain: TEST`, `verification: STRUCTURAL_TEST_FIXTURE_ONLY`, `authority: NONE`, and `dispatch_permitted: false`. It is deliberately not an admission receipt, LIVE verification, or authority token.
-
-## Integration point and next step
-
-A future composition-owned generic factory must add a reviewed operation-specific fixed canonical binding to the SSOT, then call only pure parameterized validators selected by that binding. It must not reuse a Jacó authority, factory, transcript, qualification, or ledger as generic proof. It must bind a resulting artifact to its protected admission workflow before an executor can be wired. That mapping and wiring remain intentionally absent: generic LIVE builder/dispatch stays BLOCKED and no LIVE verifier is claimed complete.
+No generic LIVE authority, canonical issuer/producer, database capture, dispatch, provider call, credential access, reservation, or claim exists in this change. Production remains blocked.
 
 ## Acceptance evidence
 
-Hermetic TEST fixtures are non-secret static documents. Tests cover canonical TEST acceptance and reject LIVE packets before supporting-evidence reads, forged consent/reviewer, expired and wire-mismatched quote, wrong financial scope, mismatched license payload, malformed operation ID, and immutable hash changes. Tests also patch Jacó factory/validator entrypoints to raise and guard production-root opens, proving unprovisioned generic readiness cannot call them or open production state. TEST evidence never crosses the production locator.
+Offline tests cover an unbound fixture rejection before `os.open`, TEST evidence labeling, present and committed WAL rejection, fixture hash pins, and a native Windows `mklink /J` ancestor rejection. The latter permits a sharing violation as a safe denial; it must never read redirected target bytes.
