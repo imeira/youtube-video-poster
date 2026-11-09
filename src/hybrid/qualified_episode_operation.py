@@ -97,6 +97,12 @@ def _no_reparse(path: Path) -> None:
         current = current.parent
 
 
+def _safe_path(path: Path, label: str) -> Path:
+    """Whole-ancestor reparse check performed before any protected read."""
+    _no_reparse(path)
+    return path
+
+
 def _relative(root: Path, value: object, label: str) -> Path:
     if not isinstance(value, str) or not value or "\\" in value or ":" in value:
         raise QualifiedEpisodeOperationError(f"{label} must be a literal relative protected path")
@@ -129,7 +135,7 @@ def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _read_json(path: Path, label: str) -> tuple[dict[str, Any], str]:
-    _no_reparse(path)
+    _safe_path(path, label)
     try:
         raw = path.read_bytes()
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs,

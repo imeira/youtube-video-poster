@@ -55,8 +55,24 @@ class GenericLiveOperationResolver:
 
     def readiness(self, operation_id: str) -> dict:
         operation_id = self._operation_id(operation_id)
-        from src.hybrid.qualified_episode_operation import qualified_operation_readiness
-        return qualified_operation_readiness(operation_id)
+        # This is a bounded read-only preflight integration, never admission.
+        # Do not fall back to the legacy readiness reader: it can only inspect
+        # descriptor structure and is not a generic LIVE trust anchor.
+        from src.hybrid.generic_live_preflight import (
+            GenericLivePreflightBlocked,
+            GenericLivePreflightVerifier,
+        )
+        try:
+            return GenericLivePreflightVerifier.production().verify(
+                operation_id, now=0
+            )
+        except GenericLivePreflightBlocked as error:
+            return {
+                "operation_id": operation_id,
+                "status": "BLOCKED",
+                "live_enabled": False,
+                "reason": str(error),
+            }
 
     async def admit(self, operation_id: str) -> dict:
         operation_id = self._operation_id(operation_id)

@@ -374,10 +374,21 @@ def test_loader_rejects_native_junction_before_opening_state_storage(monkeypatch
     )
     assert created.returncode == 0, created.stderr.decode(errors="replace")
     monkeypatch.setattr(subject, "_PROTECTED_ROOT", root)
+    opened = 0
+    original_read_bytes = Path.read_bytes
 
+    def audited_read_bytes(path: Path):
+        nonlocal opened
+        if target in path.parents or path == target:
+            opened += 1
+            raise AssertionError("junction target was opened")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", audited_read_bytes)
     with pytest.raises(subject.QualifiedEpisodeOperationError, match="reparse"):
         subject.load_qualified_operation("TEST-OWNER-001")
 
+    assert opened == 0
     assert list(target.iterdir()) == []
 
 

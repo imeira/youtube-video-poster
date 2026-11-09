@@ -56,6 +56,7 @@ def _json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _load_json(path: Path, label: str) -> tuple[dict[str, Any], str, int]:
+    _safe_path(path, path.parent, label)
     try:
         raw = path.read_bytes()
         value = json.loads(
@@ -79,7 +80,7 @@ def _is_reparse(path: Path) -> bool:
     return path.is_symlink() or bool(attributes & reparse)
 
 
-def _regular_beneath(path: Path, root: Path, label: str, *, must_exist: bool = True) -> Path:
+def _safe_path(path: Path, root: Path, label: str, *, must_exist: bool = True) -> Path:
     if not path.is_absolute() or not root.is_absolute():
         raise LocalProcessReviewError(f"{label} must be absolute")
     # Check lexical ancestors before resolve so a link cannot escape the policy root.
@@ -97,6 +98,11 @@ def _regular_beneath(path: Path, root: Path, label: str, *, must_exist: bool = T
     if must_exist and (not path.exists() or not path.is_file()):
         raise LocalProcessReviewError(f"{label} must be a regular file")
     return path
+
+
+def _regular_beneath(path: Path, root: Path, label: str, *, must_exist: bool = True) -> Path:
+    """Compatibility name for the protected whole-ancestor path check."""
+    return _safe_path(path, root, label, must_exist=must_exist)
 
 
 def _catalog_price_snapshot(document: dict[str, Any], *, clock: float) -> int:
