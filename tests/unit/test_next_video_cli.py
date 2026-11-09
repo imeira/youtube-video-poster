@@ -121,7 +121,9 @@ def test_next_video_live_readiness_is_operator_only_and_never_claims_enablement(
     assert report["status"] == "BLOCKED"
     assert report["live_enabled"] is False
     assert report["operation_id"] == "GENERIC-NEXT-VIDEO"
-    assert report["reason"] == "protected operation path is unavailable"
+    # The generic SSOT is intentionally unprovisioned; this is a pre-I/O
+    # diagnostic, not legacy episode-path probing or a LIVE enablement claim.
+    assert report["reason"] == "generic canonical binding is not provisioned"
     assert not workspace.exists()
 
 
