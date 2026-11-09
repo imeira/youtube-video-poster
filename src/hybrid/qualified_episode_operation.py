@@ -17,6 +17,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from src.hybrid.artifacts import digest
 from src.hybrid.execution import Executor, Job, ProviderResult
 from src.hybrid.planner import Config
 from src.hybrid.standing_budget import StandingBudgetLedger
@@ -28,6 +29,40 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 
 class QualifiedEpisodeOperationError(PermissionError):
     """The fixed protected composition cannot admit this operation."""
+
+
+@dataclass(frozen=True)
+class QualifiedGenericJob(Job):
+    """Generic-only request identity with its declared protected origin.
+
+    ``Job`` retains its historical identity unchanged.  This specialized
+    factory product prevents two closed generic documents with otherwise equal
+    provider inputs from sharing a durable executor or ledger request.
+    """
+
+    operation_id: str = ""
+    episode_id: str = ""
+    ledger_policy_sha256: str = ""
+
+    @property
+    def request_id(self) -> str:
+        return digest({
+            "schema": "qualified-generic-request/v1",
+            "operation_id": self.operation_id,
+            "episode_id": self.episode_id,
+            "ledger_policy_sha256": self.ledger_policy_sha256,
+            "job": {
+                "scene": self.scene,
+                "category": self.category,
+                "mode": self.mode,
+                "endpoint": self.endpoint,
+                "payload": self.payload,
+                "manifest": self.manifest,
+                "cost": self.cost,
+                "predecessor": self.predecessor,
+                "input_kind": self.input_kind,
+            },
+        })
 
 
 @dataclass(frozen=True)
@@ -226,7 +261,8 @@ class QualifiedEpisodeOperation:
         if self.document["mode"] == "LIVE":
             # No deployment qualification is provisioned in this repository.
             raise QualifiedEpisodeOperationError("generic LIVE qualification is unprovisioned")
-        self.executor.prepare_intent(self.job)
+        prepared = self.executor.prepare_intent(self.job)
+        validate_prepared_generic_origin(self.job, prepared, self.operation_id)
         self.ledger.reserve(
             self.job.request_id, self.document["episode_id"], self.job.endpoint, self.job.cost,
             settlement_mode="FAL_READBACK_V2", auth_scope="TEST_LOCAL_ONLY",
@@ -254,9 +290,13 @@ def build_qualified_episode_operation(operation_id: str) -> QualifiedEpisodeOper
     payload, payload_sha = _read_json(payload_path, "payload")
     if payload_sha != document["payload"]["sha256"]:
         raise QualifiedEpisodeOperationError("payload changed while building operation")
-    job = Job(document["scene"], document["category"], document["mode"], document["endpoint"], payload,
-              None, Decimal(document["maximum_usd"]), input_kind=document["input_kind"])
-    object.__setattr__(job, "operation_id", operation_id)
+    job = QualifiedGenericJob(
+        document["scene"], document["category"], document["mode"],
+        document["endpoint"], payload, None, Decimal(document["maximum_usd"]),
+        input_kind=document["input_kind"], operation_id=operation_id,
+        episode_id=document["episode_id"],
+        ledger_policy_sha256=document["ledger_policy_sha256"],
+    )
     if job.input_kind != "TEXT_TO_IMAGE":
         raise QualifiedEpisodeOperationError("reference manifest qualification is required before IMAGE_EDIT construction")
     executor_path = _relative(root, document["executor_database"], "executor database")
@@ -366,6 +406,23 @@ def build_generic_admission_marker(operation_id: str, job: Job, ledger: object) 
     if not callable(claim_reader):
         raise QualifiedEpisodeOperationError("configured canonical ledger claim reader is required")
     return _marker_for_claim(operation_id, job, ledger, claim_reader(job.request_id))
+
+
+def validate_prepared_generic_origin(job: Job, row: object, operation_id: str) -> None:
+    """Reject a foreign operation before claim reads or marker persistence."""
+    operation_id = _literal_operation_id(operation_id)
+    if not isinstance(row, dict):
+        raise QualifiedEpisodeOperationError("prepared generic executor row is required")
+    if getattr(job, "operation_id", None) != operation_id:
+        raise QualifiedEpisodeOperationError("operation document does not match prepared job origin")
+    if row.get("generic_operation_id") != operation_id:
+        raise QualifiedEpisodeOperationError("operation document does not match prepared row origin")
+    document = load_qualified_operation(operation_id)
+    if (
+        getattr(job, "episode_id", None) != document["episode_id"]
+        or getattr(job, "ledger_policy_sha256", None) != document["ledger_policy_sha256"]
+    ):
+        raise QualifiedEpisodeOperationError("operation document does not match generic job contract")
 
 
 def validate_generic_admission_marker(job: Job, marker: object, ledger: object, row: object) -> None:

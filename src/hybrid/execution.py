@@ -582,6 +582,10 @@ class Executor:
         row = self.inspect(job.request_id)
         if row is None or row.get("status") != "PREPARED":
             raise RuntimeError("only a prepared executor intent can be generically admitted")
+        validate_prepared_generic_origin = importlib.import_module(
+            "src.hybrid.qualified_episode_operation"
+        ).validate_prepared_generic_origin
+        validate_prepared_generic_origin(job, row, operation_id)
         self._verify_prepared_fal_admission(job, row, require_admitted_marker=False)
         try:
             self._standing_ledger.claim(job.request_id)

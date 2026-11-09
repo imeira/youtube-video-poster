@@ -6,9 +6,12 @@ import hashlib
 import json
 import multiprocessing
 import os
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from src.hybrid.execution import Job
 
 
 def _write(path: Path, value: object) -> str:
@@ -23,6 +26,8 @@ def _operation(
     *,
     operation_id: str = "TEST-NEXT-VIDEO-001",
     episode_id: str = "TEST-EPISODE-001",
+    ledger_database: str = "state/ledger.sqlite3",
+    ledger_policy_sha256: str = "a" * 64,
 ) -> str:
     payload = {"prompt": "fixture only"}
     payload_path = root / "payload.json"
@@ -33,8 +38,8 @@ def _operation(
         "episode_id": episode_id,
         "mode": "TEST",
         "executor_database": "state/executor.sqlite3",
-        "ledger_database": "state/ledger.sqlite3",
-        "ledger_policy_sha256": "a" * 64,
+        "ledger_database": ledger_database,
+        "ledger_policy_sha256": ledger_policy_sha256,
         "endpoint": "fixture-controlled-provider",
         "scene": "TEST-S001",
         "category": "first",
@@ -162,3 +167,47 @@ def test_foreign_closed_operation_cannot_bind_or_recover_owner_job(monkeypatch, 
     assert operation.executor.inspect(operation.job.request_id) == tampered
     assert operation.ledger.claim(operation.job.request_id) == claim
     assert not (root / "state" / "transport-journal.json").exists()
+
+
+def test_generic_operation_origin_is_intrinsic_before_foreign_bind_or_claim(monkeypatch, tmp_path):
+    """Distinct valid documents cannot collide before either ledger is touched."""
+    import src.hybrid.qualified_episode_operation as subject
+
+    root = tmp_path / "protected"
+    _operation(
+        root, operation_id="TEST-OWNER-001", episode_id="TEST-EPISODE-A",
+        ledger_database="state/owner-ledger.sqlite3", ledger_policy_sha256="a" * 64,
+    )
+    _operation(
+        root, operation_id="TEST-FOREIGN-002", episode_id="TEST-EPISODE-B",
+        ledger_database="state/foreign-ledger.sqlite3", ledger_policy_sha256="b" * 64,
+    )
+    monkeypatch.setattr(subject, "_PROTECTED_ROOT", root)
+    owner = subject.build_qualified_episode_operation("TEST-OWNER-001")
+    foreign = subject.build_qualified_episode_operation("TEST-FOREIGN-002")
+
+    assert owner.job.request_id != foreign.job.request_id
+    prepared = owner.executor.prepare_intent(owner.job)
+    assert prepared["generic_operation_id"] == "TEST-OWNER-001"
+    executor_before = owner.executor.inspect(owner.job.request_id)
+    owner_ledger_before = owner.ledger.exposure()
+    foreign_ledger_before = foreign.ledger.exposure()
+
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="origin"):
+        owner.executor.bind_prepared_generic_admission(
+            owner.job, operation_id="TEST-FOREIGN-002"
+        )
+
+    assert owner.executor.inspect(owner.job.request_id) == executor_before
+    assert owner.ledger.exposure() == owner_ledger_before
+    assert foreign.ledger.exposure() == foreign_ledger_before
+    assert not (root / "state" / "transport-journal.json").exists()
+
+
+def test_legacy_job_request_identity_is_unchanged():
+    legacy = Job(
+        "TEST-S001", "first", "TEST", "fixture-controlled-provider",
+        {"prompt": "fixture only"}, None, Decimal("0.01"),
+        input_kind="TEXT_TO_IMAGE",
+    )
+    assert legacy.request_id == "4a25277ab08449334b22381c394198a009c615ce983932a1fda86b9fe24718c3"
