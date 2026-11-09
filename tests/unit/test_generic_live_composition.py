@@ -49,11 +49,30 @@ def test_empty_protected_registry_fails_before_factory_or_executor_access(tmp_pa
     assert not list(tmp_path.iterdir())
 
 
-def test_caller_cannot_inject_provider_or_callback_as_a_live_registry_entry():
+def test_caller_cannot_construct_a_live_registry_or_inject_a_callback():
     from src.hybrid.generic_live_composition import GenericLiveCompositionRegistry
 
-    with pytest.raises(TypeError, match="protected factories"):
+    with pytest.raises(TypeError, match="production/static-test factories"):
         GenericLiveCompositionRegistry(operations={"generic-next-video": object()}, domain="LIVE")
+
+
+def test_production_resolver_is_not_a_registry_and_rechecks_protected_loader(monkeypatch):
+    from src.hybrid.generic_live_composition import (
+        GenericLiveCompositionRegistry,
+        LiveCompositionBlocked,
+    )
+
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("caller callback must never be accepted")
+
+    registry = GenericLiveCompositionRegistry.production()
+    assert not hasattr(registry, "_operations")
+    with pytest.raises(LiveCompositionBlocked, match="protected composition"):
+        asyncio.run(registry.admit("TEST-NEXT-VIDEO-001", callback=forbidden))
+    assert calls == []
 
 
 def test_operator_readiness_reports_exact_missing_live_bindings_without_enablement():
@@ -72,7 +91,7 @@ def test_operator_readiness_reports_exact_missing_live_bindings_without_enableme
         "image_reference_capability",
         "real_tts_method",
     ]
-    assert report["tts"] == "UNRESOLVED_NO_AZURE"
+    assert report["tts"] == "UNRESOLVED_PROTECTED_CONFIGURATION"
 
 
 def _job(tmp_path: Path) -> Job:

@@ -1,15 +1,13 @@
-"""Generic, protected admission into the existing durable executor.
+"""Fixed protected admission into the existing durable executor.
 
-Production deliberately has no registered operation.  A deployment may install
-one only through its fixed protected configuration after independent provider,
-identity, price/billing, licensing, budget, image-reference, and TTS bindings
-exist.  Callers never provide a provider, root, callback, quote, or authority.
+LIVE has no caller-supplied registry, factory capability, callback, provider,
+root, quote, verifier, or ledger. Each admission asks the repository-owned
+protected-operation resolver to reopen and validate the fixed composition.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from src.hybrid.execution import Executor, Job
 from src.hybrid.planner import Config
@@ -30,13 +28,6 @@ _REQUIRED_BINDINGS = (
 )
 
 
-_REGISTRY_FACTORY_CAPABILITY = object()
-
-
-class _RegisteredOperation(Protocol):
-    async def execute(self) -> dict: ...
-
-
 @dataclass(frozen=True)
 class _StaticTestOperation:
     """TEST-only adapter that exercises the real executor's receipt/recovery."""
@@ -51,71 +42,99 @@ class _StaticTestOperation:
         return await self.executor.run(self.job, self.transport)
 
 
-class GenericLiveCompositionRegistry:
-    """Composition-owned registry; an empty production registry is fail-closed.
+class GenericLiveOperationResolver:
+    """Resolve a literal operation ID through fixed repository-owned policy only."""
 
-    The registry is intentionally not populated from a next-video packet,
-    worker task, filesystem root, callback, provider object, quote, or ledger.
+    @staticmethod
+    def _operation_id(operation_id: str) -> str:
+        if not isinstance(operation_id, str) or not operation_id or len(operation_id) > 160:
+            raise LiveCompositionBlocked("protected operation ID is invalid")
+        return operation_id
+
+    def readiness(self, operation_id: str) -> dict:
+        operation_id = self._operation_id(operation_id)
+        try:
+            from src.hybrid.qualified_episode_operation import (
+                qualified_operation_readiness,
+            )
+            return qualified_operation_readiness(operation_id)
+        except ModuleNotFoundError:
+            return {
+                "operation_id": operation_id,
+                "status": "BLOCKED",
+                "live_enabled": False,
+                "missing": list(_REQUIRED_BINDINGS),
+                "tts": "UNRESOLVED_PROTECTED_CONFIGURATION",
+                "image_references": "UNPROVISIONED",
+                "note": "Readiness is not provider, billing, credential, financial, media, or publication evidence.",
+            }
+
+    async def admit(self, operation_id: str) -> dict:
+        operation_id = self._operation_id(operation_id)
+        try:
+            from src.hybrid.qualified_episode_operation import (
+                build_qualified_episode_operation,
+            )
+            operation = build_qualified_episode_operation(operation_id)
+        except (ModuleNotFoundError, OSError, ValueError, PermissionError) as error:
+            raise LiveCompositionBlocked("operation is not qualified by protected composition") from error
+        return await operation.execute()
+
+
+class GenericLiveCompositionRegistry:
+    """Compatibility façade with separate TEST and LIVE domains.
+
+    Production has no mutable operation registry. The historical name remains
+    for callers, but LIVE routes only through :class:`GenericLiveOperationResolver`.
     """
 
-    def __init__(
-        self,
-        *,
-        operations: dict[str, _RegisteredOperation],
-        domain: str,
-        _factory_capability: object | None = None,
-    ) -> None:
-        if _factory_capability is not _REGISTRY_FACTORY_CAPABILITY:
-            raise TypeError("registry entries may be created only by protected factories")
-        self._operations = dict(operations)
-        self._domain = domain
+    def __init__(self, *, operations=None, domain=None, _static_operation=None) -> None:
+        if domain == "TEST" and isinstance(_static_operation, _StaticTestOperation) and operations is None:
+            self._static_operation = _static_operation
+            self._domain = "TEST"
+            return
+        if domain == "LIVE" and operations is None and _static_operation is None:
+            self._resolver = GenericLiveOperationResolver()
+            self._domain = "LIVE"
+            return
+        raise TypeError("registry instances come only from production/static-test factories")
 
     @classmethod
     def production(cls) -> GenericLiveCompositionRegistry:
-        """Return the fixed production registry, currently with no qualified entry."""
-        return cls(
-            operations={},
-            domain="LIVE",
-            _factory_capability=_REGISTRY_FACTORY_CAPABILITY,
-        )
+        return cls(domain="LIVE")
 
     @classmethod
     def for_static_test(
-        cls,
-        *,
-        operation_id: str,
-        executor_database: Path,
-        executor_config: Config,
-        job: Job,
-        transport: object,
+        cls, *, operation_id: str, executor_database: Path, executor_config: Config,
+        job: Job, transport: object,
     ) -> GenericLiveCompositionRegistry:
-        """Build a TEST fixture composition, never a substitute for LIVE trust."""
         if not isinstance(operation_id, str) or not operation_id:
             raise ValueError("TEST operation id is required")
         if job.mode != "TEST" or getattr(transport, "mode", None) != "TEST":
             raise ValueError("static composition accepts TEST fixture transport only")
         operation = _StaticTestOperation(Executor(Path(executor_database), executor_config), job, transport)
-        return cls(
-            operations={operation_id: operation},
-            domain="TEST",
-            _factory_capability=_REGISTRY_FACTORY_CAPABILITY,
-        )
+        registry = cls(domain="TEST", _static_operation=operation)
+        registry._test_operation_id = operation_id
+        return registry
 
     def readiness(self, operation_id: str) -> dict:
-        """Report fixed-config blockers without claiming LIVE enablement."""
+        if self._domain == "LIVE":
+            return self._resolver.readiness(operation_id)
         return {
             "operation_id": operation_id,
-            "status": "READY" if operation_id in self._operations and self._domain == "LIVE" else "BLOCKED",
-            "live_enabled": operation_id in self._operations and self._domain == "LIVE",
-            "missing": list(_REQUIRED_BINDINGS) if self._domain == "LIVE" and operation_id not in self._operations else [],
-            "tts": "UNRESOLVED_NO_AZURE" if self._domain == "LIVE" and operation_id not in self._operations else "TEST_STATIC_FIXTURE",
-            "image_references": "UNPROVISIONED" if self._domain == "LIVE" and operation_id not in self._operations else "TEST_STATIC_FIXTURE",
-            "note": "Readiness is not provider, billing, credential, financial, media, or publication evidence.",
+            "status": "BLOCKED",
+            "live_enabled": False,
+            "missing": [],
+            "tts": "TEST_STATIC_FIXTURE",
+            "image_references": "TEST_STATIC_FIXTURE",
+            "note": "TEST fixture composition cannot report LIVE readiness.",
         }
 
-    async def admit(self, operation_id: str) -> dict:
-        """Resolve only a pre-registered operation, then use its existing executor."""
-        operation = self._operations.get(operation_id)
-        if operation is None:
-            raise LiveCompositionBlocked("operation is not qualified by protected composition")
-        return await operation.execute()
+    async def admit(self, operation_id: str, **caller_injection) -> dict:
+        if caller_injection:
+            raise LiveCompositionBlocked("caller inputs cannot select protected composition")
+        if self._domain == "LIVE":
+            return await self._resolver.admit(operation_id)
+        if operation_id != self._test_operation_id:
+            raise LiveCompositionBlocked("TEST operation ID does not match fixed fixture")
+        return await self._static_operation.execute()
