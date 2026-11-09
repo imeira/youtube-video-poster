@@ -132,11 +132,10 @@ async def test_worker_uses_registered_test_composition_and_fresh_resume_recovers
     assert transport.recovers == 0
 
 
-@pytest.mark.asyncio
-async def test_live_text_operation_uses_intrinsic_generic_admission_before_lazy_credential_read(
+def test_live_text_operation_is_unprovisioned_before_credentials_or_state(
     tmp_path, monkeypatch
 ):
-    """A protected LIVE text operation reaches reserve/marker, never Jacó wiring."""
+    """A generic LIVE document cannot reach provider, executor, or ledger setup."""
     import json
     from hashlib import sha256
 
@@ -178,14 +177,13 @@ async def test_live_text_operation_uses_intrinsic_generic_admission_before_lazy_
     monkeypatch.setattr(qualified, "_PROTECTED_ROOT", root)
     monkeypatch.delenv("FAL_KEY", raising=False)
 
-    built = qualified.build_qualified_episode_operation("GENERIC_LIVE_TEXT_001")
-    with pytest.raises(RuntimeError, match="FAL_KEY is NOT CONFIGURED"):
-        await built.execute()
+    with pytest.raises(
+        qualified.QualifiedEpisodeOperationError,
+        match="generic LIVE qualification is unprovisioned",
+    ):
+        qualified.build_qualified_episode_operation("GENERIC_LIVE_TEXT_001")
 
-    row = built.executor.inspect(built.job.request_id)
-    assert row["generic_admission_marker"]["authority_mode"] == "LIVE"
-    assert "final_admission_marker" not in row
-    assert built.ledger.claim(built.job.request_id)["state"] == "RESERVED"
+    assert not (root / "state").exists()
 
 
 def test_live_text_operation_tampered_payload_blocks_before_state_construction(tmp_path, monkeypatch):

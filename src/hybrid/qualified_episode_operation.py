@@ -342,6 +342,11 @@ def validate_public_qualified_operation(operation: object) -> dict[str, Any]:
 def build_qualified_episode_operation(operation_id: str) -> QualifiedEpisodeOperation:
     """Build only from a validated protected document and fixed provider mapping."""
     document = load_qualified_operation(operation_id)
+    if document["mode"] == "LIVE":
+        # No generic LIVE trust verifier is provisioned. A closed operation
+        # document alone is not issuer, consent, review, financial, quote,
+        # license, wire-payload, or single-attempt authority.
+        raise QualifiedEpisodeOperationError("generic LIVE qualification is unprovisioned")
 
     root = ProtectedOperationLocator.production().root
     payload_path = _relative(root, document["payload"]["path"], "payload")
