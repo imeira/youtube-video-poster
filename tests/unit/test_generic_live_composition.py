@@ -130,3 +130,118 @@ async def test_worker_uses_registered_test_composition_and_fresh_resume_recovers
     assert receipt["status"] == "COMPLETE"
     assert transport.submits == 1
     assert transport.recovers == 0
+
+
+@pytest.mark.asyncio
+async def test_live_text_operation_uses_intrinsic_generic_admission_before_lazy_credential_read(
+    tmp_path, monkeypatch
+):
+    """A protected LIVE text operation reaches reserve/marker, never Jacó wiring."""
+    import json
+    from hashlib import sha256
+
+    import src.hybrid.qualified_episode_operation as qualified
+
+    root = tmp_path / "protected"
+    (root / "operations").mkdir(parents=True)
+    (root / "payloads").mkdir()
+    payload = {
+        "prompt": "A child-safe biblical landscape rendered as an establishing image.",
+        "aspect_ratio": "4:3",
+        "resolution": "1k",
+        "output_format": "png",
+        "enable_prompt_expansion": False,
+        "safety_tolerance": 2,
+    }
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    (root / "payloads" / "generic-live.json").write_bytes(payload_bytes)
+    policy = "a" * 64
+    operation = {
+        "schema": "qualified-episode-operation/v1",
+        "operation_id": "GENERIC_LIVE_TEXT_001",
+        "episode_id": "GENERIC_EPISODE_001",
+        "mode": "LIVE",
+        "executor_database": "state/executor.sqlite3",
+        "ledger_database": "state/ledger.sqlite3",
+        "ledger_policy_sha256": policy,
+        "endpoint": "blackforestlabs/flux-3/text-to-image",
+        "scene": "GENERIC_LIVE_TEXT_001",
+        "category": "first",
+        "input_kind": "TEXT_TO_IMAGE",
+        "payload": {"path": "payloads/generic-live.json", "sha256": sha256(payload_bytes).hexdigest()},
+        "maximum_usd": "0.048",
+        "provider_kind": "FAL_FLUX_TEXT_TO_IMAGE",
+    }
+    (root / "operations" / "GENERIC_LIVE_TEXT_001.json").write_text(
+        json.dumps(operation, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+    monkeypatch.setattr(qualified, "_PROTECTED_ROOT", root)
+    monkeypatch.delenv("FAL_KEY", raising=False)
+
+    built = qualified.build_qualified_episode_operation("GENERIC_LIVE_TEXT_001")
+    with pytest.raises(RuntimeError, match="FAL_KEY is NOT CONFIGURED"):
+        await built.execute()
+
+    row = built.executor.inspect(built.job.request_id)
+    assert row["generic_admission_marker"]["authority_mode"] == "LIVE"
+    assert "final_admission_marker" not in row
+    assert built.ledger.claim(built.job.request_id)["state"] == "RESERVED"
+
+
+def test_live_text_operation_tampered_payload_blocks_before_state_construction(tmp_path, monkeypatch):
+    """A LIVE-shaped fixture is code coverage, not a provider authority claim."""
+    import json
+    from hashlib import sha256
+
+    import src.hybrid.qualified_episode_operation as qualified
+
+    root = tmp_path / "protected"
+    (root / "operations").mkdir(parents=True)
+    (root / "payloads").mkdir()
+    payload_path = root / "payloads" / "payload.json"
+    original = b'{"aspect_ratio":"4:3","enable_prompt_expansion":false,"output_format":"png","prompt":"A child-safe biblical establishing image.","resolution":"1k","safety_tolerance":2}'
+    payload_path.write_bytes(original)
+    (root / "operations" / "GENERIC_LIVE_TEXT_002.json").write_text(json.dumps({
+        "schema": "qualified-episode-operation/v1", "operation_id": "GENERIC_LIVE_TEXT_002",
+        "episode_id": "GENERIC_EPISODE_002", "mode": "LIVE",
+        "executor_database": "state/executor.sqlite3", "ledger_database": "state/ledger.sqlite3",
+        "ledger_policy_sha256": "b" * 64, "endpoint": "blackforestlabs/flux-3/text-to-image",
+        "scene": "GENERIC_LIVE_TEXT_002", "category": "first", "input_kind": "TEXT_TO_IMAGE",
+        "payload": {"path": "payloads/payload.json", "sha256": sha256(original).hexdigest()},
+        "maximum_usd": "0.048", "provider_kind": "FAL_FLUX_TEXT_TO_IMAGE",
+    }, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    payload_path.write_bytes(original.replace(b"child-safe", b"tampered"))
+    monkeypatch.setattr(qualified, "_PROTECTED_ROOT", root)
+
+    with pytest.raises(qualified.QualifiedEpisodeOperationError, match="payload hash binding"):
+        qualified.build_qualified_episode_operation("GENERIC_LIVE_TEXT_002")
+    assert not (root / "state").exists()
+
+
+def test_forged_live_generic_job_blocks_before_prepare_or_reservation(tmp_path, monkeypatch):
+    """Fixed storage alone cannot turn a caller-built job into LIVE authority."""
+    import json
+    from decimal import Decimal
+    from hashlib import sha256
+
+    import src.hybrid.qualified_episode_operation as qualified
+    from src.hybrid.execution import Executor
+    from src.hybrid.planner import Config
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    root = tmp_path / "protected"
+    (root / "operations").mkdir(parents=True)
+    (root / "payloads").mkdir()
+    payload = {"prompt": "approved", "aspect_ratio": "4:3", "resolution": "1k", "output_format": "png", "enable_prompt_expansion": False, "safety_tolerance": 2}
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    (root / "payloads" / "payload.json").write_bytes(raw)
+    operation = {"schema": "qualified-episode-operation/v1", "operation_id": "GENERIC_LIVE_TEXT_003", "episode_id": "GENERIC_EPISODE_003", "mode": "LIVE", "executor_database": "state/executor.sqlite3", "ledger_database": "state/ledger.sqlite3", "ledger_policy_sha256": "c" * 64, "endpoint": "blackforestlabs/flux-3/text-to-image", "scene": "GENERIC_LIVE_TEXT_003", "category": "first", "input_kind": "TEXT_TO_IMAGE", "payload": {"path": "payloads/payload.json", "sha256": sha256(raw).hexdigest()}, "maximum_usd": "0.048", "provider_kind": "FAL_FLUX_TEXT_TO_IMAGE"}
+    (root / "operations" / "GENERIC_LIVE_TEXT_003.json").write_text(json.dumps(operation, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    monkeypatch.setattr(qualified, "_PROTECTED_ROOT", root)
+    ledger = StandingBudgetLedger(root / "state" / "ledger.sqlite3", policy_sha256="c" * 64, episode_limit_usd="1", month_limit_usd="1", experiment_limit_usd="1", mode="LIVE")
+    executor = Executor(root / "state" / "executor.sqlite3", Config(limit=Decimal(1)), standing_ledger=ledger)
+    forged = qualified.QualifiedGenericJob("GENERIC_LIVE_TEXT_003", "first", "LIVE", operation["endpoint"], {**payload, "prompt": "forged"}, None, Decimal("0.048"), input_kind="TEXT_TO_IMAGE", operation_id=operation["operation_id"], episode_id=operation["episode_id"], ledger_policy_sha256="c" * 64)
+
+    with pytest.raises(qualified.QualifiedEpisodeOperationError, match="does not match"):
+        executor.prepare_intent(forged)
+    assert executor.inspect(forged.request_id) is None

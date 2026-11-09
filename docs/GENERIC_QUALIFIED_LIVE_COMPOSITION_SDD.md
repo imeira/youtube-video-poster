@@ -4,23 +4,35 @@
 
 `GenericLiveCompositionRegistry` is the one generic connection from a durable worker handler to an existing `Executor`. It does not create a runner, provider, price source, budget ledger, credential reader, billing caller, or publication path. A caller may supply only an operation ID to `admit`; it cannot supply a provider, root, callback, quote, license string, or authority.
 
-The production registry is fixed and currently empty. Thus an unqualified operation fails before executor construction, credential access, intent/reservation, provider POST/GET, billing, media generation, TTS, GPU, delivery, or publication. No TEST receipt is represented as a provider receipt or LIVE qualification.
+The production registry is fixed. An unqualified operation fails before executor construction, credential access, intent/reservation, provider POST/GET, billing, media generation, TTS, GPU, delivery, or publication. No TEST receipt is represented as a provider receipt or LIVE qualification.
+
+## Code/external gap matrix
+
+| Capability | Status | Boundary |
+| --- | --- | --- |
+| Versioned protected operation loader, literal operation ID, canonical payload and ledger/executor path bindings | implemented offline | Fixed root only; callers cannot inject roots, callbacks, or ledgers. |
+| Generic `TEXT_TO_IMAGE` FAL FLUX 3 admission | implemented offline | Only `FAL_FLUX_TEXT_TO_IMAGE`, exact known text endpoint, and no reference manifest. `IMAGE_EDIT` remains blocked until separately qualified. |
+| Canonical reserve → write-once generic marker → executor submit/recover | implemented offline | Existing executor/ledger kernel validates the fixed document and claim before POST or recovery GET. The generic marker, not a Jacó marker or callback, is the intrinsic admission verifier. |
+| Local code tests | implemented offline | TEST fixtures and mocked I/O prove mechanics only; they do not assert a LIVE provider request, provider billing, license, or deployment authority. |
+| Protected production operation document, canonical policy/financial evidence, and actual FAL credential | not provisioned by this change | No external documents, account state, service account, network, billing, or generation is created or read. A missing protected document remains fail-closed. |
 
 ## Inputs and outputs
 
 - Immutable operation ID resolved against composition-owned registry entries.
 - Registered operations own an existing executor and use its durable intent, receipt, idempotency, and recovery behavior.
-- `production()` reports no eligible operations. `admit()` raises `LiveCompositionBlocked` for an absent entry.
-- `readiness()` is an operator report, not enablement: it names the exact missing independent bindings and returns `live_enabled: false`.
+- `production()` resolves only fixed protected operation documents. `admit()` raises `LiveCompositionBlocked` for an absent or invalid entry.
+- `readiness()` is an operator report, not enablement: it reports the fixed-loader result and returns `live_enabled: false`.
 
-## Required bindings before a production entry may be provisioned
+## Deployment boundary
 
-1. Provider qualification and independently attested operator identity.
-2. Request-bound USD quote plus authenticated provider billing readback.
-3. Independent license evidence.
-4. Canonical budget authority/ledger admission accepted by the existing executor.
-5. Image-reference capability.
-6. A real TTS method; Azure is not selected or implied.
+This change neither creates nor validates a deployment document. The fixed loader
+only accepts an already-present closed version-1 operation document and enforces
+its literal operation/episode IDs, payload digest, executor/ledger locations,
+policy digest, bounded cost, input kind, and provider mapping. The canonical
+ledger remains the financial admission source; a local process review is not
+relabeled as an external or organizational approval. This slice does not add a
+license, quote, billing, TTS, reference-image, publication, or service-account
+requirement.
 
 The normal thumbnail and final-video human gates remain unchanged. Production and publication remain frozen.
 
@@ -31,13 +43,13 @@ The existing `Executor` remains the sole submission kernel; this composition doe
 1. The generic factory builds a `QualifiedGenericJob` whose versioned request identity is a canonical hash of its declared generic contract: operation ID, episode ID, ledger-policy SHA-256, and the complete inherited job inputs. Ordinary `Job` request identities are legacy-compatible and unchanged. Before `prepare_intent` can mutate an executor row, and before generic binding can read a claim or write a marker, the executor reopens the fixed closed document and compares its literal root-bounded `executor_database` and `ledger_database` paths against the actual `Executor.database` and attached `StandingBudgetLedger.path`. Both sides reject symlinks/reparse points and compare canonical paths, so a byte-identical copied database or a caller-selected alternate ledger cannot become authority. Generic admission accepts only the concrete canonical `Executor`, whose database path is immutable after construction. The fixed, closed operation document binds literal operation and episode IDs, mode, endpoint, category, input kind, canonical payload hash, maximum cost, and the ledger-policy SHA-256. The currently implemented document does **not** claim a provider model, quote, license, or independent LIVE authority that it does not contain.
 2. The composition-owned ledger reserves the exact request and scope. The marker captures the full closed canonical claim record, the configured ledger binding/path, currency, exact amount, mode, settlement mode, authorization scope, document hash, operation-policy hash, and payload/input binding. It rejects unknown keys, wrong types (including boolean-as-integer substitutions), altered policy/scope/mode, and a ledger source other than the one attached to the executor.
 3. Before marker persistence, the fixed document operation ID must equal the intrinsic generic request and prepared-row origins; a caller cannot substitute another closed document with the same job inputs. This comparison precedes canonical-ledger claim access, so a rejected foreign operation does not create or mutate a reservation or marker. The marker is write-once.
-4. Immediately before effects and before recovery GETs, the executor reopens the same fixed document and canonical attached ledger, revalidates every marker binding, and requires a remote executor identity to match its durable settlement binding. A persisted remote ID allows only recovery; it cannot create a second reservation or POST. The public `execute` and `recover` entrypoints first rebuild the operation from that same fixed loader and verify the concrete executor, attached ledger, job, and TEST transport before any executor state read. A `COMPLETE` replay therefore follows the executor receipt path, revalidating marker/claim scope and artifact bytes rather than trusting an unvalidated status row. Equivalent relative spellings of the same non-reparse canonical protected root are allowed; symlinks and native Windows junctions are always rejected before opening protected state.
+4. Immediately before effects and before recovery GETs, the executor reopens the same fixed document and canonical attached ledger, revalidates every marker binding, and requires a remote executor identity to match its durable settlement binding. A persisted remote ID allows only recovery; it cannot create a second reservation or POST. The public `execute` and `recover` entrypoints first rebuild the operation from that same fixed loader and verify the concrete executor, attached ledger, job, and fixed transport mapping before any executor state read. A `COMPLETE` replay therefore follows the executor receipt path, revalidating marker/claim scope and artifact bytes rather than trusting an unvalidated status row. Equivalent relative spellings of the same non-reparse canonical protected root are allowed; symlinks and native Windows junctions are always rejected before opening protected state.
 
-`LIVE` has no caller-provided callback, dictionary, root, ledger, receipt, provider, private Python capability, credential, quote, license, or verifier grant. Existing Jacó-specific admission remains unchanged and is not reinterpreted as generic authority. Until protected production qualification is provisioned, the production registry remains `BLOCKED` before filesystem effects under a production root, credential construction, reservation, or transport.
+`LIVE` has no caller-provided callback, dictionary, root, ledger, receipt, provider, private Python capability, credential, quote, license, or verifier grant. Existing Jacó-specific admission remains unchanged and is not reinterpreted as generic authority. A generic LIVE document can only select the existing FAL text-to-image adapter; credential lookup stays lazy after fixed-document validation, reservation, and generic-marker persistence. Missing protected state remains blocked before credential construction or transport.
 
 ## TEST integration and recovery
 
-The fixture uses a non-secret local root, an offline controlled transport, and a fresh process factory. The asserted path is `prepare_intent → fixture-ledger reserve → durable generic marker → submit_prepared fake POST → remote checkpoint → forced process exit → fresh resolver/executor/fake GET recovery`. The persisted transport journal proves one POST, one recovery GET, and no second reservation. A paired foreign-document test supplies two valid closed documents with identical job inputs, episode, and policy but distinct operation IDs; cross-binding and tampered recovery perform zero POST/GET and leave the durable marker/claim unchanged. This is TEST transaction-mechanics coverage only, not LIVE provider integration, quality, pricing, billing, TTS, or readiness evidence. Generic LIVE execution remains hard-blocked because no production generic qualification/composition is installed.
+The fixture uses a non-secret local root, an offline controlled transport, and a fresh process factory. The asserted path is `prepare_intent → fixture-ledger reserve → durable generic marker → submit_prepared fake POST → remote checkpoint → forced process exit → fresh resolver/executor/fake GET recovery`. The persisted transport journal proves one POST, one recovery GET, and no second reservation. A paired foreign-document test supplies two valid closed documents with identical job inputs, episode, and policy but distinct operation IDs; cross-binding and tampered recovery perform zero POST/GET and leave the durable marker/claim unchanged. LIVE-shaped fixtures test the same loader/admission code with credential absence; they never assert LIVE authority or permit network I/O. This is transaction-mechanics coverage only, not provider integration, quality, pricing, billing, TTS, or deployment evidence.
 
 ## Negative acceptance
 

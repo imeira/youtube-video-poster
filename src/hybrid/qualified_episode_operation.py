@@ -197,10 +197,16 @@ def load_qualified_operation(operation_id: str) -> dict[str, Any]:
     if not cap.is_finite() or cap <= 0:
         raise QualifiedEpisodeOperationError("maximum operation cost is invalid")
     kind = document["provider_kind"]
-    if kind not in {"FAL_FLUX_IMAGE_EDIT", "TEST_CONTROLLED_TRANSPORT"}:
+    if kind not in {
+        "FAL_FLUX_IMAGE_EDIT",
+        "FAL_FLUX_TEXT_TO_IMAGE",
+        "TEST_CONTROLLED_TRANSPORT",
+    }:
         raise QualifiedEpisodeOperationError("qualified provider kind is unsupported")
-    if document["mode"] == "LIVE" and kind != "FAL_FLUX_IMAGE_EDIT":
-        raise QualifiedEpisodeOperationError("LIVE requires the qualified FAL image-edit adapter")
+    if document["mode"] == "LIVE" and kind != "FAL_FLUX_TEXT_TO_IMAGE":
+        raise QualifiedEpisodeOperationError(
+            "LIVE currently supports only qualified FAL text-to-image"
+        )
     if document["mode"] == "TEST" and kind != "TEST_CONTROLLED_TRANSPORT":
         raise QualifiedEpisodeOperationError("TEST operations require controlled transport")
     return document
@@ -259,14 +265,16 @@ class QualifiedEpisodeOperation:
     async def execute(self) -> dict:
         """Prepare, reserve, mark, and submit through the existing executor."""
         document = validate_public_qualified_operation(self)
-        if document["mode"] == "LIVE":
-            # No deployment qualification is provisioned in this repository.
-            raise QualifiedEpisodeOperationError("generic LIVE qualification is unprovisioned")
-        prepared = self.executor.prepare_intent(self.job)
+        scope = (
+            "TEST_LOCAL_ONLY"
+            if self.job.mode == "TEST"
+            else f"GENERIC_OPERATION:{self.operation_id}:{self.job.ledger_policy_sha256}"
+        )
+        prepared = self.executor.prepare_intent(self.job, auth_scope=scope)
         validate_prepared_generic_origin(self.job, prepared, self.operation_id)
         self.ledger.reserve(
             self.job.request_id, document["episode_id"], self.job.endpoint, self.job.cost,
-            settlement_mode="FAL_READBACK_V2", auth_scope="TEST_LOCAL_ONLY",
+            settlement_mode="FAL_READBACK_V2", auth_scope=scope,
             provider_request_id="UNASSIGNED", authority_mode=self.job.mode,
         )
         self.executor.bind_prepared_generic_admission(self.job, operation_id=self.operation_id)
@@ -334,10 +342,7 @@ def validate_public_qualified_operation(operation: object) -> dict[str, Any]:
 def build_qualified_episode_operation(operation_id: str) -> QualifiedEpisodeOperation:
     """Build only from a validated protected document and fixed provider mapping."""
     document = load_qualified_operation(operation_id)
-    if document["mode"] == "LIVE":
-        # Generic LIVE qualification is intentionally unavailable: do not open a
-        # ledger, executor, credential-bearing provider, or transport first.
-        raise QualifiedEpisodeOperationError("generic LIVE qualification is unprovisioned")
+
     root = ProtectedOperationLocator.production().root
     payload_path = _relative(root, document["payload"]["path"], "payload")
     payload, payload_sha = _read_json(payload_path, "payload")
@@ -351,7 +356,9 @@ def build_qualified_episode_operation(operation_id: str) -> QualifiedEpisodeOper
         ledger_policy_sha256=document["ledger_policy_sha256"],
     )
     if job.input_kind != "TEXT_TO_IMAGE":
-        raise QualifiedEpisodeOperationError("reference manifest qualification is required before IMAGE_EDIT construction")
+        raise QualifiedEpisodeOperationError(
+            "reference manifest qualification is required before IMAGE_EDIT construction"
+        )
     executor_path = _relative(root, document["executor_database"], "executor database")
     ledger_path = _relative(root, document["ledger_database"], "ledger database")
     ledger = StandingBudgetLedger(ledger_path, policy_sha256=document["ledger_policy_sha256"],
@@ -389,7 +396,7 @@ def _canonical_storage_path(path: object, label: str) -> str:
 def validate_intrinsic_generic_storage(
     job: Job, executor_database: object, ledger: object
 ) -> None:
-    """Require the closed document's exact executor and ledger before I/O."""
+    """Require the complete closed generic contract before any executor I/O."""
     if type(job) is not QualifiedGenericJob:
         raise QualifiedEpisodeOperationError("generic storage requires a qualified generic job")
     operation_id = _literal_operation_id(job.operation_id)
@@ -410,6 +417,25 @@ def validate_intrinsic_generic_storage(
     ):
         raise QualifiedEpisodeOperationError(
             "generic operation storage does not match fixed canonical paths"
+        )
+    payload, payload_sha = _read_json(
+        _relative(root, document["payload"]["path"], "payload"), "payload"
+    )
+    if (
+        job.episode_id != document["episode_id"]
+        or job.ledger_policy_sha256 != document["ledger_policy_sha256"]
+        or job.scene != document["scene"]
+        or job.category != document["category"]
+        or job.mode != document["mode"]
+        or job.endpoint != document["endpoint"]
+        or job.input_kind != document["input_kind"]
+        or job.manifest is not None
+        or job.payload != payload
+        or job.intent_input_sha256 != payload_sha
+        or job.cost != Decimal(document["maximum_usd"])
+    ):
+        raise QualifiedEpisodeOperationError(
+            "generic job does not match fixed operation document"
         )
 
 

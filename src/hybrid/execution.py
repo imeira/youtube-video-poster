@@ -452,7 +452,17 @@ class Executor:
             )
             generic_final_admission = True
         jaco_final_admission = False
-        if job.endpoint == "blackforestlabs/flux-3/text-to-image":
+        qualified_generic_job = importlib.import_module(
+            "src.hybrid.qualified_episode_operation"
+        ).QualifiedGenericJob
+        generic_prepared_intent = (
+            type(job) is qualified_generic_job
+            and row.get("generic_operation_id") == getattr(job, "operation_id", None)
+        )
+        if (
+            job.endpoint == "blackforestlabs/flux-3/text-to-image"
+            and not (generic_final_admission or generic_prepared_intent)
+        ):
             marker = row.get("final_admission_marker")
             successor_marker = (
                 job.scene == "JACO_GEN28_STYLE_REMEDIATION_001"
@@ -514,7 +524,11 @@ class Executor:
             jaco_final_admission = True
         authenticated = self._fresh_authenticated_budget_admission(job, row)
         if authenticated is None:
-            if jaco_final_admission or generic_final_admission:
+            if (
+                jaco_final_admission
+                or generic_final_admission
+                or (not require_admitted_marker and generic_prepared_intent)
+            ):
                 return
             # Legacy TEST ledger paths remain mechanically useful, but their
             # fixed local scope cannot be relabeled as bridge authority or LIVE.
@@ -990,19 +1004,31 @@ class Executor:
         self._verify_intrinsic_generic_storage(job)
         authenticated_binding = self._configured_authenticated_budget_binding(job)
         if authenticated_binding is None:
+            qualified_generic_job = importlib.import_module(
+                "src.hybrid.qualified_episode_operation"
+            ).QualifiedGenericJob
+            generic_live = (
+                job.mode == "LIVE"
+                and type(job) is qualified_generic_job
+                and isinstance(getattr(job, "operation_id", None), str)
+                and bool(job.operation_id)
+            )
             jaco_live = (
                 job.mode == "LIVE"
                 and job.endpoint == "blackforestlabs/flux-3/text-to-image"
                 and isinstance(self._jaco_production_binding, dict)
                 and self._jaco_production_binding.get("kind") == "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION"
             )
-            if job.mode != "TEST" and not jaco_live:
+            if job.mode != "TEST" and not (jaco_live or generic_live):
                 raise PermissionError(
                     "raw prepared intent cannot authorize LIVE admission"
                 )
             expected_scope = (
-                self._jaco_production_binding["auth_scope"]
-                if jaco_live else "TEST_LOCAL_ONLY"
+                self._jaco_production_binding["auth_scope"] if jaco_live
+                else (
+                    f"GENERIC_OPERATION:{job.operation_id}:{job.ledger_policy_sha256}"
+                    if generic_live else "TEST_LOCAL_ONLY"
+                )
             )
             if auth_scope not in {None, expected_scope}:
                 raise PermissionError(
