@@ -112,6 +112,19 @@ def test_next_video_public_start_worker_resume_status_and_offline_gates(tmp_path
     assert resumed["publication"] == "DISABLED"
 
 
+def test_next_video_live_readiness_is_operator_only_and_never_claims_enablement(tmp_path):
+    workspace = tmp_path / "workspace"
+
+    code, report = run_next_video("live-readiness", "--workspace", str(workspace))
+
+    assert code == 0, report
+    assert report["status"] == "BLOCKED"
+    assert report["live_enabled"] is False
+    assert report["tts"] == "UNRESOLVED_NO_AZURE"
+    assert "image_reference_capability" in report["missing"]
+    assert not workspace.exists()
+
+
 def test_next_video_denies_live_and_concurrency_mutation_before_queue_write(tmp_path):
     workspace, packet = tmp_path / "workspace", compiled_packet(tmp_path / "packet")
     code, live = run_next_video("start", "--workspace", str(workspace), "--compiled-input", str(packet), "--mode", "LIVE")
