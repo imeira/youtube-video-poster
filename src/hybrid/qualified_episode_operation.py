@@ -258,13 +258,14 @@ class QualifiedEpisodeOperation:
 
     async def execute(self) -> dict:
         """Prepare, reserve, mark, and submit through the existing executor."""
-        if self.document["mode"] == "LIVE":
+        document = validate_public_qualified_operation(self)
+        if document["mode"] == "LIVE":
             # No deployment qualification is provisioned in this repository.
             raise QualifiedEpisodeOperationError("generic LIVE qualification is unprovisioned")
         prepared = self.executor.prepare_intent(self.job)
         validate_prepared_generic_origin(self.job, prepared, self.operation_id)
         self.ledger.reserve(
-            self.job.request_id, self.document["episode_id"], self.job.endpoint, self.job.cost,
+            self.job.request_id, document["episode_id"], self.job.endpoint, self.job.cost,
             settlement_mode="FAL_READBACK_V2", auth_scope="TEST_LOCAL_ONLY",
             provider_request_id="UNASSIGNED", authority_mode=self.job.mode,
         )
@@ -272,14 +273,62 @@ class QualifiedEpisodeOperation:
         return await self.executor.run(self.job, self.provider, submit_prepared=True)
 
     async def recover(self) -> dict:
+        validate_public_qualified_operation(self)
         row = self.executor.inspect(self.job.request_id)
         if row is None:
             raise QualifiedEpisodeOperationError("no durable operation exists to recover")
-        if row.get("status") == "COMPLETE":
-            return row
-        if not row.get("provider_id"):
+        if row.get("status") != "COMPLETE" and not row.get("provider_id"):
             raise QualifiedEpisodeOperationError("ambiguous operation without remote ID cannot resubmit")
         return await self.executor.run(self.job, self.provider)
+
+
+def validate_public_qualified_operation(operation: object) -> dict[str, Any]:
+    """Rebuild public-operation authority from the fixed loader before state I/O.
+
+    The public dataclass constructor is convenience syntax, not an authority
+    boundary.  Its document, root, executor, ledger, job, and provider must all
+    agree with a fresh fixed-root load before an entrypoint can inspect state or
+    return an idempotent terminal receipt.
+    """
+    if type(operation) is not QualifiedEpisodeOperation:
+        raise QualifiedEpisodeOperationError("canonical qualified operation is required")
+    operation_id = _literal_operation_id(operation.operation_id)
+    document = load_qualified_operation(operation_id)
+    root = ProtectedOperationLocator.production().root
+    if (
+        _canonical_storage_path(operation.root, "operation root")
+        != _canonical_storage_path(root, "protected operation root")
+    ):
+        raise QualifiedEpisodeOperationError("operation root does not match fixed protected root")
+    if type(operation.executor) is not Executor or operation.executor._standing_ledger is not operation.ledger:
+        raise QualifiedEpisodeOperationError("canonical executor and attached ledger are required")
+    validate_intrinsic_generic_storage(operation.job, operation.executor.database, operation.ledger)
+    if type(operation.job) is not QualifiedGenericJob:
+        raise QualifiedEpisodeOperationError("qualified generic job is required")
+    payload, payload_sha = _read_json(
+        _relative(root, document["payload"]["path"], "payload"), "payload"
+    )
+    if (
+        operation.job.operation_id != operation_id
+        or operation.job.episode_id != document["episode_id"]
+        or operation.job.ledger_policy_sha256 != document["ledger_policy_sha256"]
+        or operation.job.scene != document["scene"]
+        or operation.job.category != document["category"]
+        or operation.job.mode != document["mode"]
+        or operation.job.endpoint != document["endpoint"]
+        or operation.job.input_kind != document["input_kind"]
+        or operation.job.manifest is not None
+        or operation.job.payload != payload
+        or operation.job.intent_input_sha256 != payload_sha
+        or operation.job.cost != Decimal(document["maximum_usd"])
+    ):
+        raise QualifiedEpisodeOperationError("qualified job does not match fixed operation document")
+    if (
+        document["mode"] == "TEST"
+        and (type(operation.provider) is not _ControlledTransport or operation.provider.root != root)
+    ):
+        raise QualifiedEpisodeOperationError("fixed TEST controlled transport is required")
+    return document
 
 
 def build_qualified_episode_operation(operation_id: str) -> QualifiedEpisodeOperation:

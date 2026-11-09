@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import shutil
 import sqlite3
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 
@@ -289,6 +290,95 @@ def test_generic_storage_boundary_rejects_substituted_executor_or_ledger_before_
     with pytest.raises(subject.QualifiedEpisodeOperationError, match="storage"):
         asyncio.run(copied_recovery.run(owner.job, owner.provider))
     assert ((root / "state" / "transport-journal.json").read_bytes() if (root / "state" / "transport-journal.json").exists() else b"") == journal_before
+
+
+def test_public_complete_recovery_rejects_copied_executor_before_state_read(monkeypatch, tmp_path):
+    """A public constructor cannot turn a copied completed SQLite DB into authority."""
+    import src.hybrid.qualified_episode_operation as subject
+    from src.hybrid.execution import Executor
+    from src.hybrid.planner import Config
+
+    root = tmp_path / "protected"
+    _operation(root, operation_id="TEST-OWNER-001")
+    monkeypatch.setattr(subject, "_PROTECTED_ROOT", root)
+    owner = subject.build_qualified_episode_operation("TEST-OWNER-001")
+    assert asyncio.run(owner.execute())["status"] == "COMPLETE"
+    with sqlite3.connect(owner.executor.database) as database:
+        database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    copied_db = root / "attacker" / "copied-complete.sqlite3"
+    copied_db.parent.mkdir()
+    shutil.copyfile(owner.executor.database, copied_db)
+    copied_executor = Executor(
+        copied_db, Config(limit=Decimal("0.01"), concurrency=1), standing_ledger=owner.ledger
+    )
+    copied_executor.inspect = lambda _request_id: pytest.fail("copied state was read")
+    caller_composed = subject.QualifiedEpisodeOperation(
+        owner.operation_id, owner.document, owner.root, copied_executor,
+        owner.ledger, owner.job, owner.provider,
+    )
+    journal_before = (root / "state" / "transport-journal.json").read_bytes()
+
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="storage"):
+        asyncio.run(caller_composed.recover())
+
+    assert (root / "state" / "transport-journal.json").read_bytes() == journal_before
+
+
+def test_public_complete_recovery_revalidates_receipt_artifact_without_transport(monkeypatch, tmp_path):
+    """Canonical COMPLETE replay hashes the bound artifact instead of trusting status."""
+    import src.hybrid.qualified_episode_operation as subject
+
+    root = tmp_path / "protected"
+    _operation(root, operation_id="TEST-OWNER-001")
+    monkeypatch.setattr(subject, "_PROTECTED_ROOT", root)
+    operation = subject.build_qualified_episode_operation("TEST-OWNER-001")
+    completed = asyncio.run(operation.execute())
+    Path(completed["result"]).write_bytes(b"substituted bytes")
+    journal_before = (root / "state" / "transport-journal.json").read_bytes()
+
+    with pytest.raises(ValueError, match="receipt result hash mismatch"):
+        asyncio.run(operation.recover())
+
+    assert (root / "state" / "transport-journal.json").read_bytes() == journal_before
+
+
+def test_public_operation_accepts_same_canonical_relative_root_alias(monkeypatch, tmp_path):
+    """A spelling alias is safe only when it resolves to the fixed protected root."""
+    import src.hybrid.qualified_episode_operation as subject
+
+    root = tmp_path / "protected"
+    _operation(root, operation_id="TEST-OWNER-001")
+    monkeypatch.setattr(subject, "_PROTECTED_ROOT", root)
+    operation = subject.build_qualified_episode_operation("TEST-OWNER-001")
+    operation.root = root.parent / root.name / ".." / root.name
+
+    assert asyncio.run(operation.execute())["status"] == "COMPLETE"
+    assert asyncio.run(operation.recover())["status"] == "COMPLETE"
+    assert json.loads((root / "state" / "transport-journal.json").read_text()) == {"gets": 0, "posts": 1}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows junction boundary")
+def test_loader_rejects_native_junction_before_opening_state_storage(monkeypatch, tmp_path):
+    """Windows junctions are reparse points, not safe canonical storage aliases."""
+    import src.hybrid.qualified_episode_operation as subject
+
+    root = tmp_path / "protected"
+    target = tmp_path / "junction-target"
+    _operation(root, operation_id="TEST-OWNER-001")
+    (root / "state").mkdir()
+    (root / "state").rmdir()
+    target.mkdir()
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(root / "state"), str(target)],
+        check=False, capture_output=True,
+    )
+    assert created.returncode == 0, created.stderr.decode(errors="replace")
+    monkeypatch.setattr(subject, "_PROTECTED_ROOT", root)
+
+    with pytest.raises(subject.QualifiedEpisodeOperationError, match="reparse"):
+        subject.load_qualified_operation("TEST-OWNER-001")
+
+    assert list(target.iterdir()) == []
 
 
 def test_generic_live_operation_is_denied_before_reservation_or_transport(monkeypatch, tmp_path):
