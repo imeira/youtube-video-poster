@@ -6,14 +6,11 @@ LIVE authority without treating a self-hash as an issuer receipt.
 """
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-from pathlib import Path
 from typing import Any
 
 _SCHEMA = "offline-production-operation-request/v1"
@@ -58,53 +55,157 @@ def _duration(value: object) -> str:
     return value
 
 
+# v2 takes only bytes and parsed values.
+_V2_SCHEMA = "offline-production-operation-request/v2"
+_DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+
+
+def _raw_digest(raw: bytes) -> str:
+    return sha256(raw).hexdigest()
+
+
+def _strict_bytes_json(raw: object, label: str) -> dict[str, Any]:
+    if not isinstance(raw, bytes):
+        raise OperationRequestError(f"{label} must be UTF-8 JSON bytes")
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise OperationRequestError(f"{label} must be strict JSON") from error
+    if not isinstance(parsed, dict):
+        raise OperationRequestError(f"{label} must be a JSON object")
+    return parsed
+
+
+def _v2_sha(value: object, label: str) -> str:
+    if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+        raise OperationRequestError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def _v2_git_sha(value: object, label: str) -> str:
+    if not isinstance(value, str) or not _SHA.fullmatch(value):
+        raise OperationRequestError(f"{label} must be a full lowercase Git SHA")
+    return value
+
+
+def _v2_duration(value: object) -> str:
+    if type(value) not in {int, float, str}:
+        raise OperationRequestError("duration_seconds must be a finite positive decimal")
+    try:
+        result = Decimal(str(value))
+    except InvalidOperation as error:
+        raise OperationRequestError("duration_seconds must be a finite positive decimal") from error
+    if not result.is_finite() or result <= 0:
+        raise OperationRequestError("duration_seconds must be a finite positive decimal")
+    return format(result, "f")
+
+
 @dataclass(frozen=True)
-class OfflineOperationRequest:
-    operation_id: str
-    episode_id: str
-    title: str
-    source_repository: str
-    source_revision: str
+class CanonicalEditorialBundle:
+    """Validated editorial bytes and hashes; not authority and never a path."""
+
     audio_duration_seconds: str
-    timeline_count: int
     caption_cue_count: int
     beat_count: int
     shot_count: int
+    narration_input_sha256: str
+    timeline_sha256: str
+    asset_requirements_sha256: str
+    subtitles_sha256: str
+    parent_manifest_sha256: str
+
+    def artifact_hashes(self) -> dict[str, str]:
+        return {
+            "timeline.json": self.timeline_sha256,
+            "asset_requirements.json": self.asset_requirements_sha256,
+            "subtitles.srt": self.subtitles_sha256,
+            "parent_manifest.json": self.parent_manifest_sha256,
+        }
+
+
+def parse_canonical_editorial_bundle(
+    *, timeline_bytes: bytes, asset_requirements_bytes: bytes, subtitles_bytes: bytes, parent_manifest_bytes: bytes
+) -> CanonicalEditorialBundle:
+    """Parse supplied bytes only; protected root checks belong to the caller boundary."""
+    timeline = _strict_bytes_json(timeline_bytes, "timeline")
+    assets = _strict_bytes_json(asset_requirements_bytes, "asset_requirements")
+    parent = _strict_bytes_json(parent_manifest_bytes, "parent_manifest")
+    if timeline.get("schema") != "jose_postproduction_timeline/v1":
+        raise OperationRequestError("timeline schema is invalid")
+    if assets.get("schema") != "jose_asset_requirements/v1":
+        raise OperationRequestError("asset_requirements schema is invalid")
+    if parent.get("schema") != "jose_postproduction_parent_manifest/v1":
+        raise OperationRequestError("parent_manifest schema is invalid")
+    output_hashes = parent.get("output_hashes")
+    if not isinstance(output_hashes, dict):
+        raise OperationRequestError("parent manifest output hashes are required")
+    if output_hashes.get("timeline.json") != _raw_digest(timeline_bytes):
+        raise OperationRequestError("timeline hash does not match parent manifest")
+    if output_hashes.get("asset_requirements.json") != _raw_digest(asset_requirements_bytes):
+        raise OperationRequestError("asset_requirements hash does not match parent manifest")
+    if output_hashes.get("subtitles.srt") != _raw_digest(subtitles_bytes):
+        raise OperationRequestError("subtitles hash does not match parent manifest")
+    counts, parent_counts = timeline.get("counts"), parent.get("counts")
+    beats, requirements = timeline.get("beats"), assets.get("asset_requirements")
+    audio, source_hashes = timeline.get("audio_bindings"), parent.get("source_hashes")
+    if not all(isinstance(value, dict) for value in (counts, parent_counts, audio, source_hashes)):
+        raise OperationRequestError("canonical bundle counts and narration bindings are required")
+    if not isinstance(beats, list) or not isinstance(requirements, list):
+        raise OperationRequestError("canonical bundle beats and asset requirements are required")
+    captions = _count(counts.get("captions"), "caption count")
+    if not isinstance(subtitles_bytes, bytes) or len(re.findall(rb"(?m)^\d+\r?$", subtitles_bytes)) != captions:
+        raise OperationRequestError("caption count does not match subtitles")
+    beat_count = _count(counts.get("semantic_beats"), "beat count")
+    shot_count = _count(counts.get("shot_needs"), "shot count")
+    if len(beats) != beat_count:
+        raise OperationRequestError("beat count does not match timeline beats")
+    if any(not isinstance(beat, dict) or not isinstance(beat.get("shots"), list) for beat in beats):
+        raise OperationRequestError("timeline beat identities and shots are required")
+    if sum(len(beat["shots"]) for beat in beats) != shot_count:
+        raise OperationRequestError("shot count does not match timeline shots")
+    if len(requirements) != shot_count:
+        raise OperationRequestError("asset requirement count does not match timeline shots")
+    required_parent = {"captions": captions, "semantic_beats": beat_count, "shot_needs": shot_count,
+                       "asset_requirements_missing": len(requirements)}
+    if any(parent_counts.get(key) != value for key, value in required_parent.items()):
+        raise OperationRequestError("parent manifest counts do not match canonical timeline")
+    narration_sha = _v2_sha(audio.get("approved_input_sha256"), "timeline narration hash")
+    if source_hashes.get("approved_input_sha256") != narration_sha:
+        raise OperationRequestError("parent manifest narration hash does not match timeline")
+    return CanonicalEditorialBundle(
+        audio_duration_seconds=_v2_duration(timeline.get("duration_seconds")), caption_cue_count=captions,
+        beat_count=beat_count, shot_count=shot_count, narration_input_sha256=narration_sha,
+        timeline_sha256=_raw_digest(timeline_bytes), asset_requirements_sha256=_raw_digest(asset_requirements_bytes),
+        subtitles_sha256=_raw_digest(subtitles_bytes),
+        parent_manifest_sha256=_raw_digest(parent_manifest_bytes),
+    )
+
+
+@dataclass(frozen=True)
+class _V2Request:
+    operation_id: str
+    episode_id: str
+    title: str
+    base_revision: str
+    code_revision: str
+    canonical_bundle: CanonicalEditorialBundle
     voice_publication_license: str
 
     def request(self) -> dict[str, Any]:
         return {
-            "schema": _SCHEMA,
-            "operation_id": self.operation_id,
-            "episode_id": self.episode_id,
-            "title": self.title,
-            "source": {"repository": self.source_repository, "revision": self.source_revision},
-            "editorial_inventory": {
-                "audio_duration_seconds": self.audio_duration_seconds,
-                "timeline_count": self.timeline_count,
-                "caption_cue_count": self.caption_cue_count,
-                "beat_count": self.beat_count,
-                "shot_count": self.shot_count,
-                "image_quota": None,
-            },
-            "provider_route": {
-                "endpoint": "blackforestlabs/flux-3/text-to-image",
-                "status": "UNQUALIFIED",
-            },
-            "voice_publication_license": self.voice_publication_license,
-            "paid_generation": False,
-            "dispatch_permitted": False,
-            "human_gates": [
-                "INDEPENDENT_VIDEO_QA_REQUIRED",
-                "INDEPENDENT_THUMBNAIL_QA_REQUIRED",
-            ],
-            "blocked": {
-                "trusted_issuer_verifier": "UNPROVISIONED",
-                "provider_quote": "MISSING",
-                "provider_billing_readback": "MISSING",
-                "provider_license_provenance": "MISSING",
-                "voice_publication_license": self.voice_publication_license,
-            },
+            "schema": _V2_SCHEMA, "operation_id": self.operation_id, "episode_id": self.episode_id, "title": self.title,
+            "source": {"repository": _REPOSITORY, "base_revision": self.base_revision, "code_revision": self.code_revision,
+                       "narration_input_sha256": self.canonical_bundle.narration_input_sha256,
+                       "editorial_artifact_hashes": self.canonical_bundle.artifact_hashes()},
+            "editorial_inventory": {"audio_duration_seconds": self.canonical_bundle.audio_duration_seconds,
+                "caption_cue_count": self.canonical_bundle.caption_cue_count, "beat_count": self.canonical_bundle.beat_count,
+                "shot_count": self.canonical_bundle.shot_count, "image_quota": None},
+            "provider_route": {"endpoint": "blackforestlabs/flux-3/text-to-image", "status": "UNQUALIFIED"},
+            "voice_publication_license": self.voice_publication_license, "paid_generation": False, "dispatch_permitted": False,
+            "human_gates": ["INDEPENDENT_VIDEO_QA_REQUIRED", "INDEPENDENT_THUMBNAIL_QA_REQUIRED"],
+            "blocked": {"trusted_issuer_verifier": "UNPROVISIONED", "provider_quote": "MISSING",
+                "provider_billing_readback": "MISSING", "provider_license_provenance": "MISSING",
+                "voice_publication_license": self.voice_publication_license},
         }
 
     def canonical_bytes(self) -> bytes:
@@ -112,126 +213,51 @@ class OfflineOperationRequest:
         return _canonical({"request": request, "request_sha256": _sha(request)})
 
 
-def assemble_operation_request(descriptor: object) -> OfflineOperationRequest:
-    """Create a typed offline request; no provider, credential, or executor is used."""
-    required = {
-        "operation_id", "episode_id", "title", "source_repository", "source_revision",
-        "audio_duration_seconds", "timeline_count", "caption_cue_count", "beat_count",
-        "shot_count", "voice_publication_license",
-    }
-    if not isinstance(descriptor, dict):
-        raise OperationRequestError("closed operation descriptor is required")
-    if "image_quota" in descriptor:
-        raise OperationRequestError("image_quota is not implied by shot_count")
-    if set(descriptor) != required:
-        raise OperationRequestError("closed operation descriptor is required")
-    if descriptor["source_repository"] != _REPOSITORY:
-        raise OperationRequestError("source_repository is not the canonical remote")
-    if not isinstance(descriptor["source_revision"], str) or not _SHA.fullmatch(descriptor["source_revision"]):
-        raise OperationRequestError("source_revision must be a full lowercase Git SHA")
-    if not isinstance(descriptor["title"], str) or not descriptor["title"].strip():
-        raise OperationRequestError("title is required")
-    if descriptor["voice_publication_license"] != "UNKNOWN":
+def assemble_operation_request(
+    *, operation_id: object, episode_id: object, title: object, base_revision: object,
+    code_revision: object, canonical_bundle: object, voice_publication_license: object,
+) -> _V2Request:
+    """Assemble using typed keyword-only fields; caller counts cannot be supplied."""
+    if not isinstance(canonical_bundle, CanonicalEditorialBundle):
+        raise OperationRequestError("validated canonical editorial bundle is required")
+    if title != "José e sua túnica especial":
+        raise OperationRequestError("title must exactly preserve the approved José title")
+    if voice_publication_license != "UNKNOWN":
         raise OperationRequestError("voice_publication_license must remain UNKNOWN until evidence exists")
-    return OfflineOperationRequest(
-        operation_id=_identifier(descriptor["operation_id"], "operation_id"),
-        episode_id=_identifier(descriptor["episode_id"], "episode_id"),
-        title=descriptor["title"],
-        source_repository=descriptor["source_repository"],
-        source_revision=descriptor["source_revision"],
-        audio_duration_seconds=_duration(descriptor["audio_duration_seconds"]),
-        timeline_count=_count(descriptor["timeline_count"], "timeline_count"),
-        caption_cue_count=_count(descriptor["caption_cue_count"], "caption_cue_count"),
-        beat_count=_count(descriptor["beat_count"], "beat_count"),
-        shot_count=_count(descriptor["shot_count"], "shot_count"),
-        voice_publication_license=descriptor["voice_publication_license"],
-    )
+    return _V2Request(_identifier(operation_id, "operation_id"), _identifier(episode_id, "episode_id"), title,
+        _v2_git_sha(base_revision, "base_revision"), _v2_git_sha(code_revision, "code_revision"), canonical_bundle,
+        voice_publication_license)
 
 
-def _read_strict_json(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise OperationRequestError("operation request is unavailable strict JSON") from error
-    if not isinstance(value, dict):
-        raise OperationRequestError("operation request must be an object")
-    return value
-
-
-def preflight_operation_request(path: Path | str, *, expected_source_revision: str) -> dict[str, Any]:
-    """Verify immutable planning bytes and report non-promotable readiness."""
-    if not isinstance(expected_source_revision, str) or not _SHA.fullmatch(expected_source_revision):
-        raise OperationRequestError("expected_source_revision must be a full lowercase Git SHA")
-    document = _read_strict_json(Path(path))
-    if set(document) != {"request", "request_sha256"} or not isinstance(document.get("request"), dict):
+def preflight_operation_request(envelope: object, *, canonical_bundle: object, expected_code_revision: object) -> dict[str, Any]:
+    """Validate a self-hashed request against canonical bytes; grants no authority."""
+    if not isinstance(envelope, dict) or set(envelope) != {"request", "request_sha256"}:
         raise OperationRequestError("closed operation request envelope is required")
-    request = document["request"]
-    if document.get("request_sha256") != _sha(request):
+    request = envelope.get("request")
+    if not isinstance(request, dict) or envelope.get("request_sha256") != _sha(request):
         raise OperationRequestError("operation request immutable hash mismatch")
+    if not isinstance(canonical_bundle, CanonicalEditorialBundle):
+        raise OperationRequestError("validated canonical editorial bundle is required")
+    code_revision = _v2_git_sha(expected_code_revision, "expected_code_revision")
     source = request.get("source")
-    if not isinstance(source, dict) or source != {"repository": _REPOSITORY, "revision": expected_source_revision}:
-        raise OperationRequestError("operation request source binding does not match expected revision")
-    editorial = request.get("editorial_inventory")
-    required_request = {
-        "schema", "operation_id", "episode_id", "title", "source", "editorial_inventory",
-        "provider_route", "voice_publication_license", "paid_generation", "dispatch_permitted",
-        "human_gates", "blocked",
-    }
-    if set(request) != required_request or request.get("schema") != _SCHEMA:
-        raise OperationRequestError("closed operation request is required")
-    descriptor = {
-        "operation_id": request["operation_id"], "episode_id": request["episode_id"],
-        "title": request["title"], "source_repository": source["repository"],
-        "source_revision": source["revision"],
-        "audio_duration_seconds": editorial.get("audio_duration_seconds") if isinstance(editorial, dict) else None,
-        "timeline_count": editorial.get("timeline_count") if isinstance(editorial, dict) else None,
-        "caption_cue_count": editorial.get("caption_cue_count") if isinstance(editorial, dict) else None,
-        "beat_count": editorial.get("beat_count") if isinstance(editorial, dict) else None,
-        "shot_count": editorial.get("shot_count") if isinstance(editorial, dict) else None,
-        "voice_publication_license": request["voice_publication_license"],
-    }
-    assembled = assemble_operation_request(descriptor)
-    if request != assembled.request():
+    if not isinstance(source, dict) or source.get("code_revision") != code_revision:
+        raise OperationRequestError("operation request code revision does not match expected revision")
+    expected = assemble_operation_request(operation_id=request.get("operation_id"), episode_id=request.get("episode_id"),
+        title=request.get("title"), base_revision=source.get("base_revision"), code_revision=code_revision,
+        canonical_bundle=canonical_bundle, voice_publication_license=request.get("voice_publication_license")).request()
+    if request != expected:
         raise OperationRequestError("closed operation request fields are invalid")
-    return {
-        "status": "PREPRODUCTION_READY",
-        "dispatch_permitted": False,
-        "paid_generation": False,
-        "request_sha256": document["request_sha256"],
-        "request": assembled.request(),
-        "blocked": assembled.request()["blocked"],
-        "next_required_action": "PROVISION_FIXED_TRUSTED_ISSUER_VERIFIER",
-    }
-
-
-def write_operation_request(path: Path | str, descriptor: object) -> OfflineOperationRequest:
-    """Atomically publish a new offline request; never overwrite an existing one."""
-    request = assemble_operation_request(descriptor)
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
-    try:
-        with os.fdopen(os.open(destination, flags, 0o600), "wb", closefd=True) as stream:
-            stream.write(request.canonical_bytes())
-            stream.flush()
-            os.fsync(stream.fileno())
-    except FileExistsError as error:
-        raise OperationRequestError("operation request already exists; create a successor revision") from error
-    return request
+    return {"status": "PREPRODUCTION_READY", "dispatch_permitted": False, "paid_generation": False,
+        "request_sha256": envelope["request_sha256"], "request": expected, "blocked": expected["blocked"],
+        "next_required_action": "PROVISION_FIXED_TRUSTED_ISSUER_VERIFIER"}
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight",))
-    parser.add_argument("--request", required=True, type=Path)
-    parser.add_argument("--expected-source-revision", required=True)
-    args = parser.parse_args(argv)
-    try:
-        print(json.dumps(preflight_operation_request(args.request, expected_source_revision=args.expected_source_revision), ensure_ascii=False, sort_keys=True))
-        return 0
-    except OperationRequestError as error:
-        print(json.dumps({"status": "BLOCKED", "dispatch_permitted": False, "error": str(error)}, ensure_ascii=False, sort_keys=True))
-        return 1
+    """No path-based CLI exists: callers must use the protected artifact boundary."""
+    del argv
+    print(json.dumps({"status": "BLOCKED", "dispatch_permitted": False,
+                      "error": "path-based preflight is unsupported; pass a validated canonical bundle"}, sort_keys=True))
+    return 1
 
 
 if __name__ == "__main__":

@@ -8,27 +8,27 @@ generation, Telegram delivery, or publication path is constructed.  It is a
 reusable request-assembly boundary, not a new registry and not a LIVE
 capability.
 
-## Immutable request contract
+## V2 source-bound inventory
 
-The closed `offline-production-operation-request/v1` request binds:
+V2 accepts only raw bytes supplied by an existing protected artifact boundary:
+`timeline.json`, `subtitles.srt`, `asset_requirements.json`, and
+`parent_manifest.json`. It performs no path opening. The parent manifest hashes
+must match the supplied timeline, subtitles, and requirements bytes; the
+narration-input hash must agree between timeline and parent manifest. Inventory
+is derived only after those checks: audio `283.104`, captions `63`, semantic
+beats `15`, and shots/asset requirements `45`.
 
-- literal operation and episode identifiers;
-- canonical repository URL and exact 40-character source revision;
-- an editorial inventory: measured supplied audio duration, timeline count,
-  caption-cue count, beat count, and shot count;
-- the existing FAL FLUX 3 text-to-image endpoint only as an `UNQUALIFIED`
-  route; and
-- the declared voice-publication license state and the two independent human
-  gates (video and thumbnail).
+The assembler is keyword-only and has no caller count fields. `timeline_count`
+has no semantics and is rejected. The exact user title is `José e sua túnica
+especial`; request provenance stores the base revision separately from the code
+revision. A self-hash is integrity evidence only and never an issuer receipt or
+LIVE authority.
 
-A shot count is not an image quota.  The only supported image quota is `null`.
-The assembler rejects a descriptor that tries to turn the 45 planned shots into
-45 authorized image calls.  The request also fixes `paid_generation: false` and
-`dispatch_permitted: false`.
-
-The envelope carries a SHA-256 of the canonical request bytes.  This detects
-mutation of the materialized request; it is explicitly not an issuer receipt,
-provider quote, approval, price, license proof, or LIVE authority.
+`PREPRODUCTION_READY` means editorial validation only. Provider route remains
+`UNQUALIFIED`, no image quota exists, all paid/dispatch fields remain false, and
+independent video and thumbnail approval remain human gates. This offline
+assembler does not enable LIVE operation, credentials, production reads, sends,
+or publication.
 
 ## Preflight and executor boundary
 
@@ -49,22 +49,18 @@ or caller callback for that chain.
 
 ## Actual José request
 
-The durable request at
-`C:/Users/meira/Documents/HermesStudio/requests/jose-gen37-20261110/` binds the
-current master source revision `8a4f3921b8ea8caef4caf15506aff19b8aff3116` and
-records only supplied facts: audio `283.104` seconds, timeline count `63`,
-caption cues `15`, beats `45`, and shots `45`.  It preserves
-`voice_publication_license: UNKNOWN` and leaves image quota null.
+The original v1 request/preflight evidence remains unchanged at
+`C:/Users/meira/Documents/HermesStudio/requests/jose-gen37-20261110/`. A
+successor v2 report records that v1's fields were positionally misordered.
+The corrected inventory is derived from the bound artifacts, not manually
+entered: `283.104` seconds, `63` captions, `15` beats, and `45` shots.
+The base revision is `8a4f3921b8ea8caef4caf15506aff19b8aff3116`; code revision
+is recorded independently in the v2 artifact.
 
-## Next executable command
+## Invocation boundary
 
-```bash
-uv run python -m src.hybrid.operation_request preflight \
-  --request C:/Users/meira/Documents/HermesStudio/requests/jose-gen37-20261110/jose-gen37-operation-request-v1.json \
-  --expected-source-revision 8a4f3921b8ea8caef4caf15506aff19b8aff3116
-```
-
-A successful command is still non-promotable and cannot dispatch.  The next
-platform decision is to provision the fixed trusted issuer/verifier source and
-its readback contract; no TEST fixture, self-hash, older Jacó authority, or
-EP8 evidence may substitute for it.
+There is intentionally no path-based CLI. A protected upstream reader must
+validate its root before it reads the four artifacts, then pass their bytes to
+`parse_canonical_editorial_bundle`; assembly and preflight consume that typed
+bundle. The API cannot read production paths or convert a self-hashed JSON
+claim into authority.
