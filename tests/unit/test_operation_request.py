@@ -1,158 +1,175 @@
-"""José operation requests derive inventory from validated editorial artifacts."""
+"""Fail-closed validation for the checked-in José editorial fixture."""
 from __future__ import annotations
 
 import json
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
-BASE_SHA = "8a4f3921b8ea8caef4caf15506aff19b8aff3116"
-CODE_SHA = "61515c6ac990f349e70d462eb7676cf2cff9b0c6"
-NARRATION_SHA = "ca88f3f6f1a7a451482b09ee5324cc52527d1937aaf6db9b31d7cea401f81db4"
+FIXTURE = Path(__file__).parents[1] / "fixtures" / "jose_gen37_v3"
+BASE_SHA = "40bed05c2fea7ac3a35903d91f6146e99f0b353f"
+FIXTURE_CODE_SHA = "0000000000000000000000000000000000000000"  # fixture only; never a current implementation claim
 
 
 def _raw(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
-def _sha(value: object) -> str:
-    return sha256(_raw(value)).hexdigest()
-
-
-def _actual_shape_bytes() -> tuple[bytes, bytes, bytes, bytes]:
-    timeline = {
-        "schema": "jose_postproduction_timeline/v1", "duration_seconds": 283.104,
-        "audio_bindings": {"approved_input_sha256": NARRATION_SHA},
-        "counts": {"captions": 63, "semantic_beats": 15, "shot_needs": 45},
-        "beats": [{"id": f"B{index:02}", "shots": [{"id": f"S{index:02}-{shot}"} for shot in range(1, 4)]} for index in range(1, 16)],
+def _read_bundle() -> dict[str, bytes]:
+    root = FIXTURE / "postproduction_plan_v1"
+    return {
+        "timeline": (root / "timeline.json").read_bytes(),
+        "assets": (root / "asset_requirements.json").read_bytes(),
+        "subtitles": (root / "subtitles.srt").read_bytes(),
+        "parent": (root / "parent_manifest.json").read_bytes(),
+        "manifest": (FIXTURE / "request_manifest_v2.json").read_bytes(),
     }
-    assets = {"schema": "jose_asset_requirements/v1", "asset_requirements": [{"id": f"AR-{index:02}"} for index in range(1, 46)]}
-    timeline_raw, assets_raw = _raw(timeline), _raw(assets)
-    subtitles_raw = "\n\n".join(f"{index}\n00:00:00,000 --> 00:00:01,000\ncue {index}" for index in range(1, 64)).encode()
-    parent = {
-        "schema": "jose_postproduction_parent_manifest/v1", "source_hashes": {"approved_input_sha256": NARRATION_SHA},
-        "output_hashes": {"timeline.json": sha256(timeline_raw).hexdigest(), "asset_requirements.json": sha256(assets_raw).hexdigest(), "subtitles.srt": sha256(subtitles_raw).hexdigest()},
-        "counts": {"captions": 63, "semantic_beats": 15, "shot_needs": 45, "asset_requirements_missing": 45},
-    }
-    return timeline_raw, assets_raw, subtitles_raw, _raw(parent)
 
 
-def _bundle():
+def _rehash_parent(bundle: dict[str, bytes]) -> dict[str, bytes]:
+    parent = json.loads(bundle["parent"])
+    parent["output_hashes"].update({
+        "timeline.json": sha256(bundle["timeline"]).hexdigest(),
+        "asset_requirements.json": sha256(bundle["assets"]).hexdigest(),
+        "subtitles.srt": sha256(bundle["subtitles"]).hexdigest(),
+    })
+    bundle["parent"] = _raw(parent)
+    return bundle
+
+
+def _parse(bundle: dict[str, bytes]):
     from src.hybrid.operation_request import parse_canonical_editorial_bundle
 
-    timeline_raw, assets_raw, subtitles_raw, parent_raw = _actual_shape_bytes()
-    return parse_canonical_editorial_bundle(timeline_bytes=timeline_raw, asset_requirements_bytes=assets_raw,
-        subtitles_bytes=subtitles_raw, parent_manifest_bytes=parent_raw)
-
-
-def test_actual_postproduction_shapes_bind_correct_inventory_not_caller_counts():
-    from src.hybrid.operation_request import assemble_operation_request
-
-    request = assemble_operation_request(
-        operation_id="JOSE-GEN37-20261110",
-        episode_id="JOSE-GEN37",
-        title="José e sua túnica especial",
-        base_revision=BASE_SHA,
-        code_revision=CODE_SHA,
-        canonical_bundle=_bundle(),
-        voice_publication_license="UNKNOWN",
+    return parse_canonical_editorial_bundle(
+        timeline_bytes=bundle["timeline"],
+        asset_requirements_bytes=bundle["assets"],
+        subtitles_bytes=bundle["subtitles"],
+        parent_manifest_bytes=bundle["parent"],
+        request_manifest_bytes=bundle["manifest"],
     )
 
-    assert request.request()["editorial_inventory"] == {
-        "audio_duration_seconds": "283.104",
-        "caption_cue_count": 63,
-        "beat_count": 15,
-        "shot_count": 45,
-        "image_quota": None,
-    }
-    assert request.request()["source"] == {
-        "repository": "https://github.com/imeira/youtube-video-poster.git",
-        "base_revision": BASE_SHA,
-        "code_revision": CODE_SHA,
-        "narration_input_sha256": NARRATION_SHA,
-        "editorial_artifact_hashes": _bundle().artifact_hashes(),
+
+def test_actual_checked_in_bundle_binds_metadata_counts_and_natural_gaps():
+    bundle = _parse(_read_bundle())
+
+    assert bundle.audio_duration_seconds == "283.104"
+    assert (bundle.caption_cue_count, bundle.beat_count, bundle.shot_count) == (63, 15, 45)
+    assert bundle.channel == "@EraUmaVezBibliaAnimada"
+    assert bundle.playlist == "Aventuras do Antigo Testamento"
+    assert bundle.language == "pt-BR"
+    assert bundle.title == "José e sua túnica especial"
+    assert bundle.caption_gap_report == {
+        "inter_cue_gaps_seconds": ["0.094"],
+        "trailing_gap_seconds": "0.059",
+        "policy": "bounded natural/provider pause; captions are not stretched",
     }
 
 
-def test_assembler_is_keyword_only_and_does_not_accept_redundant_timeline_count():
-    from src.hybrid.operation_request import assemble_operation_request
+def test_rejects_duplicate_json_keys_nonfinite_constants_and_unknown_schema_keys():
+    from src.hybrid.operation_request import OperationRequestError
 
-    with pytest.raises(TypeError):
-        assemble_operation_request(  # type: ignore[call-arg]
-            "JOSE-GEN37-20261110", "JOSE-GEN37", "José e sua túnica especial", BASE_SHA, CODE_SHA, _bundle(), "UNKNOWN"
-        )
-    with pytest.raises(TypeError):
-        assemble_operation_request(  # type: ignore[call-arg]
-            operation_id="JOSE-GEN37-20261110", episode_id="JOSE-GEN37", title="José e sua túnica especial",
-            base_revision=BASE_SHA, code_revision=CODE_SHA, canonical_bundle=_bundle(),
-            voice_publication_license="UNKNOWN", timeline_count=63,
-        )
+    for raw in {
+        "duplicate": b'{"schema":"jose_postproduction_timeline/v1","schema":"jose_postproduction_timeline/v1"}',
+        "constant": b'{"schema":"jose_postproduction_timeline/v1","duration_seconds":NaN}',
+    }.values():
+        bundle = _read_bundle()
+        bundle["timeline"] = raw
+        with pytest.raises(OperationRequestError, match="strict JSON"):
+            _parse(bundle)
 
-
-def test_rejects_permuted_parent_hashes_before_inventory_is_available():
-    from src.hybrid.operation_request import (
-        OperationRequestError,
-        parse_canonical_editorial_bundle,
-    )
-
-    timeline_raw, assets_raw, subtitles_raw, parent_raw = _actual_shape_bytes()
-    parent = json.loads(parent_raw)
-    parent["output_hashes"]["timeline.json"], parent["output_hashes"]["asset_requirements.json"] = (
-        parent["output_hashes"]["asset_requirements.json"], parent["output_hashes"]["timeline.json"]
-    )
-
-    with pytest.raises(OperationRequestError, match="hash"):
-        parse_canonical_editorial_bundle(
-            timeline_bytes=timeline_raw, asset_requirements_bytes=assets_raw, subtitles_bytes=subtitles_raw, parent_manifest_bytes=_raw(parent)
-        )
+    bundle = _read_bundle()
+    timeline = json.loads(bundle["timeline"])
+    timeline["unapproved"] = True
+    bundle["timeline"] = _raw(timeline)
+    with pytest.raises(OperationRequestError, match="closed schema"):
+        _parse(_rehash_parent(bundle))
 
 
-def test_rejects_inconsistent_actual_counts_and_boolean_duration():
-    from src.hybrid.operation_request import (
-        OperationRequestError,
-        parse_canonical_editorial_bundle,
-    )
+def test_rejects_boolean_nested_counts_and_metadata_omission():
+    from src.hybrid.operation_request import OperationRequestError
 
-    timeline_raw, assets_raw, subtitles_raw, parent_raw = _actual_shape_bytes()
-    timeline = json.loads(timeline_raw)
-    timeline["counts"]["captions"] = 15  # Regression: previous positional misordering.
-    parent = json.loads(parent_raw)
-    parent["output_hashes"]["timeline.json"] = sha256(_raw(timeline)).hexdigest()
+    bundle = _read_bundle()
+    timeline = json.loads(bundle["timeline"])
+    timeline["counts"]["captions"] = True
+    bundle["timeline"] = _raw(timeline)
     with pytest.raises(OperationRequestError, match="caption"):
-        parse_canonical_editorial_bundle(
-            timeline_bytes=_raw(timeline), asset_requirements_bytes=assets_raw, subtitles_bytes=subtitles_raw, parent_manifest_bytes=_raw(parent)
-        )
+        _parse(_rehash_parent(bundle))
 
-    timeline_raw, assets_raw, subtitles_raw, parent_raw = _actual_shape_bytes()
-    timeline = json.loads(timeline_raw)
-    timeline["duration_seconds"] = True
-    parent = json.loads(parent_raw)
-    parent["output_hashes"]["timeline.json"] = sha256(_raw(timeline)).hexdigest()
-    with pytest.raises(OperationRequestError, match="duration"):
-        parse_canonical_editorial_bundle(
-            timeline_bytes=_raw(timeline), asset_requirements_bytes=assets_raw, subtitles_bytes=subtitles_raw, parent_manifest_bytes=_raw(parent)
-        )
+    bundle = _read_bundle()
+    manifest = json.loads(bundle["manifest"])
+    del manifest["scope"]["channel"]
+    bundle["manifest"] = _raw(manifest)
+    with pytest.raises(OperationRequestError, match="channel"):
+        _parse(bundle)
 
 
-def test_preflight_accepts_parsed_envelope_only_and_self_hash_is_not_authority():
-    from src.hybrid.operation_request import (
-        OperationRequestError,
-        assemble_operation_request,
-        preflight_operation_request,
+@pytest.mark.parametrize("target", ["beat", "shot", "asset"])
+def test_rejects_duplicate_ids_and_foreign_relationships(target: str):
+    from src.hybrid.operation_request import OperationRequestError
+
+    bundle = _read_bundle()
+    timeline, assets = json.loads(bundle["timeline"]), json.loads(bundle["assets"])
+    if target == "beat":
+        timeline["beats"][1]["id"] = timeline["beats"][0]["id"]
+    elif target == "shot":
+        timeline["beats"][0]["shots"][1]["id"] = timeline["beats"][0]["shots"][0]["id"]
+    else:
+        assets["asset_requirements"][1]["id"] = assets["asset_requirements"][0]["id"]
+    bundle["timeline"], bundle["assets"] = _raw(timeline), _raw(assets)
+    with pytest.raises(OperationRequestError, match="unique"):
+        _parse(_rehash_parent(bundle))
+
+    bundle = _read_bundle()
+    timeline = json.loads(bundle["timeline"])
+    timeline["beats"][0]["shots"][0]["asset_requirement_id"] = "AR-NOT-IN-BUNDLE"
+    bundle["timeline"] = _raw(timeline)
+    with pytest.raises(OperationRequestError, match="relationship"):
+        _parse(_rehash_parent(bundle))
+
+
+def test_rehashed_parent_still_rejects_structural_tampering():
+    from src.hybrid.operation_request import OperationRequestError
+
+    bundle = _read_bundle()
+    timeline = json.loads(bundle["timeline"])
+    timeline["beats"][0]["shots"] = []
+    bundle["timeline"] = _raw(timeline)
+    with pytest.raises(OperationRequestError, match="shot count"):
+        _parse(_rehash_parent(bundle))
+
+
+@pytest.mark.parametrize("mutation", ["overlap", "order", "range"])
+def test_real_srt_parser_rejects_bad_times(mutation: str):
+    from src.hybrid.operation_request import OperationRequestError
+
+    bundle = _read_bundle()
+    text = bundle["subtitles"].decode("utf-8")
+    if mutation == "overlap":
+        text = text.replace("00:00:05,026 --> 00:00:09,810", "00:00:05,000 --> 00:00:09,810", 1)
+    elif mutation == "order":
+        text = text.replace("00:00:05,026 --> 00:00:09,810", "00:00:09,810 --> 00:00:05,026", 1)
+    else:
+        text = text.replace("00:04:36,225 --> 00:04:43,045", "00:04:36,225 --> 00:04:43,105", 1)
+    bundle["subtitles"] = text.encode("utf-8")
+    with pytest.raises(OperationRequestError, match="SRT"):
+        _parse(_rehash_parent(bundle))
+
+
+def test_v3_preflight_is_source_derived_and_remains_qa_not_human_approval():
+    from src.hybrid.operation_request import build_v3_preflight_artifact
+
+    artifact = build_v3_preflight_artifact(
+        canonical_bundle=_parse(_read_bundle()),
+        base_revision=BASE_SHA,
+        code_revision=FIXTURE_CODE_SHA,
     )
-
-    envelope = json.loads(
-        assemble_operation_request(
-            operation_id="JOSE-GEN37-20261110", episode_id="JOSE-GEN37", title="José e sua túnica especial",
-            base_revision=BASE_SHA, code_revision=CODE_SHA, canonical_bundle=_bundle(), voice_publication_license="UNKNOWN",
-        ).canonical_bytes()
-    )
-    report = preflight_operation_request(envelope, canonical_bundle=_bundle(), expected_code_revision=CODE_SHA)
-    assert report["status"] == "PREPRODUCTION_READY"
-    assert report["dispatch_permitted"] is False
-    assert report["paid_generation"] is False
-
-    envelope["request"]["blocked"]["trusted_issuer_verifier"] = "SELF_HASHED_APPROVED"
-    envelope["request_sha256"] = _sha(envelope["request"])
-    with pytest.raises(OperationRequestError, match="invalid"):
-        preflight_operation_request(envelope, canonical_bundle=_bundle(), expected_code_revision=CODE_SHA)
+    assert artifact["schema"] == "jose-operation-preflight/v3"
+    assert artifact["parent_manifest_sha256"] == _parse(_read_bundle()).parent_manifest_sha256
+    assert artifact["gate"] == "INDEPENDENT_QA_REQUIRED_NOT_HUMAN_APPROVAL"
+    assert artifact["request"]["scope"] == {
+        "channel": "@EraUmaVezBibliaAnimada",
+        "playlist": "Aventuras do Antigo Testamento",
+        "language": "pt-BR",
+        "title": "José e sua túnica especial",
+    }

@@ -1,4 +1,14 @@
-# SDD — José / Gênesis 37 offline operation request
+# SDD — José / Gênesis 37 editorial preflight
+
+> **Superseded contract notice.** The original v1/v2 request and preflight evidence remains external and unchanged. The current implementation consumes the v2 request manifest plus actual postproduction bytes only; it no longer assembles a provider route or executor request. The v2 sections below are historical context only.
+
+## Current PR66 bounded validation
+
+The checked-in `tests/fixtures/jose_gen37_v3` snapshot is a sanitized durable copy of the actual postproduction bundle: its `source_root` is non-production text while the copied output bytes retain their parent-manifest hashes. The parser rejects duplicate JSON keys and `NaN`/`Infinity`, requires closed known schemas, rejects booleans as counts/durations, and checks actual IDs and shot-to-asset/beat relations after hashes have been verified.
+
+It parses 63 real SRT cues, requires contiguous indices, valid nonnegative in-range timecodes, sorted non-overlap, and continuous 15-beat visual coverage within a 1 ms serialization tolerance. The real 0.094 s inter-cue and 0.059 s trailing gaps are reported as bounded natural/provider pauses; captions are never stretched or invented. The maximum allowed pause is explicitly 0.100 s.
+
+Channel `@EraUmaVezBibliaAnimada`, playlist `Aventuras do Antigo Testamento`, language `pt-BR`, and title `José e sua túnica especial` come from validated v2 manifest bytes. `build_v3_preflight_artifact` derives its inventory and hashes from that validation and remains `INDEPENDENT_QA_REQUIRED_NOT_HUMAN_APPROVAL`, with paid generation and dispatch false. A caller supplies the implementation SHA only after committing and verifying `git rev-parse HEAD`; committed tests use an all-zero fixture-only SHA rather than claiming a recursive current-commit hash.
 
 ## Scope
 

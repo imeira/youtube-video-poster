@@ -1,0 +1,117 @@
+{
+  "schema_version": 2,
+  "package_id": "jose-gen37-preproduction-20261110-v2",
+  "created_at": "2026-11-10T08:49:00-03:00",
+  "mode": "PREPRODUCTION_ONLY",
+  "non_promotable": true,
+  "admission_status": "NO_ADMISSION",
+  "purpose": "Durable user-review package only; no production admission, provider work, spend, send, upload, or publication.",
+  "scope": {
+    "channel": "@EraUmaVezBibliaAnimada",
+    "locale": "pt-BR",
+    "playlist": "Aventuras do Antigo Testamento",
+    "title": "José e sua túnica especial",
+    "passage": "Gênesis 37",
+    "roadmap_episode": 13,
+    "audience": "crianças de 6 a 10 anos"
+  },
+  "provenance_correction": {
+    "supersedes_for_provenance_only": "Scratch manifest v1 narration-history assertions; original scratch files remain unchanged.",
+    "authoritative_github_read_only": {
+      "repository": "imeira/hermes",
+      "pull_request": 6,
+      "state": "OPEN",
+      "head_sha": "998e9c62376a6ecab1d69957302c187a12f86aa9",
+      "url": "https://github.com/imeira/hermes/pull/6",
+      "verified_at": "2026-11-10T08:49:00-03:00"
+    },
+    "wrong_repository_pr_claim_removed": "No claim is made that PR #6 in another repository establishes narration provenance for this package."
+  },
+  "narration_method": {
+    "status": "HISTORICALLY_EVIDENCED_TECHNICAL_CANDIDATE_NOT_QUALIFIED_FOR_NEW_AUDIO",
+    "evidence_copy": {
+      "path": "narration_method_recovery.md",
+      "sha256": "d8605e3037c2b09b69e7b317834381b8553d34b8ddb41a640f042fdd5e277391",
+      "bytes": 7329
+    },
+    "candidate": {
+      "client_provider": "edge-tts (online Edge neural TTS; not Azure Speech SDK; not offline/local)",
+      "voice": "pt-BR-ThalitaNeural",
+      "rate": "-8%",
+      "pitch": "+1Hz",
+      "session_rule": "one synthesis session per narration",
+      "timing_receipt": "real WordBoundary and/or SentenceBoundary events",
+      "postprocess": "decode source MP3 to 48 kHz mono PCM WAV; bind source text, audio hashes, decoded duration, timing, and QA receipts"
+    },
+    "historical_evidence": "EP2 metadata plus executed EP8–EP10 evidence, retained in narration_method_recovery.md; this establishes a historical technical route, not a new José audio qualification.",
+    "new_request_rule": "Generation candidate is permitted for this new request only if executed in a new José-only successor workspace and bound to this exact source text and new receipts.",
+    "lorena_closing": {
+      "text_role": "separate optional closing",
+      "word_count": 9,
+      "voice_assignment": "NOT_THALITA; no audio or identity assigned"
+    },
+    "license_status": {
+      "edge_tts": "UNKNOWN / NEEDS_PROVIDER_TERMS_REVIEW_BEFORE_COMMERCIAL_PUBLICATION",
+      "basis": "No verified official source licenses this Edge endpoint route for commercial publication. This is an evidence status, not an assertion that the route is illegal or noncommercial."
+    },
+    "not_proven": [
+      "new José audio",
+      "new WordBoundary/SentenceBoundary receipt",
+      "decoded duration",
+      "commercial publication license",
+      "offline/local operation"
+    ]
+  },
+  "source": {
+    "reference": "Gênesis 37",
+    "official_url": "https://www.vatican.va/archive/ENG0839/_P13.HTM",
+    "verification_method": "Automated verse-order and claim-boundary checks; no extended Bible quotation in QA."
+  },
+  "content": {
+    "narrator_word_count": 698,
+    "lorena_closing_word_count": 9,
+    "total_spoken_word_count": 707,
+    "semantic_beats": 15,
+    "duration_status": "UNMEASURED; no new audio exists. Do not derive final timing from draft text."
+  },
+  "artifacts": [
+    {
+      "path": "roteiro_revisado_pt-BR_v2.md",
+      "sha256": "2e2f41bba8b8cc2bfb67c8d2877ca75ec962306691ba94801e0be38d0905f6fc",
+      "bytes": 5530
+    },
+    {
+      "path": "plano_de_cenas_pt-BR_v2.md",
+      "sha256": "98c376485757479884b1796c7076895f8ee3f267a6b9c4bb7828ec17cc67f8a6",
+      "bytes": 6404
+    },
+    {
+      "path": "brief_thumbnail_pt-BR_v2.md",
+      "sha256": "a007da0bc9e24fa043d990f3fa577b7b43bebfdde99046e110c4b59e4837afe7",
+      "bytes": 2585
+    },
+    {
+      "path": "narracao.txt",
+      "sha256": "a46c3d000031a7c0beb5ec81a1867ea130dad8b91b92b48ad514a465fbc1955f",
+      "bytes": 4846
+    },
+    {
+      "path": "narration_method_recovery.md",
+      "sha256": "d8605e3037c2b09b69e7b317834381b8553d34b8ddb41a640f042fdd5e277391",
+      "bytes": 7329
+    }
+  ],
+  "qa_reports": [
+    "qa_independente_v2.json",
+    "qa_independente_v2.md"
+  ],
+  "human_approval_created": false,
+  "automation_only": true,
+  "actual_media_artifacts": [],
+  "hard_prohibitions": [
+    "No C:/HermesStudio/production access",
+    "No modification of existing EP13 materials",
+    "No provider spend, send, upload, or publication",
+    "No claim that historical configuration qualifies a new narration or resolves publication licensing"
+  ]
+}

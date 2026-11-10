@@ -1,0 +1,378 @@
+{
+  "schema": "jose_asset_requirements/v1",
+  "status": "ASSETS_REQUIRED",
+  "identity_requirements": {
+    "ID-JOSE-17": "José, age 17: new canonical identity required; young shepherd; long special tunic with no asserted color; continuity in hair, face, robe, age and role across all appearances.",
+    "ID-JACO-ISRAEL": "Jacó/Israel: father identity required; elderly father; distinct from brothers; no inherited asset approval.",
+    "ID-RUBEN": "Rúben: named brother identity required for B08/B11; anatomy-clear hands/arms in intervention and reaction.",
+    "ID-JUDA": "Judá: named brother identity required for B10; distinct from Rúben and José.",
+    "ID-UNNAMED-MAN": "Unnamed man in B06 only; no name, title, kinship, or recurring identity.",
+    "ID-POTIFAR": "Potifar in B14: Egyptian official; no unapproved biographical detail.",
+    "ID-LORENA": "Optional closing presenter: MISSING and not scheduled; no Lorena audio, timing, or identity is invented in this narration-only timeline."
+  },
+  "asset_requirements": [
+    {
+      "id": "AR-B01-1",
+      "beat_id": "B01",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B01-2",
+      "beat_id": "B01",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B01-3",
+      "beat_id": "B01",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B02-1",
+      "beat_id": "B02",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B02-2",
+      "beat_id": "B02",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B02-3",
+      "beat_id": "B02",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B03-1",
+      "beat_id": "B03",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B03-2",
+      "beat_id": "B03",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B03-3",
+      "beat_id": "B03",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B04-1",
+      "beat_id": "B04",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B04-2",
+      "beat_id": "B04",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B04-3",
+      "beat_id": "B04",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B05-1",
+      "beat_id": "B05",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B05-2",
+      "beat_id": "B05",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B05-3",
+      "beat_id": "B05",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B06-1",
+      "beat_id": "B06",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B06-2",
+      "beat_id": "B06",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B06-3",
+      "beat_id": "B06",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B07-1",
+      "beat_id": "B07",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B07-2",
+      "beat_id": "B07",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B07-3",
+      "beat_id": "B07",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B08-1",
+      "beat_id": "B08",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B08-2",
+      "beat_id": "B08",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B08-3",
+      "beat_id": "B08",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B09-1",
+      "beat_id": "B09",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B09-2",
+      "beat_id": "B09",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B09-3",
+      "beat_id": "B09",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B10-1",
+      "beat_id": "B10",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B10-2",
+      "beat_id": "B10",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B10-3",
+      "beat_id": "B10",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B11-1",
+      "beat_id": "B11",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B11-2",
+      "beat_id": "B11",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B11-3",
+      "beat_id": "B11",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B12-1",
+      "beat_id": "B12",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B12-2",
+      "beat_id": "B12",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B12-3",
+      "beat_id": "B12",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B13-1",
+      "beat_id": "B13",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B13-2",
+      "beat_id": "B13",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B13-3",
+      "beat_id": "B13",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B14-1",
+      "beat_id": "B14",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B14-2",
+      "beat_id": "B14",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B14-3",
+      "beat_id": "B14",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B15-1",
+      "beat_id": "B15",
+      "status": "MISSING",
+      "mandatory_visual_need": "establishing/context",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B15-2",
+      "beat_id": "B15",
+      "status": "MISSING",
+      "mandatory_visual_need": "character/action",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    },
+    {
+      "id": "AR-B15-3",
+      "beat_id": "B15",
+      "status": "MISSING",
+      "mandatory_visual_need": "reaction/detail",
+      "allowed_characters": "José/irmãos per approved beat plan",
+      "safety": "No graphic violence; no placeholder may be promoted as final; require hash-bound human visual approval before animation/render."
+    }
+  ],
+  "reuse_policy": "No numeric image quota. Reuse is permitted only after future asset approval and only under exact identity/scene/presence/crop QA; no source asset exists in this package now.",
+  "missing_frame_policy": "Every listed visual is MISSING. Do not render placeholders as final media.",
+  "asset_gate": "Visual-frame approval is a separate human gate; it does not authorize paid generation, final render, thumbnail, video, upload, or publication."
+}

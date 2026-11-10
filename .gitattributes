@@ -1,0 +1,2 @@
+# Preserve the byte-bound actual caption fixture and its intentional final blank line.
+tests/fixtures/jose_gen37_v3/postproduction_plan_v1/subtitles.srt -text whitespace=-trailing-space,-cr-at-eol
