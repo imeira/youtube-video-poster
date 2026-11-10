@@ -65,6 +65,13 @@ jobs:
         if: steps.project.outputs.python_project == 'true'
         run: python -m pip install -e ".[dev]"
 
+      - name: Check out paired Hermes receipt issuer
+        uses: actions/checkout@v5
+        with:
+          repository: imeira/hermes
+          ref: 5969fd7bb2d4c317048d218531307ec9a125d17a
+          path: paired-hermes
+
       - name: Validate workflow YAML
         shell: bash
         run: |
@@ -151,6 +158,14 @@ jobs:
           mkdir -p reports
           python scripts/run_offline_tests.py tests/unit/ -m "not slow" --tb=short -q \
             --junitxml=reports/pytest.xml
+
+      - name: Run Hermes trusted-issuer integration
+        if: steps.project.outputs.python_project == 'true'
+        shell: bash
+        env:
+          HERMES_PAIRED_ROOT: ${{ github.workspace }}/paired-hermes
+        run: |
+          python -m pytest tests/integration/test_trusted_issuer_admission.py --tb=short -q
 
       - name: Note absent Python tests
         if: steps.project.outputs.unit_tests != 'true'

@@ -1,342 +1,259 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import hmac
 import json
+import os
 import sqlite3
-from dataclasses import asdict
-from decimal import Decimal
+import subprocess
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from src.hybrid.execution import ProviderResult
-
 OPERATION_ID = "JOSE_GEN37_IDENTITY_FRAME_001"
-KEY = b"test-only-trusted-issuer-key"
+HERMES_ROOT = Path(os.environ.get(
+    "HERMES_PAIRED_ROOT", "C:/Users/meira/AppData/Local/hermes/cache/scratch/r67/h"
+))
+HERMES_HEAD = "5969fd7bb2d4c317048d218531307ec9a125d17a"
+NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 
 
 def _canonical(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _signed(payload: dict, domain: bytes) -> bytes:
-    return _canonical({"payload": payload, "signature": hmac.new(KEY, domain + _canonical(payload), hashlib.sha256).hexdigest()})
-
-
-class FixtureIssuerTransport:
-    mode = "TEST"
-
-    def __init__(self, receipt: dict, revocation: dict, telegram_result):
-        self.receipt, self.revocation, self.telegram_result = receipt, revocation, telegram_result
-        self.reads: list[str] = []
-        self.revoke_on_read: int | None = None
-        self.replace_after_revocation_read: tuple[int, object] | None = None
-
-    def read_receipt(self, operation_id: str) -> bytes:
-        assert operation_id == OPERATION_ID
-        assert self.telegram_result.status == 200
-        assert self.telegram_result.body["status"] == "approved"
-        self.reads.append("receipt")
-        return _signed(self.receipt, b"studio-trusted-issuer-receipt/v1\0")
-
-    def read_revocation(self, operation_id: str) -> bytes:
-        assert operation_id == OPERATION_ID
-        self.reads.append("revocation")
-        if self.revoke_on_read == self.reads.count("revocation"):
-            self.revocation["status"] = "REVOKED"
-        raw = _signed(self.revocation, b"studio-trusted-issuer-revocation/v1\0")
-        if (
-            self.replace_after_revocation_read is not None
-            and self.reads.count("revocation")
-            == self.replace_after_revocation_read[0]
-        ):
-            self.replace_after_revocation_read[1]()
-        return raw
-
-
-def _real_telegram_wire(tmp_path: Path, now: int):
-    """Drive the existing authenticated Hermes ingress and Studio approval service."""
-    from src.agents.director import DirectorAgent
-    from src.approval.hermes_inbound_bridge import (
-        HermesBridgeConfig,
-        HermesStudioIngress,
-        canonical_envelope,
+async def _cross_repo_fixture(tmp_path: Path, *, actual_chat: str = "42"):
+    assert (
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", "-C", str(HERMES_ROOT), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    ).stdout.strip() == HERMES_HEAD
+    sys.path.insert(0, str(HERMES_ROOT))
+    from gateway.operation_consent import (
+        ConsentTargetV1,
+        EndpointId,
+        FinancialPolicyV1,
+        OperationConsentRequestV1,
+        OperationKind,
+        ProviderId,
+        ReadbackMessageV1,
+        RevocationReason,
+        StandingOperationPolicyV1,
+        compose_test_operation_consent_service,
     )
-    from src.approval.receipts import ApprovalReceipt
-    from src.approval.telegram_service import (
-        TelegramDirectorService,
-        TelegramInboundSettings,
+    from gateway.platforms.base import SendResult
+
+    protected = tmp_path / "protected"
+    (protected / "operations").mkdir(parents=True)
+    service = compose_test_operation_consent_service(
+        tmp_path / "hermes" / "operation-consent.sqlite3", now=lambda: NOW
     )
-    from src.state.machine import EpisodeState, EpisodeStateStore
-
-    episodes, episode = tmp_path / "episodes", tmp_path / "episodes" / "JOSE_GENESIS37"
-    (episode / "qa").mkdir(parents=True)
-    state = EpisodeStateStore.load_or_create(episode / "state.json", "JOSE_GENESIS37")
-    state.current_state = EpisodeState.WAITING_THUMBNAIL_APPROVAL
-    state.save(episode / "state.json")
-    director = DirectorAgent.__new__(DirectorAgent)
-    director.config = SimpleNamespace(
-        episodes_dir=episodes, approval_delivery_chat_id="10001",
-        approval_delivery_trusted_sender_ids=frozenset({"20002"}),
-    )
-    settings = TelegramInboundSettings(
-        webhook_secret="fixture-webhook-secret", chat_id="10001",
-        trusted_sender_ids=frozenset({"20002"}), instance_id="jose-studio-fixture",
-        journal_path=tmp_path / "telegram" / "journal.sqlite3",
-        registry_path=tmp_path / "telegram" / "deliveries.sqlite3",
-    )
-    service = TelegramDirectorService(director=director, settings=settings)
-    artifact = tmp_path / "jose-thumbnail.png"
-    artifact.write_bytes(b"jose-thumbnail-fixture")
-    delivery = tmp_path / "jose-delivery.json"
-    delivery.write_text(json.dumps({
-        "episode_id": "JOSE_GENESIS37", "artifact_kind": "thumbnail",
-        "approval": asdict(ApprovalReceipt.approve("thumbnail", artifact, "fixture-delivery")),
-        "chat_id": "10001", "message_id": 42,
-    }), encoding="utf-8")
-    service.register_delivery(delivery)
-    raw_update = json.dumps({"update_id": 1, "message": {
-        "message_id": 99, "from": {"id": 20002, "is_bot": False},
-        "chat": {"id": 10001, "type": "private"},
-        "reply_to_message": {"message_id": 42},
-        "text": "APROVAR THUMBNAIL JOSE_GENESIS37",
-    }}, separators=(",", ":")).encode()
-    config = HermesBridgeConfig("jose-studio-fixture", "fixture-bridge-secret", "10001", frozenset({"20002"}))
-    body = canonical_envelope(config, raw_update, nonce="jose-wire-0001", timestamp=now)
-    signature = hmac.new(config.hmac_key.encode(), b"hermes-studio-approval-bridge/v1\0" + body, hashlib.sha256).hexdigest()
-    result = HermesStudioIngress(config=config, service=service, now=lambda: now).handle(body, {
-        "X-Studio-Bridge-Version": "1", "X-Studio-Bridge-Instance": config.instance_id,
-        "X-Studio-Bridge-Signature": f"v1={signature}",
-    })
-    return result, hashlib.sha256(raw_update).hexdigest()
-
-
-class FakeProvider:
-    mode = "TEST"
-
-    def __init__(self, root: Path, calls: list[str], *, fail_after_checkpoint: bool = False):
-        self.root, self.calls, self.fail_after_checkpoint = root, calls, fail_after_checkpoint
-
-    async def submit(self, job, request_id, checkpoint):
-        self.calls.append("POST")
-        checkpoint(provider_id="fake-provider-1")
-        if self.fail_after_checkpoint:
-            self.fail_after_checkpoint = False
-            raise TimeoutError("simulated lost response")
-        output = self.root / "provider.bin"
-        output.write_bytes(b"jose fixture result")
-        return ProviderResult(output, job.cost)
-
-    async def recover(self, job, request_id, provider_id, partial, checkpoint):
-        self.calls.append("GET")
-        assert provider_id == "fake-provider-1"
-        output = self.root / "provider.bin"
-        output.write_bytes(b"jose fixture recovered result")
-        return ProviderResult(output, job.cost)
-
-
-def _fixture(tmp_path: Path, *, now: int = 1_800_000_000):
-    from src.hybrid.trusted_issuer_admission import JoseTrustedIssuerAdmission
-
-    root = tmp_path / "protected"
-    (root / "operations").mkdir(parents=True)
-    policy = {
-        "schema": "jose-financial-policy/v1", "operation_id": OPERATION_ID,
-        "episode_id": "JOSE_GENESIS37", "currency": "USD",
-        "maximum_usd": "0.125", "status": "ACTIVE",
+    financial = {
+        "schema": "jose-financial-policy/v1", "policy_id": "jose-financial-v1",
+        "operation_id": OPERATION_ID, "episode_id": "JOSE_GENESIS37",
+        "currency": "USD", "max_amount_minor": 13, "maximum_usd": "0.125",
+        "status": "ACTIVE",
     }
-    policy_raw = _canonical(policy)
-    (root / "jose-financial-policy.json").write_bytes(policy_raw)
-    descriptor = {
-        "schema": "jose-trusted-operation/v1", "operation_id": OPERATION_ID,
-        "episode_id": "JOSE_GENESIS37", "mode": "TEST",
-        "endpoint": "fake/jose-image", "scene": "JOSE_GEN37_IDENTITY_FRAME",
-        "category": "first", "input_kind": "TEXT_TO_IMAGE",
-        "payload": {"prompt": "José age 17 canonical identity fixture"},
-        "financial_policy": {"name": "jose-financial-policy.json", "sha256": hashlib.sha256(policy_raw).hexdigest()},
+    standing = {
+        "schema": "jose-standing-policy/v1", "policy_id": "jose-standing-v1",
+        "operation_id": OPERATION_ID, "episode_id": "JOSE_GENESIS37",
+        "operation_kind": "image_generation", "provider_id": "openai",
+        "endpoint_id": "openai.images.generations", "authority_mode": "TEST",
+        "gateway_instance_id": service.gateway_instance_id, "chat_id": "42", "sender_id": "42",
+        "receipt_max_age_seconds": 300, "quote_max_age_seconds": 300,
+        "license_scope": "JOSE_GENESIS37:PAID_GENERATION",
+        "provider_endpoint": "test/jose-image", "provider_kind": "TEST_FAKE",
     }
-    descriptor_raw = _canonical(descriptor)
-    (root / "operations" / f"{OPERATION_ID}.json").write_bytes(descriptor_raw)
-    telegram_result, update_sha256 = _real_telegram_wire(tmp_path, now)
-    receipt = {
-        "schema": "studio-trusted-issuer-receipt/v1", "receipt_id": "issuer-receipt-001",
-        "operation_id": OPERATION_ID, "descriptor_sha256": hashlib.sha256(descriptor_raw).hexdigest(),
-        "policy_sha256": hashlib.sha256(policy_raw).hexdigest(), "status": "APPROVED",
-        "issued_at": now - 5, "expires_at": now + 300,
-        "telegram_approval": {"chat_id": "10001", "sender_id": "20002", "message_id": 99,
-                              "reply_to_message_id": 42, "update_sha256": update_sha256},
-        "quote": {"endpoint": "fake/jose-image", "currency": "USD", "maximum_usd": "0.125",
-                  "observed_at": now - 5, "expires_at": now + 60, "evidence_sha256": "b" * 64},
-        "license": {"scope": "JOSE_GENESIS37:PAID_GENERATION", "status": "VALID",
-                    "valid_until": now + 300, "evidence_sha256": "c" * 64},
-    }
-    revocation = {"schema": "studio-trusted-issuer-revocation/v1", "operation_id": OPERATION_ID,
-                  "receipt_id": "issuer-receipt-001", "status": "NOT_REVOKED",
-                  "observed_at": now - 1, "expires_at": now + 30}
-    transport = FixtureIssuerTransport(receipt, revocation, telegram_result)
-    calls: list[str] = []
-    provider = FakeProvider(tmp_path, calls, fail_after_checkpoint=True)
-    admission = JoseTrustedIssuerAdmission.for_test(
-        root=root, transport=transport, issuer_key=KEY, provider=provider, now=lambda: now
+    financial_sha = hashlib.sha256(_canonical(financial)).hexdigest()
+    standing_sha = hashlib.sha256(_canonical(standing)).hexdigest()
+    payload = {"prompt": "Jose age 17 canonical identity fixture"}
+    producer = service.bind_fixed_producer(
+        producer_key="studio-jose-v1",
+        standing_policy=StandingOperationPolicyV1(
+            policy_id="jose-standing-v1", policy_sha256=standing_sha,
+            operation_kinds=frozenset({OperationKind.IMAGE_GENERATION}),
+            providers=frozenset({ProviderId.OPENAI}),
+            endpoints=frozenset({EndpointId.OPENAI_IMAGES_GENERATIONS}),
+        ),
+        financial_policy=FinancialPolicyV1(
+            policy_id="jose-financial-v1", policy_sha256=financial_sha,
+            currency="USD", max_amount_minor=13,
+        ),
     )
-    return admission, transport, provider, calls, receipt, revocation
+    descriptor = producer.create_descriptor(OperationConsentRequestV1(
+        operation_id=OPERATION_ID, episode_id="JOSE_GENESIS37",
+        operation_kind=OperationKind.IMAGE_GENERATION, provider_id=ProviderId.OPENAI,
+        endpoint_id=EndpointId.OPENAI_IMAGES_GENERATIONS,
+        input_binding_sha256=hashlib.sha256(_canonical(payload)).hexdigest(),
+        request_text="Reply exactly JOSE-NONCE-1 to approve this operation.",
+        confirmation_token="JOSE-NONCE-1", expires_at_utc=NOW + timedelta(minutes=5),
+        currency="USD", max_amount_minor=13,
+    ))
+    intent = service.create_pending_intent(descriptor, ConsentTargetV1(
+        platform="telegram", adapter_identity="telegram:fixture-bot", chat_id=actual_chat,
+        sender_id=actual_chat, thread_id=None, reply_to_message_id=None,
+    ))
 
+    class TelegramFixture:
+        platform = "telegram"
+        adapter_identity = "telegram:fixture-bot"
 
-@pytest.mark.asyncio
-async def test_fake_telegram_issuer_to_real_executor_recovers_without_duplicate_post(tmp_path):
-    admission, transport, _provider, calls, _receipt, _revocation = _fixture(tmp_path)
+        async def send(self, chat_id, content, *, reply_to=None, metadata=None):
+            return SendResult(success=True, message_id="501")
 
-    with pytest.raises(TimeoutError):
-        await admission.admit(OPERATION_ID)
-    result = await admission.admit(OPERATION_ID)
-
-    assert result["status"] == "COMPLETE"
-    assert calls == ["POST", "GET"]
-    assert transport.reads.count("receipt") >= 6
-    assert transport.reads.count("revocation") >= 6
-    assert admission.last_financial_capability.maximum_usd == Decimal("0.125")
-    assert admission.last_financial_capability.policy_sha256 != "916e8230db47406db96cbe774b9332c00ed24cf156c66d4d91d11a213b64f50d"
-    with sqlite3.connect(tmp_path / "protected" / "state" / "ledger.sqlite3") as database:
-        assert database.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("attack", ["cancelled", "revoked", "tamper", "forgery", "stale", "quote", "license"])
-async def test_negative_issuer_cases_never_create_executor_or_post(tmp_path, attack):
-    admission, transport, _provider, calls, receipt, revocation = _fixture(tmp_path)
-    if attack == "cancelled": receipt["status"] = "CANCELLED"
-    elif attack == "revoked": revocation["status"] = "REVOKED"
-    elif attack == "tamper": receipt["operation_id"] = "JACO_GENESIS28"
-    elif attack == "forgery":
-        original = transport.read_receipt
-        transport.read_receipt = lambda operation_id: original(operation_id)[:-2] + b"0}"
-    elif attack == "stale": revocation["expires_at"] = 1
-    elif attack == "quote": receipt["quote"]["maximum_usd"] = "10.00"
-    elif attack == "license": receipt["license"]["status"] = "UNKNOWN"
-
-    with pytest.raises(PermissionError):
-        await admission.admit(OPERATION_ID)
-
-    assert calls == []
-    assert not (tmp_path / "protected" / "state" / "executor.sqlite3").exists()
-
-
-@pytest.mark.asyncio
-async def test_revocation_race_after_reservation_is_caught_before_post(tmp_path):
-    admission, transport, _provider, calls, _receipt, _revocation = _fixture(tmp_path)
-    transport.revoke_on_read = 4
-
-    with pytest.raises(PermissionError, match="non-revoked"):
-        await admission.admit(OPERATION_ID)
-
-    assert calls == []
-    with sqlite3.connect(tmp_path / "protected" / "state" / "ledger.sqlite3") as database:
-        assert database.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("identity", ["descriptor", "policy", "receipt"])
-async def test_later_snapshot_cannot_replace_admitted_identity_before_provider(
-    tmp_path, identity
-):
-    admission, transport, _provider, calls, receipt, revocation = _fixture(tmp_path)
-    root = admission._root
-
-    def replace_identity():
-        if identity == "receipt":
-            receipt["receipt_id"] = "issuer-receipt-002"
-            revocation["receipt_id"] = "issuer-receipt-002"
-            return
-        policy_path = root / "jose-financial-policy.json"
-        descriptor_path = root / "operations" / f"{OPERATION_ID}.json"
-        descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
-        if identity == "descriptor":
-            descriptor["payload"]["prompt"] = "coherently replaced descriptor"
-        else:
-            policy = json.loads(policy_path.read_text(encoding="utf-8"))
-            policy["maximum_usd"] = "0.124"
-            policy_raw = _canonical(policy)
-            policy_path.write_bytes(policy_raw)
-            descriptor["financial_policy"]["sha256"] = hashlib.sha256(
-                policy_raw
-            ).hexdigest()
-            receipt["policy_sha256"] = hashlib.sha256(policy_raw).hexdigest()
-            receipt["quote"]["maximum_usd"] = "0.124"
-        descriptor_raw = _canonical(descriptor)
-        descriptor_path.write_bytes(descriptor_raw)
-        receipt["descriptor_sha256"] = hashlib.sha256(descriptor_raw).hexdigest()
-
-    transport.replace_after_revocation_read = (1, replace_identity)
-
-    with pytest.raises(PermissionError, match="changed the admitted issuer identity"):
-        await admission.admit(OPERATION_ID)
-
-    assert calls == []
-
-
-@pytest.mark.asyncio
-async def test_descriptor_rejects_category_that_requires_predecessor(tmp_path):
-    admission, transport, _provider, calls, receipt, _revocation = _fixture(tmp_path)
-    descriptor_path = admission._root / "operations" / f"{OPERATION_ID}.json"
-    descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
-    descriptor["category"] = "alternative"
-    descriptor_raw = _canonical(descriptor)
-    descriptor_path.write_bytes(descriptor_raw)
-    receipt["descriptor_sha256"] = hashlib.sha256(descriptor_raw).hexdigest()
-
-    with pytest.raises(PermissionError, match="distinct closed"):
-        await admission.admit(OPERATION_ID)
-
-    assert calls == []
-    assert transport.reads == []
-
-
-def _directory_symlink(link: Path, target: Path) -> None:
-    try:
-        link.symlink_to(target, target_is_directory=True)
-    except OSError as error:
-        pytest.skip(f"directory symlinks unavailable: {error}")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("attack", ["root_ancestor", "operations_ancestor", "state_ancestor"])
-async def test_reparse_or_symlink_ancestors_are_rejected_before_io(tmp_path, attack):
-    from src.hybrid.trusted_issuer_admission import JoseTrustedIssuerAdmission
-
-    admission, transport, provider, calls, _receipt, _revocation = _fixture(tmp_path)
-    if attack == "root_ancestor":
-        linked_parent = tmp_path / "linked-parent"
-        _directory_symlink(linked_parent, tmp_path)
-        with pytest.raises(PermissionError, match="link or reparse point"):
-            JoseTrustedIssuerAdmission.for_test(
-                root=linked_parent / "protected", transport=transport,
-                issuer_key=KEY, provider=provider, now=admission._now,
+        async def readback_exact_message(self, *, chat_id, message_id):
+            return ReadbackMessageV1(
+                platform="telegram", chat_id=actual_chat, message_id="501",
+                sender_id=self.adapter_identity, reply_to_message_id=None,
+                exact_text_utf8=descriptor.request_text, sent_at_utc=NOW,
+                read_at_utc=NOW + timedelta(seconds=1),
             )
-    elif attack == "operations_ancestor":
-        operations = admission._root / "operations"
-        real_operations = admission._root / "real-operations"
-        operations.rename(real_operations)
-        _directory_symlink(operations, real_operations)
-        with pytest.raises(PermissionError, match="link or reparse point"):
-            await admission.admit(OPERATION_ID)
-    else:
-        external_state = tmp_path / "external-state"
-        external_state.mkdir()
-        _directory_symlink(admission._root / "state", external_state)
-        with pytest.raises(PermissionError, match="link or reparse point"):
-            await admission.admit(OPERATION_ID)
-        assert list(external_state.iterdir()) == []
 
-    assert calls == []
+    normalizer = service.bind_test_authenticated_adapter(
+        platform="telegram", adapter_identity="telegram:fixture-bot",
+        authenticated_transport_binding="fixture:authenticated-raw-update",
+    )
+    await service.deliver_pending_intent(intent.intent_id, TelegramFixture())
+    event = normalizer.normalize(
+        update_id=700, message_id=900, chat_id=int(actual_chat), sender_id=int(actual_chat),
+        reply_to_message_id=501, reply_to_sender_id=999, reply_to_is_own_message=True,
+        reply_to_body_utf8=descriptor.request_text, reply_to_entities_json=(),
+        exact_text_utf8=descriptor.confirmation_token, entities_json=(),
+        callback_data_if_any=None, received_at_utc=NOW + timedelta(seconds=2),
+    )
+    await service.studio_inbound_handler(event)
+    receipt = service.list_receipts_for_descriptor(descriptor.descriptor_id)[0]
+    quote = {
+        "schema": "jose-provider-quote/v1", "operation_id": OPERATION_ID,
+        "endpoint": "test/jose-image", "currency": "USD", "maximum_usd": "0.125",
+        "observed_at_utc": "2026-11-10T11:59:55Z",
+        "expires_at_utc": "2026-11-10T12:01:00Z", "evidence_sha256": "ab" * 32,
+    }
+    license_evidence = {
+        "schema": "jose-provider-license/v1", "operation_id": OPERATION_ID,
+        "scope": "JOSE_GENESIS37:PAID_GENERATION", "status": "VALID",
+        "valid_until_utc": "2026-11-10T12:05:00Z", "evidence_sha256": "cd" * 32,
+    }
+    registration = {
+        "schema": "jose-provider-registration/v1", "endpoint": "test/jose-image",
+        "provider_kind": "TEST_FAKE", "mode": "TEST",
+    }
+    documents = {
+        "standing-policy.json": standing, "financial-policy.json": financial,
+        "quote.json": quote, "license.json": license_evidence,
+        "provider-registration.json": registration,
+    }
+    for name, document in documents.items():
+        (protected / name).write_bytes(_canonical(document))
+    hermes_descriptor = descriptor.canonical_payload()
+    hermes_descriptor["descriptor_id"] = descriptor.descriptor_id
+    operation = {
+        "schema": "jose-trusted-operation/v2", "operation_id": OPERATION_ID,
+        "episode_id": "JOSE_GENESIS37", "mode": "TEST",
+        "scene": "JOSE_GEN37_IDENTITY_FRAME", "category": "first",
+        "input_kind": "TEXT_TO_IMAGE", "endpoint": "test/jose-image", "payload": payload,
+        "hermes_receipt_id": receipt.receipt_id, "hermes_descriptor": hermes_descriptor,
+        "standing_policy": {"name": "standing-policy.json", "sha256": standing_sha},
+        "financial_policy": {"name": "financial-policy.json", "sha256": financial_sha},
+        "quote": {"name": "quote.json", "sha256": hashlib.sha256(_canonical(quote)).hexdigest()},
+        "license": {"name": "license.json", "sha256": hashlib.sha256(_canonical(license_evidence)).hexdigest()},
+        "provider_registration": {"name": "provider-registration.json", "sha256": hashlib.sha256(_canonical(registration)).hexdigest()},
+    }
+    operation_path = protected / "operations" / f"{OPERATION_ID}.json"
+    operation_path.write_bytes(_canonical(operation))
+    export = service.studio_receipt_export
+    export.start()
+    return {
+        "root": protected, "service": service, "export": export, "receipt": receipt,
+        "operation": operation, "operation_path": operation_path, "documents": documents,
+        "revocation_reason": RevocationReason.OPERATOR_REVOKED,
+    }
 
 
-def test_live_activation_and_caller_injection_are_not_available(tmp_path):
+def _admission(fixture, calls: list[str]):
+    from src.hybrid.execution import ProviderResult
+    from src.hybrid.hermes_issuer_client import HermesIssuerClient
     from src.hybrid.trusted_issuer_admission import JoseTrustedIssuerAdmission
 
-    with pytest.raises(PermissionError, match="LIVE activation"):
-        JoseTrustedIssuerAdmission.production()
-    admission, *_ = _fixture(tmp_path)
+    class TrapProvider:
+        mode = "TEST"
+
+        async def submit(self, job, request_id, checkpoint):
+            calls.append("POST")
+            raise AssertionError("negative case reached provider")
+
+        async def recover(self, job, request_id, provider_id, partial, checkpoint):
+            calls.append("GET")
+            return ProviderResult(Path("unused"), job.cost)
+
+    return JoseTrustedIssuerAdmission.for_test_ipc(
+        root=fixture["root"],
+        client=HermesIssuerClient.for_test(
+            endpoint_file=fixture["export"].endpoint_file,
+            token_file=fixture["export"].capability_file,
+        ),
+        provider_factory=TrapProvider, now=lambda: int(NOW.timestamp()),
+    )
+
+
+def test_real_hermes_ipc_two_fresh_studio_processes_recover_without_resubmit(tmp_path):
+    fixture = asyncio.run(_cross_repo_fixture(tmp_path))
+    effects, output = tmp_path / "effects.log", tmp_path / "provider-output.bin"
+    command = [
+        sys.executable, "-m", "tests.integration.trusted_issuer_process",
+        str(fixture["root"]), fixture["export"].endpoint_file,
+        fixture["export"].capability_file, str(effects), str(output), str(int(NOW.timestamp())),
+    ]
+    try:
+        first = subprocess.run(command, check=False, cwd=Path.cwd(), timeout=20)
+        second = subprocess.run(command, check=False, cwd=Path.cwd(), timeout=20)
+    finally:
+        fixture["export"].close()
+    assert (first.returncode, second.returncode) == (75, 0)
+    assert effects.read_text(encoding="ascii").splitlines() == ["POST", "GET"]
+    with sqlite3.connect(fixture["root"] / "state" / "ledger.sqlite3") as database:
+        assert database.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attack", ["revoked", "wrong_chat", "tampered", "quote", "license"])
+async def test_violations_have_zero_provider_effects(tmp_path, attack):
+    fixture = await _cross_repo_fixture(
+        tmp_path, actual_chat="43" if attack == "wrong_chat" else "42"
+    )
+    calls: list[str] = []
+    if attack == "revoked":
+        fixture["service"].append_revocation(fixture["receipt"].receipt_id, fixture["revocation_reason"])
+    elif attack == "tampered":
+        fixture["operation"]["payload"]["prompt"] = "tampered"
+        fixture["operation_path"].write_bytes(_canonical(fixture["operation"]))
+    elif attack in {"quote", "license"}:
+        name = "quote.json" if attack == "quote" else "license.json"
+        key = "maximum_usd" if attack == "quote" else "status"
+        fixture["documents"][name][key] = "9.99" if attack == "quote" else "UNKNOWN"
+        raw = _canonical(fixture["documents"][name])
+        (fixture["root"] / name).write_bytes(raw)
+        fixture["operation"][attack]["sha256"] = hashlib.sha256(raw).hexdigest()
+        fixture["operation_path"].write_bytes(_canonical(fixture["operation"]))
+    try:
+        with pytest.raises(PermissionError):
+            await _admission(fixture, calls).admit(OPERATION_ID)
+    finally:
+        fixture["export"].close()
+    assert calls == []
+    assert not (fixture["root"] / "state" / "executor.sqlite3").exists()
+
+
+def test_production_is_fixed_and_reports_unprovisioned_without_raising():
+    from src.hybrid.trusted_issuer_admission import JoseTrustedIssuerAdmission
+
+    blocked = JoseTrustedIssuerAdmission.production()
+    assert blocked["status"] == "BLOCKED"
     with pytest.raises(TypeError):
-        admission.admit(OPERATION_ID, receipt={})
+        JoseTrustedIssuerAdmission.production(root=Path("attacker"))

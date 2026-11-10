@@ -135,6 +135,8 @@ class Executor:
         _authenticated_budget_bridge=None,
         _jaco_final_admission_verifier=None,
         _jaco_production_binding: dict | None = None,
+        _trusted_issuer_verifier=None,
+        _trusted_issuer_binding: dict | None = None,
     ):
         self._database = Path(database)
         self._database.parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +152,19 @@ class Executor:
         # Deliberately private, factory-installed binding.  This is not a
         # general LIVE switch: only the fixed Jacó FLUX3 composition can use it.
         self._jaco_production_binding = _jaco_production_binding
+        if (_trusted_issuer_verifier is None) != (_trusted_issuer_binding is None):
+            raise ValueError("trusted issuer verifier and binding must be composed together")
+        if _trusted_issuer_verifier is not None and (
+            not callable(_trusted_issuer_verifier)
+            or not isinstance(_trusted_issuer_binding, dict)
+            or set(_trusted_issuer_binding) != {"kind", "auth_scope"}
+            or _trusted_issuer_binding.get("kind") != "HERMES_TRUSTED_ISSUER"
+            or not isinstance(_trusted_issuer_binding.get("auth_scope"), str)
+            or not _trusted_issuer_binding["auth_scope"].startswith("HERMES_RECEIPT:")
+        ):
+            raise ValueError("fixed Hermes trusted issuer composition is invalid")
+        self._trusted_issuer_verifier = _trusted_issuer_verifier
+        self._trusted_issuer_binding = _trusted_issuer_binding
         if (_authenticated_budget_composition is None) != (
             _authenticated_budget_bridge is None
         ) or (
@@ -451,8 +466,18 @@ class Executor:
                 job, generic_marker, self.database, self._standing_ledger, row
             )
             generic_final_admission = True
+        trusted_issuer_admission = False
+        if self._trusted_issuer_verifier is not None:
+            if (
+                job.mode != "LIVE"
+                or self._trusted_issuer_binding is None
+                or binding["auth_scope"] != self._trusted_issuer_binding["auth_scope"]
+                or self._trusted_issuer_verifier(job) is not True
+            ):
+                raise PermissionError("Hermes trusted issuer admission changed")
+            trusted_issuer_admission = True
         jaco_final_admission = False
-        if job.endpoint == "blackforestlabs/flux-3/text-to-image":
+        if job.endpoint == "blackforestlabs/flux-3/text-to-image" and not trusted_issuer_admission:
             marker = row.get("final_admission_marker")
             successor_marker = (
                 job.scene == "JACO_GEN28_STYLE_REMEDIATION_001"
@@ -514,7 +539,7 @@ class Executor:
             jaco_final_admission = True
         authenticated = self._fresh_authenticated_budget_admission(job, row)
         if authenticated is None:
-            if jaco_final_admission or generic_final_admission:
+            if trusted_issuer_admission or jaco_final_admission or generic_final_admission:
                 return
             # Legacy TEST ledger paths remain mechanically useful, but their
             # fixed local scope cannot be relabeled as bridge authority or LIVE.
@@ -994,15 +1019,26 @@ class Executor:
                 job.mode == "LIVE"
                 and job.endpoint == "blackforestlabs/flux-3/text-to-image"
                 and isinstance(self._jaco_production_binding, dict)
-                and self._jaco_production_binding.get("kind") == "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION"
+                and self._jaco_production_binding.get("kind")
+                == "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION"
             )
-            if job.mode != "TEST" and not jaco_live:
+            trusted_live = (
+                job.mode == "LIVE"
+                and self._trusted_issuer_verifier is not None
+                and isinstance(self._trusted_issuer_binding, dict)
+                and self._trusted_issuer_binding.get("kind") == "HERMES_TRUSTED_ISSUER"
+                and self._trusted_issuer_verifier(job) is True
+            )
+            if job.mode != "TEST" and not jaco_live and not trusted_live:
                 raise PermissionError(
                     "raw prepared intent cannot authorize LIVE admission"
                 )
             expected_scope = (
                 self._jaco_production_binding["auth_scope"]
-                if jaco_live else "TEST_LOCAL_ONLY"
+                if jaco_live else (
+                    self._trusted_issuer_binding["auth_scope"]
+                    if trusted_live else "TEST_LOCAL_ONLY"
+                )
             )
             if auth_scope not in {None, expected_scope}:
                 raise PermissionError(

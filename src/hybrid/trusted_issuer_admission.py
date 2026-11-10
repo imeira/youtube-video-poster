@@ -1,40 +1,52 @@
-"""TEST-only Studio consumer for a separately authenticated trusted issuer.
-
-The public admission surface accepts one literal José operation identifier.
-Receipt, revocation, policy, storage, verifier, provider, and clock are owned by
-the composition.  Production construction is deliberately unavailable until a
-real local authenticated transport and protected deployment are provisioned.
-"""
+"""Hermes-backed fixed admission for the Jose Genesis 37 identity frame."""
 from __future__ import annotations
 
-import hmac
 import json
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from datetime import UTC, datetime
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
-from src.hybrid.execution import Executor, Job
+from src.hybrid.execution import Authorization, Executor, Job, Price
+from src.hybrid.hermes_issuer_client import (
+    HermesIssuerClient,
+    HermesIssuerClientError,
+    _verify_protection,
+)
+from src.hybrid.live import FalFluxProvider
 from src.hybrid.planner import Config
 from src.hybrid.standing_budget import StandingBudgetLedger
 from src.path_guard import reject_reparse_path
 
 JOSE_OPERATION_ID = "JOSE_GEN37_IDENTITY_FRAME_001"
 _JOSE_EPISODE_ID = "JOSE_GENESIS37"
-_RECEIPT_DOMAIN = b"studio-trusted-issuer-receipt/v1\0"
-_REVOCATION_DOMAIN = b"studio-trusted-issuer-revocation/v1\0"
+_PRODUCTION_ROOT = Path("C:/HermesStudio/production/trusted-issuer")
 _SHA = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _TOKEN = object()
-_RECEIPT_MAX_AGE = 300
-_QUOTE_MAX_AGE = 300
-_REVOCATION_MAX_AGE = 30
+_HERMES_DESCRIPTOR_FIELDS = {
+    "schema_version", "descriptor_id", "operation_id", "episode_id", "operation_kind",
+    "provider_id", "endpoint_id", "input_binding_sha256", "standing_policy_id",
+    "standing_policy_sha256", "financial_policy_id", "financial_policy_sha256",
+    "currency", "max_amount_minor", "request_text_utf8_sha256", "request_text",
+    "confirmation_token", "expires_at_utc", "producer_instance_id", "generation",
+    "authority_mode",
+}
+_HERMES_RECEIPT_FIELDS = {
+    "receipt_id", "receipt_digest", "descriptor_id", "descriptor_digest",
+    "delivery_intent_id", "delivery_receipt_digest", "authenticated_inbound_event_digest",
+    "gateway_instance_id", "update_id", "platform", "chat_id", "sender_id", "message_id",
+    "reply_to_message_id", "issued_at_utc", "authority_mode",
+}
 
 
 class TrustedIssuerAdmissionError(PermissionError):
-    """The fixed trusted-issuer composition did not authorize execution."""
+    """The fixed protected composition did not authorize execution."""
 
 
 def _canonical(value: object) -> bytes:
@@ -42,23 +54,21 @@ def _canonical(value: object) -> bytes:
 
 
 def _pairs(items: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in items:
-        if key in result:
-            raise TrustedIssuerAdmissionError("duplicate issuer JSON key")
-        result[key] = value
-    return result
+    value: dict[str, object] = {}
+    for key, item in items:
+        if key in value:
+            raise TrustedIssuerAdmissionError("duplicate protected JSON key")
+        value[key] = item
+    return value
 
 
-def _strict(raw: object, label: str) -> dict[str, Any]:
+def _strict(raw: bytes, label: str) -> dict[str, Any]:
     if type(raw) is not bytes or not raw or len(raw) > 131_072:
-        raise TrustedIssuerAdmissionError(f"{label} must be bounded authenticated bytes")
+        raise TrustedIssuerAdmissionError(f"{label} must be bounded bytes")
     try:
-        value = json.loads(
-            raw.decode("utf-8"), object_pairs_hook=_pairs,
-            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
-        )
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        value = json.loads(raw.decode("utf-8", errors="strict"), object_pairs_hook=_pairs,
+                           parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+    except (UnicodeError, ValueError, json.JSONDecodeError) as error:
         raise TrustedIssuerAdmissionError(f"{label} is not strict JSON") from error
     if type(value) is not dict:
         raise TrustedIssuerAdmissionError(f"{label} must be an object")
@@ -85,29 +95,52 @@ def _money(value: object, label: str) -> Decimal:
     except (InvalidOperation, ValueError) as error:
         raise TrustedIssuerAdmissionError(f"{label} is invalid") from error
     if not amount.is_finite() or amount <= 0 or str(amount) != value:
-        raise TrustedIssuerAdmissionError(f"{label} must be a canonical positive decimal")
+        raise TrustedIssuerAdmissionError(f"{label} must be canonical and positive")
     return amount
 
 
-def _protected_path(path: Path, label: str) -> Path:
+def _utc(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise TrustedIssuerAdmissionError(f"{label} must be UTC ISO-8601")
     try:
-        return reject_reparse_path(path)
+        parsed = datetime.fromisoformat(value).astimezone(UTC)
+    except ValueError as error:
+        raise TrustedIssuerAdmissionError(f"{label} is invalid") from error
+    if parsed.isoformat(timespec="microseconds").replace("+00:00", "Z") != value:
+        raise TrustedIssuerAdmissionError(f"{label} is not canonical Hermes time")
+    return parsed
+
+
+def _evidence_time(value: object, label: str) -> int:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise TrustedIssuerAdmissionError(f"{label} must be UTC ISO-8601")
+    try:
+        return int(datetime.fromisoformat(value).timestamp())
+    except ValueError as error:
+        raise TrustedIssuerAdmissionError(f"{label} is invalid") from error
+
+
+def _protected_path(path: Path, label: str, *, production: bool) -> Path:
+    try:
+        checked = reject_reparse_path(path)
     except (OSError, ValueError) as error:
-        raise TrustedIssuerAdmissionError(
-            f"{label} must not traverse a link or reparse point"
-        ) from error
+        raise TrustedIssuerAdmissionError(f"{label} is unavailable or reparse-linked") from error
+    if production and checked.exists() and checked.is_file():
+        try:
+            _verify_protection(checked)
+        except HermesIssuerClientError as error:
+            raise TrustedIssuerAdmissionError(f"{label} is not protected") from error
+    return checked
 
 
-def _literal_child(root: Path, name: str, label: str) -> Path:
-    if not isinstance(name, str) or not name or any(token in name for token in ("/", "\\", ":", "..")):
-        raise TrustedIssuerAdmissionError(f"{label} must be a source-owned filename")
-    return _protected_path(root / name, label)
+def _literal_child(root: Path, name: object, label: str, *, production: bool) -> Path:
+    if not isinstance(name, str) or not name or any(v in name for v in ("/", "\\", ":", "..")):
+        raise TrustedIssuerAdmissionError(f"{label} filename is not source-owned")
+    return _protected_path(root / name, label, production=production)
 
 
 @dataclass(frozen=True, init=False)
 class FinancialCapability:
-    """Unforgeable-by-API cap derived from the protected policy document."""
-
     operation_id: str
     episode_id: str
     policy_sha256: str
@@ -117,31 +150,65 @@ class FinancialCapability:
     def __init__(self, *, operation_id: str, episode_id: str, policy_sha256: str,
                  currency: str, maximum_usd: Decimal, _token: object) -> None:
         if _token is not _TOKEN:
-            raise TypeError("financial capabilities are minted only by canonical admission")
-        object.__setattr__(self, "operation_id", operation_id)
-        object.__setattr__(self, "episode_id", episode_id)
-        object.__setattr__(self, "policy_sha256", policy_sha256)
-        object.__setattr__(self, "currency", currency)
-        object.__setattr__(self, "maximum_usd", maximum_usd)
+            raise TypeError("financial capabilities are composition-owned")
+        for name, value in (("operation_id", operation_id), ("episode_id", episode_id),
+                            ("policy_sha256", policy_sha256), ("currency", currency),
+                            ("maximum_usd", maximum_usd)):
+            object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True)
 class _VerifiedAdmission:
-    descriptor: dict[str, Any]
-    descriptor_sha256: str
+    operation_sha256: str
+    descriptor_digest: str
     receipt_id: str
+    job: Job
     capability: FinancialCapability
+    quote: dict[str, Any]
 
 
-class _PrePostFixtureProvider:
-    """Composition-owned wrapper that revalidates immediately before POST/GET."""
+class _FrozenRootPolicyLoader:
+    __slots__ = ("_production", "_root")
 
-    mode = "TEST"
+    def __init__(self, root: Path, *, production: bool) -> None:
+        self._root, self._production = root, production
 
-    def __init__(self, provider: object, verify: Callable[[], _VerifiedAdmission]) -> None:
-        if getattr(provider, "mode", None) != "TEST":
-            raise TrustedIssuerAdmissionError("fixture provider must be TEST-only")
-        self._provider, self._verify = provider, verify
+    def load(self, binding: object, label: str) -> tuple[dict[str, Any], str]:
+        binding = _closed(binding, {"name", "sha256"}, f"{label} binding")
+        path = _literal_child(self._root, binding["name"], label, production=self._production)
+        try:
+            raw = path.read_bytes()
+        except OSError as error:
+            raise TrustedIssuerAdmissionError(f"{label} is unavailable") from error
+        actual = sha256(raw).hexdigest()
+        if actual != _digest(binding["sha256"], f"{label} binding"):
+            raise TrustedIssuerAdmissionError(f"{label} changed")
+        return _strict(raw, label), actual
+
+
+class _ProviderRegistry:
+    __slots__ = ("_entries",)
+
+    def __init__(self, endpoint: str, factory: Callable[[], object]) -> None:
+        self._entries = MappingProxyType({endpoint: factory})
+
+    def create(self, endpoint: str) -> object:
+        factory = self._entries.get(endpoint)
+        if factory is None:
+            raise TrustedIssuerAdmissionError("provider is not registered by fixed composition")
+        provider = factory()
+        if not callable(getattr(provider, "submit", None)) or not callable(getattr(provider, "recover", None)):
+            raise TrustedIssuerAdmissionError("registered provider factory is invalid")
+        return provider
+
+
+class _RevalidatingProvider:
+    __slots__ = ("_provider", "_verify", "mode")
+
+    def __init__(self, provider: object, verify: Callable[[], _VerifiedAdmission], mode: str):
+        if getattr(provider, "mode", None) != mode:
+            raise TrustedIssuerAdmissionError("registered provider mode changed")
+        self._provider, self._verify, self.mode = provider, verify, mode
 
     async def submit(self, job, request_id, checkpoint):
         self._verify()
@@ -153,229 +220,295 @@ class _PrePostFixtureProvider:
 
 
 class JoseTrustedIssuerAdmission:
-    """Fixed José admission composition; LIVE is intentionally unprovisioned."""
+    """Fixed composition whose only public input is the literal operation ID."""
 
-    def __init__(self, *, root: Path, transport: object, issuer_key: bytes,
-                 provider: object, now: Callable[[], int], _token: object) -> None:
+    def __init__(self, *, root: Path, client: HermesIssuerClient,
+                 provider_factory: Callable[[], object], now: Callable[[], int],
+                 production: bool, _token: object) -> None:
         if _token is not _TOKEN:
-            raise TypeError("use the fixed production or TEST fixture factory")
+            raise TypeError("use production() or for_test_ipc()")
         root = Path(root)
         if not root.is_absolute():
-            raise TrustedIssuerAdmissionError("fixture protected root must be absolute and non-linked")
-        root = _protected_path(root, "fixture protected root")
-        if getattr(transport, "mode", None) != "TEST" or getattr(provider, "mode", None) != "TEST":
-            raise TrustedIssuerAdmissionError("only TEST fixture transport/provider are accepted")
-        if type(issuer_key) is not bytes or len(issuer_key) < 16:
-            raise TrustedIssuerAdmissionError("TEST issuer authentication key is invalid")
-        if not callable(getattr(transport, "read_receipt", None)) or not callable(getattr(transport, "read_revocation", None)):
-            raise TrustedIssuerAdmissionError("local issuer transport is incomplete")
-        if not callable(now):
-            raise TrustedIssuerAdmissionError("fixture clock is required")
-        self._root, self._transport, self._issuer_key = root, transport, issuer_key
-        self._provider, self._now = provider, now
+            raise TrustedIssuerAdmissionError("protected root must be absolute")
+        self._production = production
+        self._root = _protected_path(root, "trusted issuer root", production=production)
+        self._client = client
+        self._loader = _FrozenRootPolicyLoader(self._root, production=production)
+        self._provider_factory = provider_factory
+        self._now = now
         self.last_financial_capability: FinancialCapability | None = None
 
     @classmethod
     def production(cls):
-        raise TrustedIssuerAdmissionError("LIVE activation is not provisioned")
+        """Compose the fixed deployment, or report its normal unprovisioned state."""
+        try:
+            admission = cls(
+                root=_PRODUCTION_ROOT,
+                client=HermesIssuerClient.production(),
+                provider_factory=lambda: FalFluxProvider(_PRODUCTION_ROOT / "quarantine"),
+                now=lambda: int(time.time()), production=True, _token=_TOKEN,
+            )
+            admission._source()
+            return admission
+        except (TrustedIssuerAdmissionError, HermesIssuerClientError, OSError) as error:
+            return {
+                "status": "BLOCKED", "operation_id": JOSE_OPERATION_ID,
+                "reason": f"protected production deployment is unprovisioned: {error}",
+            }
 
     @classmethod
-    def for_test(cls, *, root: Path, transport: object, issuer_key: bytes,
-                 provider: object, now: Callable[[], int]):
-        return cls(root=root, transport=transport, issuer_key=issuer_key,
-                   provider=provider, now=now, _token=_TOKEN)
+    def for_test_ipc(cls, *, root: Path, client: HermesIssuerClient,
+                     provider_factory: Callable[[], object], now: Callable[[], int]):
+        if not isinstance(client, HermesIssuerClient) or not callable(provider_factory) or not callable(now):
+            raise TypeError("explicit TEST IPC composition is required")
+        return cls(root=root, client=client, provider_factory=provider_factory,
+                   now=now, production=False, _token=_TOKEN)
 
-    def _authenticated(self, raw: bytes, *, domain: bytes, label: str) -> dict[str, Any]:
-        envelope = _closed(_strict(raw, label), {"payload", "signature"}, f"{label} envelope")
-        payload = envelope["payload"]
-        signature = envelope["signature"]
-        if type(payload) is not dict or not isinstance(signature, str) or not _SHA.fullmatch(signature):
-            raise TrustedIssuerAdmissionError(f"{label} authentication envelope is invalid")
-        expected = hmac.new(self._issuer_key, domain + _canonical(payload), sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            raise TrustedIssuerAdmissionError(f"{label} authentication failed")
-        return payload
-
-    def _source(self) -> tuple[dict[str, Any], str, dict[str, Any], str]:
-        descriptor_path = _protected_path(
-            self._root / "operations" / f"{JOSE_OPERATION_ID}.json",
-            "José operation descriptor",
-        )
+    def _source(self) -> dict[str, Any]:
+        path = _protected_path(self._root / "operations" / f"{JOSE_OPERATION_ID}.json",
+                               "Jose operation descriptor", production=self._production)
         try:
-            descriptor_raw = descriptor_path.read_bytes()
+            raw = path.read_bytes()
         except OSError as error:
-            raise TrustedIssuerAdmissionError("José operation descriptor is unavailable") from error
-        descriptor = _closed(_strict(descriptor_raw, "José operation descriptor"), {
-            "schema", "operation_id", "episode_id", "mode", "endpoint", "scene",
-            "category", "input_kind", "payload", "financial_policy",
-        }, "José operation descriptor")
+            raise TrustedIssuerAdmissionError("Jose operation descriptor is unavailable") from error
+        operation = _closed(_strict(raw, "Jose operation descriptor"), {
+            "schema", "operation_id", "episode_id", "mode", "scene", "category",
+            "input_kind", "endpoint", "payload", "hermes_receipt_id", "hermes_descriptor",
+            "standing_policy", "financial_policy", "quote", "license", "provider_registration",
+        }, "Jose operation descriptor")
+        expected_mode = "LIVE" if self._production else "TEST"
         if (
-            descriptor["schema"] != "jose-trusted-operation/v1"
-            or descriptor["operation_id"] != JOSE_OPERATION_ID
-            or descriptor["episode_id"] != _JOSE_EPISODE_ID
-            or descriptor["mode"] != "TEST"
-            or descriptor["category"] not in {"first", "thumbnail"}
-            or descriptor["input_kind"] != "TEXT_TO_IMAGE"
-            or not all(isinstance(descriptor[key], str) and descriptor[key] for key in ("endpoint", "scene"))
-            or type(descriptor["payload"]) is not dict
+            operation["schema"] != "jose-trusted-operation/v2"
+            or operation["operation_id"] != JOSE_OPERATION_ID
+            or operation["episode_id"] != _JOSE_EPISODE_ID
+            or operation["mode"] != expected_mode
+            or operation["category"] not in {"first", "thumbnail"}
+            or operation["input_kind"] != "TEXT_TO_IMAGE"
+            or not all(isinstance(operation[k], str) and operation[k]
+                       for k in ("scene", "endpoint", "hermes_receipt_id"))
+            or type(operation["payload"]) is not dict
         ):
-            raise TrustedIssuerAdmissionError("distinct closed José operation descriptor is required")
-        binding = _closed(descriptor["financial_policy"], {"name", "sha256"}, "financial policy binding")
-        policy_path = _literal_child(self._root, binding["name"], "financial policy")
-        try:
-            policy_raw = policy_path.read_bytes()
-        except OSError as error:
-            raise TrustedIssuerAdmissionError("José financial policy is unavailable") from error
-        policy_sha = sha256(policy_raw).hexdigest()
-        if policy_sha != _digest(binding["sha256"], "financial policy binding"):
-            raise TrustedIssuerAdmissionError("José financial policy changed")
-        policy = _closed(_strict(policy_raw, "José financial policy"), {
-            "schema", "operation_id", "episode_id", "currency", "maximum_usd", "status",
-        }, "José financial policy")
-        if (
-            policy["schema"] != "jose-financial-policy/v1"
-            or policy["operation_id"] != JOSE_OPERATION_ID
-            or policy["episode_id"] != _JOSE_EPISODE_ID
-            or policy["currency"] != "USD"
-            or policy["status"] != "ACTIVE"
-        ):
-            raise TrustedIssuerAdmissionError("active José financial policy is required")
-        _money(policy["maximum_usd"], "José policy maximum")
-        return descriptor, sha256(descriptor_raw).hexdigest(), policy, policy_sha
+            raise TrustedIssuerAdmissionError("fixed Jose operation descriptor is invalid")
+        operation["_raw_sha256"] = sha256(raw).hexdigest()
+        return operation
 
     def _verify(self, expected: _VerifiedAdmission | None = None) -> _VerifiedAdmission:
-        descriptor, descriptor_sha, policy, policy_sha = self._source()
-        receipt = self._authenticated(
-            self._transport.read_receipt(JOSE_OPERATION_ID), domain=_RECEIPT_DOMAIN,
-            label="issuer receipt",
-        )
-        revocation = self._authenticated(
-            self._transport.read_revocation(JOSE_OPERATION_ID), domain=_REVOCATION_DOMAIN,
-            label="issuer revocation",
-        )
-        receipt = _closed(receipt, {
-            "schema", "receipt_id", "operation_id", "descriptor_sha256", "policy_sha256",
-            "status", "issued_at", "expires_at", "telegram_approval", "quote", "license",
-        }, "issuer receipt")
+        operation = self._source()
+        standing, standing_sha = self._loader.load(operation["standing_policy"], "standing policy")
+        financial, financial_sha = self._loader.load(operation["financial_policy"], "financial policy")
+        quote, _ = self._loader.load(operation["quote"], "provider quote")
+        license_evidence, _ = self._loader.load(operation["license"], "provider license")
+        registration, _ = self._loader.load(operation["provider_registration"], "provider registration")
+        standing = _closed(standing, {
+            "schema", "policy_id", "operation_id", "episode_id", "operation_kind", "provider_id",
+            "endpoint_id", "authority_mode", "gateway_instance_id", "chat_id", "sender_id",
+            "receipt_max_age_seconds", "quote_max_age_seconds", "license_scope",
+            "provider_endpoint", "provider_kind",
+        }, "standing policy")
+        financial = _closed(financial, {
+            "schema", "policy_id", "operation_id", "episode_id", "currency",
+            "max_amount_minor", "maximum_usd", "status",
+        }, "financial policy")
+        mode = operation["mode"]
+        expected_provider_kind = "FAL_FLUX" if mode == "LIVE" else "TEST_FAKE"
+        if (
+            standing["schema"] != "jose-standing-policy/v1"
+            or standing["operation_id"] != JOSE_OPERATION_ID
+            or standing["episode_id"] != _JOSE_EPISODE_ID
+            or standing["operation_kind"] != "image_generation"
+            or standing["provider_id"] != "openai"
+            or standing["endpoint_id"] != "openai.images.generations"
+            or standing["authority_mode"] != mode
+            or standing["provider_endpoint"] != operation["endpoint"]
+            or standing["provider_kind"] != expected_provider_kind
+            or type(standing["receipt_max_age_seconds"]) is not int
+            or not 1 <= standing["receipt_max_age_seconds"] <= 300
+            or type(standing["quote_max_age_seconds"]) is not int
+            or not 1 <= standing["quote_max_age_seconds"] <= 300
+        ):
+            raise TrustedIssuerAdmissionError("standing root policy does not bind the operation")
+        if (
+            financial["schema"] != "jose-financial-policy/v1"
+            or not isinstance(financial["policy_id"], str) or not financial["policy_id"]
+            or financial["operation_id"] != JOSE_OPERATION_ID
+            or financial["episode_id"] != _JOSE_EPISODE_ID
+            or financial["currency"] != "USD" or financial["status"] != "ACTIVE"
+            or type(financial["max_amount_minor"]) is not int
+            or financial["max_amount_minor"] < 1
+        ):
+            raise TrustedIssuerAdmissionError("financial policy is not active and bound")
+        maximum = _money(financial["maximum_usd"], "financial maximum")
+        if int((maximum * 100).to_integral_value(rounding=ROUND_CEILING)) != financial["max_amount_minor"]:
+            raise TrustedIssuerAdmissionError("financial minor-unit ceiling changed")
+
+        descriptor = _closed(operation["hermes_descriptor"], _HERMES_DESCRIPTOR_FIELDS, "Hermes descriptor")
+        descriptor_payload = {key: descriptor[key] for key in descriptor if key != "descriptor_id"}
+        descriptor_digest = sha256(_canonical(descriptor_payload)).hexdigest()
+        payload_digest = sha256(_canonical(operation["payload"])).hexdigest()
+        if (
+            descriptor["schema_version"] != 1
+            or descriptor["descriptor_id"] != descriptor_digest
+            or descriptor["operation_id"] != JOSE_OPERATION_ID
+            or descriptor["episode_id"] != _JOSE_EPISODE_ID
+            or descriptor["operation_kind"] != standing["operation_kind"]
+            or descriptor["provider_id"] != standing["provider_id"]
+            or descriptor["endpoint_id"] != standing["endpoint_id"]
+            or descriptor["input_binding_sha256"] != payload_digest
+            or descriptor["standing_policy_id"] != standing["policy_id"]
+            or descriptor["standing_policy_sha256"] != standing_sha
+            or descriptor["financial_policy_id"] != financial["policy_id"]
+            or descriptor["financial_policy_sha256"] != financial_sha
+            or descriptor["currency"] != financial["currency"]
+            or descriptor["max_amount_minor"] != financial["max_amount_minor"]
+            or descriptor["authority_mode"] != mode
+            or not isinstance(descriptor["request_text"], str)
+            or descriptor["request_text_utf8_sha256"]
+            != sha256(descriptor["request_text"].encode("utf-8")).hexdigest()
+            or not isinstance(descriptor["confirmation_token"], str)
+            or descriptor["confirmation_token"] not in descriptor["request_text"]
+        ):
+            raise TrustedIssuerAdmissionError("Hermes descriptor binding is invalid")
         now = self._now()
-        if type(now) is not int:
-            raise TrustedIssuerAdmissionError("canonical verification clock is invalid")
+        if type(now) is not int or int(_utc(descriptor["expires_at_utc"], "Hermes descriptor expiry").timestamp()) <= now:
+            raise TrustedIssuerAdmissionError("Hermes descriptor is expired")
+        try:
+            snapshot = self._client.current(operation["hermes_receipt_id"])
+        except HermesIssuerClientError as error:
+            raise TrustedIssuerAdmissionError("current Hermes receipt is unavailable") from error
+        receipt = _closed(snapshot["receipt"], _HERMES_RECEIPT_FIELDS, "Hermes receipt")
+        if snapshot["revocation"] is not None:
+            revocation = _closed(snapshot["revocation"], {
+                "revocation_id", "receipt_id", "receipt_digest", "generation", "reason", "revoked_at_utc",
+            }, "Hermes revocation")
+            if (revocation["receipt_id"] != receipt.get("receipt_id")
+                    or revocation["receipt_digest"] != receipt.get("receipt_digest")):
+                raise TrustedIssuerAdmissionError("Hermes revocation binding is invalid")
+            raise TrustedIssuerAdmissionError("Hermes receipt is currently revoked")
+        receipt_payload = {key: receipt[key] for key in receipt if key != "receipt_digest"}
+        issued = int(_utc(receipt["issued_at_utc"], "Hermes receipt issuance").timestamp())
         if (
-            receipt["schema"] != "studio-trusted-issuer-receipt/v1"
-            or receipt["operation_id"] != JOSE_OPERATION_ID
-            or receipt["descriptor_sha256"] != descriptor_sha
-            or receipt["policy_sha256"] != policy_sha
-            or receipt["status"] != "APPROVED"
-            or type(receipt["issued_at"]) is not int
-            or type(receipt["expires_at"]) is not int
-            or not receipt["issued_at"] <= now < receipt["expires_at"]
-            or now - receipt["issued_at"] > _RECEIPT_MAX_AGE
-            or not isinstance(receipt["receipt_id"], str) or not receipt["receipt_id"]
+            receipt["receipt_id"] != operation["hermes_receipt_id"]
+            or receipt["receipt_digest"] != sha256(_canonical(receipt_payload)).hexdigest()
+            or receipt["descriptor_id"] != descriptor["descriptor_id"]
+            or receipt["descriptor_digest"] != descriptor_digest
+            or receipt["authority_mode"] != mode
+            or receipt["gateway_instance_id"] != standing["gateway_instance_id"]
+            or receipt["platform"] != "telegram"
+            or receipt["chat_id"] != standing["chat_id"]
+            or receipt["sender_id"] != standing["sender_id"]
+            or not issued <= now
+            or now - issued > standing["receipt_max_age_seconds"]
         ):
-            raise TrustedIssuerAdmissionError("fresh approved José issuer receipt is required")
-        telegram = _closed(receipt["telegram_approval"], {
-            "chat_id", "sender_id", "message_id", "reply_to_message_id", "update_sha256",
-        }, "Telegram approval binding")
+            raise TrustedIssuerAdmissionError("fresh descriptor-bound Hermes receipt is required")
+
+        quote = _closed(quote, {
+            "schema", "operation_id", "endpoint", "currency", "maximum_usd",
+            "observed_at_utc", "expires_at_utc", "evidence_sha256",
+        }, "provider quote")
+        observed = _evidence_time(quote["observed_at_utc"], "quote observation")
+        quote_expiry = _evidence_time(quote["expires_at_utc"], "quote expiry")
         if (
-            not all(isinstance(telegram[key], str) and telegram[key].isdecimal() for key in ("chat_id", "sender_id"))
-            or type(telegram["message_id"]) is not int or telegram["message_id"] <= 0
-            or type(telegram["reply_to_message_id"]) is not int or telegram["reply_to_message_id"] <= 0
+            quote["schema"] != "jose-provider-quote/v1"
+            or quote["operation_id"] != JOSE_OPERATION_ID
+            or quote["endpoint"] != operation["endpoint"]
+            or quote["currency"] != financial["currency"]
+            or _money(quote["maximum_usd"], "quote maximum") != maximum
+            or not observed <= now < quote_expiry
+            or now - observed > standing["quote_max_age_seconds"]
         ):
-            raise TrustedIssuerAdmissionError("canonical Telegram approval binding is invalid")
-        _digest(telegram["update_sha256"], "Telegram update")
-        cap = _money(policy["maximum_usd"], "José policy maximum")
-        quote = _closed(receipt["quote"], {
-            "endpoint", "currency", "maximum_usd", "observed_at", "expires_at", "evidence_sha256",
-        }, "authenticated quote")
-        if (
-            quote["endpoint"] != descriptor["endpoint"] or quote["currency"] != policy["currency"]
-            or _money(quote["maximum_usd"], "quote maximum") != cap
-            or type(quote["observed_at"]) is not int or type(quote["expires_at"]) is not int
-            or not quote["observed_at"] <= now < quote["expires_at"]
-            or now - quote["observed_at"] > _QUOTE_MAX_AGE
-        ):
-            raise TrustedIssuerAdmissionError("fresh cap-bound authenticated quote is required")
+            raise TrustedIssuerAdmissionError("fresh independently bound quote is required")
         _digest(quote["evidence_sha256"], "quote evidence")
-        license_receipt = _closed(receipt["license"], {
-            "scope", "status", "valid_until", "evidence_sha256",
-        }, "license capability")
+        license_evidence = _closed(license_evidence, {
+            "schema", "operation_id", "scope", "status", "valid_until_utc", "evidence_sha256",
+        }, "provider license")
         if (
-            license_receipt["scope"] != f"{_JOSE_EPISODE_ID}:PAID_GENERATION"
-            or license_receipt["status"] != "VALID"
-            or type(license_receipt["valid_until"]) is not int
-            or license_receipt["valid_until"] <= now
+            license_evidence["schema"] != "jose-provider-license/v1"
+            or license_evidence["operation_id"] != JOSE_OPERATION_ID
+            or license_evidence["scope"] != standing["license_scope"]
+            or license_evidence["status"] != "VALID"
+            or _evidence_time(license_evidence["valid_until_utc"], "license expiry") <= now
         ):
-            raise TrustedIssuerAdmissionError("fresh José license capability is required")
-        _digest(license_receipt["evidence_sha256"], "license evidence")
-        revocation = _closed(revocation, {
-            "schema", "operation_id", "receipt_id", "status", "observed_at", "expires_at",
-        }, "revocation status")
-        if (
-            revocation["schema"] != "studio-trusted-issuer-revocation/v1"
-            or revocation["operation_id"] != JOSE_OPERATION_ID
-            or revocation["receipt_id"] != receipt["receipt_id"]
-            or revocation["status"] != "NOT_REVOKED"
-            or type(revocation["observed_at"]) is not int
-            or type(revocation["expires_at"]) is not int
-            or not revocation["observed_at"] <= now < revocation["expires_at"]
-            or now - revocation["observed_at"] > _REVOCATION_MAX_AGE
-        ):
-            raise TrustedIssuerAdmissionError("fresh non-revoked issuer status is required")
+            raise TrustedIssuerAdmissionError("current independently bound license is required")
+        _digest(license_evidence["evidence_sha256"], "license evidence")
+        registration = _closed(registration, {"schema", "endpoint", "provider_kind", "mode"}, "provider registration")
+        if registration != {
+            "schema": "jose-provider-registration/v1", "endpoint": operation["endpoint"],
+            "provider_kind": standing["provider_kind"], "mode": mode,
+        }:
+            raise TrustedIssuerAdmissionError("fixed provider registration changed")
+
         capability = FinancialCapability(
             operation_id=JOSE_OPERATION_ID, episode_id=_JOSE_EPISODE_ID,
-            policy_sha256=policy_sha, currency=policy["currency"], maximum_usd=cap,
-            _token=_TOKEN,
+            policy_sha256=financial_sha, currency="USD", maximum_usd=maximum, _token=_TOKEN,
         )
-        verified = _VerifiedAdmission(
-            descriptor, descriptor_sha, receipt["receipt_id"], capability
-        )
+        job = Job(operation["scene"], operation["category"], mode, operation["endpoint"],
+                  operation["payload"], None, maximum, input_kind=operation["input_kind"])
+        verified = _VerifiedAdmission(operation["_raw_sha256"], descriptor_digest,
+                                      receipt["receipt_id"], job, capability, quote)
         if expected is not None and (
-            verified.descriptor_sha256 != expected.descriptor_sha256
-            or verified.capability.policy_sha256 != expected.capability.policy_sha256
+            verified.operation_sha256 != expected.operation_sha256
+            or verified.descriptor_digest != expected.descriptor_digest
             or verified.receipt_id != expected.receipt_id
+            or verified.job.request_id != expected.job.request_id
+            or verified.capability.policy_sha256 != expected.capability.policy_sha256
         ):
-            raise TrustedIssuerAdmissionError(
-                "verification snapshot changed the admitted issuer identity"
-            )
+            raise TrustedIssuerAdmissionError("admitted issuer identity changed")
         self.last_financial_capability = capability
         return verified
 
     async def admit(self, operation_id: str) -> dict[str, Any]:
         if operation_id != JOSE_OPERATION_ID:
-            raise TrustedIssuerAdmissionError("fixed José operation ID is required")
-        admitted = self._verify()  # before factory construction
-        descriptor, capability = admitted.descriptor, admitted.capability
-        state = _protected_path(self._root / "state", "admission state directory")
-        ledger_path = _protected_path(
-            state / "ledger.sqlite3", "standing budget database"
-        )
-        executor_path = _protected_path(
-            state / "executor.sqlite3", "executor database"
-        )
+            raise TrustedIssuerAdmissionError("fixed Jose operation ID is required")
+        admitted = self._verify()
+        job, capability = admitted.job, admitted.capability
+        state = _protected_path(self._root / "state", "admission state", production=self._production)
         ledger = StandingBudgetLedger(
-            ledger_path, policy_sha256=capability.policy_sha256,
-            episode_limit_usd=str(capability.maximum_usd), month_limit_usd=str(capability.maximum_usd),
-            experiment_limit_usd=str(capability.maximum_usd), mode="TEST",
+            state / "ledger.sqlite3", policy_sha256=capability.policy_sha256,
+            episode_limit_usd=str(capability.maximum_usd),
+            month_limit_usd=str(capability.maximum_usd),
+            experiment_limit_usd=str(capability.maximum_usd), mode=job.mode,
         )
+        auth_scope = f"HERMES_RECEIPT:{admitted.receipt_id}"
+        executor_kwargs: dict[str, Any] = {}
+        if job.mode == "LIVE":
+            executor_kwargs = {
+                "_trusted_issuer_binding": {
+                    "kind": "HERMES_TRUSTED_ISSUER", "auth_scope": auth_scope,
+                },
+                "_trusted_issuer_verifier": (
+                    lambda candidate: self._verify(admitted).job.request_id == candidate.request_id
+                ),
+            }
         executor = Executor(
-            executor_path,
-            Config(limit=capability.maximum_usd, concurrency=1), standing_ledger=ledger,
+            state / "executor.sqlite3", Config(limit=capability.maximum_usd, concurrency=1),
+            standing_ledger=ledger, **executor_kwargs,
         )
-        job = Job(
-            descriptor["scene"], descriptor["category"], "TEST", descriptor["endpoint"],
-            descriptor["payload"], None, capability.maximum_usd,
-            input_kind=descriptor["input_kind"],
-        )
-        self._verify(admitted)  # before the canonical executor claim/intent
+        self._verify(admitted)
         if executor.inspect(job.request_id) is None:
-            executor.prepare_intent(job, auth_scope="TEST_LOCAL_ONLY")
-        self._verify(admitted)  # before the canonical standing-ledger reservation
+            executor.prepare_intent(
+                job, auth_scope=auth_scope if job.mode == "LIVE" else "TEST_LOCAL_ONLY"
+            )
+        self._verify(admitted)
         ledger.reserve(
-            job.request_id, capability.episode_id, job.endpoint, capability.maximum_usd,
-            settlement_mode="FAL_READBACK_V2", auth_scope="TEST_LOCAL_ONLY",
-            provider_request_id="UNASSIGNED", authority_mode="TEST",
+            job.request_id, _JOSE_EPISODE_ID, job.endpoint, capability.maximum_usd,
+            settlement_mode="FAL_READBACK_V2",
+            auth_scope=auth_scope if job.mode == "LIVE" else "TEST_LOCAL_ONLY",
+            provider_request_id="UNASSIGNED", authority_mode=job.mode,
         )
-        provider = _PrePostFixtureProvider(
-            self._provider, lambda: self._verify(admitted)
+        registry = _ProviderRegistry(job.endpoint, self._provider_factory)
+        provider = _RevalidatingProvider(
+            registry.create(job.endpoint), lambda: self._verify(admitted), job.mode
         )
-        return await executor.run(job, provider, submit_prepared=True)
+        authorization = price = None
+        if job.mode == "LIVE":
+            valid_until = _evidence_time(admitted.quote["expires_at_utc"], "quote expiry")
+            authorization = Authorization(
+                job.request_id, "HERMES_TRUSTED_ISSUER", valid_until, job.cost
+            )
+            price = Price(
+                job.endpoint, job.request_id, job.cost, valid_until,
+                admitted.quote["evidence_sha256"],
+            )
+        return await executor.run(
+            job, provider, authorization=authorization, price=price, submit_prepared=True
+        )
