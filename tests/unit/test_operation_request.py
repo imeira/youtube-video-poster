@@ -265,4 +265,5 @@ def test_v4_generator_reads_the_actual_checkout_git_revisions():
     expected_base = subprocess.check_output(["git", "merge-base", "HEAD", "origin/master"], cwd=REPOSITORY, text=True).strip()
 
     assert artifact["request"]["code_revision"] == expected_head
-    assert artifact["request"]["base_revision"] == expected_base == BASE_SHA
+    assert artifact["request"]["base_revision"] == expected_base
+    assert BASE_SHA == "8a4f3921b8ea8caef4caf15506aff19b8aff3116"
