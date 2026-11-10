@@ -23,6 +23,7 @@ def _read_bundle() -> dict[str, bytes]:
         "timeline": (root / "timeline.json").read_bytes(),
         "assets": (root / "asset_requirements.json").read_bytes(),
         "subtitles": (root / "subtitles.srt").read_bytes(),
+        "vtt": (root / "subtitles.vtt").read_bytes(),
         "parent": (root / "parent_manifest.json").read_bytes(),
         "manifest": (FIXTURE / "request_manifest_v2.json").read_bytes(),
     }
@@ -34,6 +35,7 @@ def _rehash_parent(bundle: dict[str, bytes]) -> dict[str, bytes]:
         "timeline.json": sha256(bundle["timeline"]).hexdigest(),
         "asset_requirements.json": sha256(bundle["assets"]).hexdigest(),
         "subtitles.srt": sha256(bundle["subtitles"]).hexdigest(),
+        "subtitles.vtt": sha256(bundle["vtt"]).hexdigest(),
     })
     bundle["parent"] = _raw(parent)
     return bundle
@@ -46,6 +48,7 @@ def _parse(bundle: dict[str, bytes]):
         timeline_bytes=bundle["timeline"],
         asset_requirements_bytes=bundle["assets"],
         subtitles_bytes=bundle["subtitles"],
+        vtt_bytes=bundle["vtt"],
         parent_manifest_bytes=bundle["parent"],
         request_manifest_bytes=bundle["manifest"],
     )
@@ -65,6 +68,31 @@ def test_actual_checked_in_bundle_binds_metadata_counts_and_natural_gaps():
         "trailing_gap_seconds": "0.059",
         "policy": "bounded natural/provider pause; captions are not stretched",
     }
+
+
+def test_actual_checked_in_vtt_is_hash_bound_and_semantically_identical_to_srt():
+    bundle = _read_bundle()
+
+    parsed = _parse(bundle)
+
+    assert sha256(bundle["vtt"]).hexdigest() == "b87e36d32e673e5a2f42e716f39623b53e62bbcf628a6c68d0d9803ffee4bcd6"
+    assert parsed.caption_cue_count == 63
+
+
+@pytest.mark.parametrize("mutation", ["text", "timing"])
+def test_rehashed_parent_rejects_vtt_that_differs_from_validated_srt(mutation: str):
+    from src.hybrid.operation_request import OperationRequestError
+
+    bundle = _read_bundle()
+    text = bundle["vtt"].decode("utf-8")
+    if mutation == "text":
+        text = text.replace("José tinha dezessete anos", "José tinha dezoito anos", 1)
+    else:
+        text = text.replace("00:00:00.050 --> 00:00:05.026", "00:00:00.051 --> 00:00:05.026", 1)
+    bundle["vtt"] = text.encode("utf-8")
+
+    with pytest.raises(OperationRequestError, match="VTT"):
+        _parse(_rehash_parent(bundle))
 
 
 def test_rejects_duplicate_json_keys_nonfinite_constants_and_unknown_schema_keys():
@@ -193,9 +221,13 @@ def test_rehashed_bundle_rejects_typed_nested_contract_claims(target: str, repla
     value[leaf] = replacement
     bundle["timeline"], bundle["parent"], bundle["manifest"] = _raw(timeline), _raw(parent), _raw(manifest)
 
+    rehashed = _rehash_parent(bundle)
+    if container == "parent" and field == "output_hashes":
+        parent = json.loads(rehashed["parent"])
+        parent[field][leaf] = replacement
+        rehashed["parent"] = _raw(parent)
     with pytest.raises(OperationRequestError):
-        _parse(_rehash_parent(bundle))
-
+        _parse(rehashed)
 
 @pytest.mark.parametrize("target, replacement", [
     ("beat.source_verse", 7),

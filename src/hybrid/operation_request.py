@@ -22,6 +22,7 @@ from typing import Any
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _GIT_SHA = re.compile(r"[0-9a-f]{40}\Z", re.ASCII)
 _SRT_TIME = re.compile(r"(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})\Z")
+_VTT_TIME = re.compile(r"(\d{2}):(\d{2}):(\d{2})\.(\d{3}) --> (\d{2}):(\d{2}):(\d{2})\.(\d{3})\Z")
 _DURATION = Decimal("283.104")
 _TIMELINE_TOLERANCE = Decimal("0.001")
 _MAX_NATURAL_CAPTION_GAP = Decimal("0.100")
@@ -139,7 +140,7 @@ def _srt_timestamp(parts: tuple[str, ...], offset: int) -> Decimal:
     return Decimal(hour * 3600 + minute * 60 + second) + Decimal(millisecond) / 1000
 
 
-def _parse_srt(raw: bytes, expected_count: int, duration: Decimal) -> dict[str, object]:
+def _parse_srt(raw: bytes, expected_count: int, duration: Decimal) -> tuple[dict[str, object], list[tuple[int, Decimal, Decimal, str]]]:
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as error:
@@ -177,7 +178,33 @@ def _parse_srt(raw: bytes, expected_count: int, duration: Decimal) -> dict[str, 
     trailing = duration - cues[-1][2]
     if trailing < 0 or trailing > _MAX_NATURAL_CAPTION_GAP:
         raise OperationRequestError("SRT trailing gap exceeds the bounded natural-pause policy")
-    return {"inter_cue_gaps_seconds": [format(gap, "f") for gap in gaps], "trailing_gap_seconds": format(trailing, "f"), "policy": "bounded natural/provider pause; captions are not stretched"}
+    return ({"inter_cue_gaps_seconds": [format(gap, "f") for gap in gaps], "trailing_gap_seconds": format(trailing, "f"), "policy": "bounded natural/provider pause; captions are not stretched"}, cues)
+
+
+def _parse_vtt(raw: bytes, expected_cues: list[tuple[int, Decimal, Decimal, str]]) -> None:
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise OperationRequestError("VTT must be UTF-8") from error
+    blocks = re.split(r"\r?\n\r?\n", text.strip())
+    if not blocks or blocks[0] != "WEBVTT":
+        raise OperationRequestError("VTT header is invalid")
+    cues: list[tuple[Decimal, Decimal, str]] = []
+    for block in blocks[1:]:
+        lines = block.splitlines()
+        if len(lines) < 3 or not lines[0].strip():
+            raise OperationRequestError("VTT cue structure is invalid")
+        match = _VTT_TIME.fullmatch(lines[1])
+        if not match:
+            raise OperationRequestError("VTT timestamp is invalid")
+        start, end = _srt_timestamp(match.groups(), 0), _srt_timestamp(match.groups(), 4)
+        caption = "\n".join(lines[2:]).strip()
+        if start >= end or not caption:
+            raise OperationRequestError("VTT cue values are invalid")
+        cues.append((start, end, caption))
+    expected = [(start, end, caption) for _, start, end, caption in expected_cues]
+    if cues != expected:
+        raise OperationRequestError("VTT cue times and text must match validated SRT exactly")
 
 
 @dataclass(frozen=True)
@@ -192,6 +219,7 @@ class CanonicalEditorialBundle:
     timeline_sha256: str
     asset_requirements_sha256: str
     subtitles_sha256: str
+    vtt_sha256: str
     parent_manifest_sha256: str
     channel: str
     playlist: str
@@ -200,10 +228,10 @@ class CanonicalEditorialBundle:
     caption_gap_report: dict[str, object]
 
     def artifact_hashes(self) -> dict[str, str]:
-        return {"timeline.json": self.timeline_sha256, "asset_requirements.json": self.asset_requirements_sha256, "subtitles.srt": self.subtitles_sha256, "parent_manifest.json": self.parent_manifest_sha256}
+        return {"timeline.json": self.timeline_sha256, "asset_requirements.json": self.asset_requirements_sha256, "subtitles.srt": self.subtitles_sha256, "subtitles.vtt": self.vtt_sha256, "parent_manifest.json": self.parent_manifest_sha256}
 
 
-def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirements_bytes: bytes, subtitles_bytes: bytes, parent_manifest_bytes: bytes, request_manifest_bytes: bytes) -> CanonicalEditorialBundle:
+def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirements_bytes: bytes, subtitles_bytes: bytes, vtt_bytes: bytes, parent_manifest_bytes: bytes, request_manifest_bytes: bytes) -> CanonicalEditorialBundle:
     """Validate closed schemas and actual relations; every input is caller-supplied bytes."""
     timeline = _strict_bytes_json(timeline_bytes, "timeline")
     assets = _strict_bytes_json(asset_requirements_bytes, "asset_requirements")
@@ -225,7 +253,7 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
     count_keys = {"provider_sentence_boundaries", "captions", "semantic_beats", "shot_needs", "asset_requirements_missing", "declared_narrator_words", "whitespace_split_tokens", "local_unicode_internal_hyphen_apostrophe_tokens", "immutable_audio_qa_normalized_tokens"}
     output_keys = {"timeline.json", "subtitles.srt", "subtitles.vtt", "asset_requirements.json"}
     output_hashes = _closed_bindings(parent["output_hashes"], output_keys, "parent manifest output_hashes")
-    for name, raw in (("timeline.json", timeline_bytes), ("asset_requirements.json", asset_requirements_bytes), ("subtitles.srt", subtitles_bytes)):
+    for name, raw in (("timeline.json", timeline_bytes), ("asset_requirements.json", asset_requirements_bytes), ("subtitles.srt", subtitles_bytes), ("subtitles.vtt", vtt_bytes)):
         if output_hashes[name] != _raw_digest(raw):
             raise OperationRequestError(f"{name} hash does not match parent manifest")
     counts = _closed_positive_counts(timeline["counts"], count_keys, "timeline counts")
@@ -240,7 +268,8 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
     duration = _decimal(timeline["duration_seconds"], "duration_seconds")
     if duration != _DURATION:
         raise OperationRequestError("duration_seconds must preserve the original 283.104 timing")
-    gap_report = _parse_srt(subtitles_bytes, captions, duration)
+    gap_report, srt_cues = _parse_srt(subtitles_bytes, captions, duration)
+    _parse_vtt(vtt_bytes, srt_cues)
     beats, requirements = timeline["beats"], assets["asset_requirements"]
     if type(beats) is not list or type(requirements) is not list or len(beats) != beats_count:
         raise OperationRequestError("beat count does not match timeline beats")
@@ -302,7 +331,7 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
     narration_sha = _digest(audio.get("approved_input_sha256"), "timeline narration hash")
     if source_hashes.get("approved_input_sha256") != narration_sha:
         raise OperationRequestError("parent manifest narration hash does not match timeline")
-    return CanonicalEditorialBundle(format(duration, "f"), captions, beats_count, shots_count, narration_sha, _raw_digest(timeline_bytes), _raw_digest(asset_requirements_bytes), _raw_digest(subtitles_bytes), _raw_digest(parent_manifest_bytes), _EXPECTED_SCOPE["channel"], _EXPECTED_SCOPE["playlist"], _EXPECTED_SCOPE["locale"], _EXPECTED_SCOPE["title"], gap_report)
+    return CanonicalEditorialBundle(format(duration, "f"), captions, beats_count, shots_count, narration_sha, _raw_digest(timeline_bytes), _raw_digest(asset_requirements_bytes), _raw_digest(subtitles_bytes), _raw_digest(vtt_bytes), _raw_digest(parent_manifest_bytes), _EXPECTED_SCOPE["channel"], _EXPECTED_SCOPE["playlist"], _EXPECTED_SCOPE["locale"], _EXPECTED_SCOPE["title"], gap_report)
 
 
 def build_v3_preflight_artifact(*, canonical_bundle: object, base_revision: object, code_revision: object) -> dict[str, object]:
