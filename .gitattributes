@@ -1,0 +1,2 @@
+# Preserve raw bytes for the specific hash-bound José fixture directory.
+tests/fixtures/jose_gen37_v3/** -text whitespace=-trailing-space,-cr-at-eol

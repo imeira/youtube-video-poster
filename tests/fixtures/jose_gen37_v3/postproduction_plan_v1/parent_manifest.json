@@ -1,0 +1,41 @@
+{
+  "schema": "jose_postproduction_parent_manifest/v1",
+  "source_root": "SANITIZED_REQUEST_ROOT/jose-gen37-20261110",
+  "immutable_source_policy": "Original audio and QA artifacts were read only; this manifest binds them by hash and does not amend historical reports.",
+  "outputs": [
+    "timeline.json",
+    "subtitles.srt",
+    "subtitles.vtt",
+    "asset_requirements.json"
+  ],
+  "output_hashes": {
+    "timeline.json": "ea48e4ea3d042d3e9ad5d3eb6e1165744278d0cbd9e89f900b372fd2f4102e29",
+    "subtitles.srt": "ea7e527b07816f90a1ce43f4d8d70edc220911a1ff9a068bd4237300efbbc737",
+    "subtitles.vtt": "b87e36d32e673e5a2f42e716f39623b53e62bbcf628a6c68d0d9803ffee4bcd6",
+    "asset_requirements.json": "cb2df5f5f7317700e6eafcb77c43666f7964ae73cae781037c6f7a00642763fc"
+  },
+  "source_hashes": {
+    "approved_source": "audio_candidate_v3_streaming_20261110/narrator_input_exact.txt",
+    "approved_input_sha256": "ca88f3f6f1a7a451482b09ee5324cc52527d1937aaf6db9b31d7cea401f81db4",
+    "sentence_boundary_events": "audio_candidate_v3_streaming_20261110/sentence_boundaries.json",
+    "sentence_boundary_events_sha256": "d817b4ee07099ee57697928753cf48d1f1260b896d97e9fe6f92b771079deff1",
+    "audio_qa": "audio_candidate_v3_streaming_20261110/qa_independent_audio.json",
+    "audio_qa_sha256": "5e5e4f3fbbd31f4fb0c0dc57e1683f57e1c94820ed469308f7742f0b2a061776",
+    "wav": "audio_candidate_v3_streaming_20261110/jose_gen37_narrator_thalita_48khz_mono.wav",
+    "wav_sha256": "73f6de58e7a872489aa449706d80a80b19546fca100111b32d4970ccfe44e879",
+    "mp3": "audio_candidate_v3_streaming_20261110/jose_gen37_narrator_thalita_edge.mp3",
+    "mp3_sha256": "61dc4223d70a132d00901ee151cc2dd3b70d7652a383a52871bf419022401259"
+  },
+  "counts": {
+    "provider_sentence_boundaries": 63,
+    "captions": 63,
+    "semantic_beats": 15,
+    "shot_needs": 45,
+    "asset_requirements_missing": 45,
+    "declared_narrator_words": 698,
+    "whitespace_split_tokens": 698,
+    "local_unicode_internal_hyphen_apostrophe_tokens": 698,
+    "immutable_audio_qa_normalized_tokens": 700
+  },
+  "qa_counts_note": "New metadata records its own counts and retains the old QA declared=698 / normalized=700 distinction without altering old reports."
+}

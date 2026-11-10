@@ -1,0 +1,611 @@
+{
+  "schema": "jose_postproduction_timeline/v1",
+  "status": "OFFLINE_TIMELINE_READY_ASSETS_REQUIRED",
+  "duration_seconds": 283.104,
+  "audio_scope": "Narrator only; closing not generated and excluded.",
+  "audio_bindings": {
+    "approved_source": "audio_candidate_v3_streaming_20261110/narrator_input_exact.txt",
+    "approved_input_sha256": "ca88f3f6f1a7a451482b09ee5324cc52527d1937aaf6db9b31d7cea401f81db4",
+    "sentence_boundary_events": "audio_candidate_v3_streaming_20261110/sentence_boundaries.json",
+    "sentence_boundary_events_sha256": "d817b4ee07099ee57697928753cf48d1f1260b896d97e9fe6f92b771079deff1",
+    "audio_qa": "audio_candidate_v3_streaming_20261110/qa_independent_audio.json",
+    "audio_qa_sha256": "5e5e4f3fbbd31f4fb0c0dc57e1683f57e1c94820ed469308f7742f0b2a061776",
+    "wav": "audio_candidate_v3_streaming_20261110/jose_gen37_narrator_thalita_48khz_mono.wav",
+    "wav_sha256": "73f6de58e7a872489aa449706d80a80b19546fca100111b32d4970ccfe44e879",
+    "mp3": "audio_candidate_v3_streaming_20261110/jose_gen37_narrator_thalita_edge.mp3",
+    "mp3_sha256": "61dc4223d70a132d00901ee151cc2dd3b70d7652a383a52871bf419022401259"
+  },
+  "timing_method": "REAL provider SentenceBoundary offsets/durations for captions; beat boundaries use real following sentence starts so audio is continuously covered, including pauses. ASR is not used to create caption text or uniform/interpolated timing.",
+  "counts": {
+    "provider_sentence_boundaries": 63,
+    "captions": 63,
+    "semantic_beats": 15,
+    "shot_needs": 45,
+    "asset_requirements_missing": 45,
+    "declared_narrator_words": 698,
+    "whitespace_split_tokens": 698,
+    "local_unicode_internal_hyphen_apostrophe_tokens": 698,
+    "immutable_audio_qa_normalized_tokens": 700
+  },
+  "token_reconciliation": {
+    "declared_698": "The approved/preproduction count contract and the code-labeled whitespace_split tokenizer both yield 698.",
+    "local_unicode_698": "The code-labeled local_unicode_internal_hyphen_apostrophe tokenizer also yields 698.",
+    "immutable_qa_700": "The immutable independent audio QA reports 700 under its own Unicode/punctuation normalization. Its exact tokenizer implementation is not copied or inferred here; this is a recorded tokenizer variance, not two missing source words.",
+    "caption_text_source": "All 63 captions use approved source/provider SentenceBoundary text, never ASR spelling."
+  },
+  "asr_limitations": {
+    "qa_verdict": "PASS_BOUNDED",
+    "validated_sentence_end_substitutions": [
+      {
+        "sentence_index": 1,
+        "approved": "Canaã",
+        "asr": "Canaan",
+        "asr_word_end_seconds": 4.56
+      },
+      {
+        "sentence_index": 29,
+        "approved": "Dotã",
+        "asr": "Dothan",
+        "asr_word_end_seconds": 125.98
+      },
+      {
+        "sentence_index": 30,
+        "approved": "Dotã",
+        "asr": "Dothan",
+        "asr_word_end_seconds": 129.42
+      }
+    ],
+    "proper_or_numeric_detection_false_flags": [
+      "Dotã",
+      "ismaelitas",
+      "midianitas",
+      "dezessete",
+      "onze",
+      "vinte"
+    ],
+    "handling": "The three listed substitutions are the only non-EXACT_NORMALIZED sentence-end mappings in immutable QA. ASR false flags and substitutions are non-authoritative for captions and do not mean approved source words are missing. Use local ASR word timestamps only if a later per-word alignment is validated against its evidence."
+  },
+  "beats": [
+    {
+      "id": "B01",
+      "source_verse": "37:2",
+      "meaning": "José aos 17 anos com rebanhos; tensão familiar já existe.",
+      "sentence_range": [
+        1,
+        5
+      ],
+      "start_seconds": 0.0,
+      "end_seconds": 26.602173,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B01-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B01-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B01-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B01-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B01-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B01-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B02",
+      "source_verse": "37:3–4",
+      "meaning": "Israel dá a túnica especial; irmãos ressentidos.",
+      "sentence_range": [
+        6,
+        9
+      ],
+      "start_seconds": 26.602173,
+      "end_seconds": 49.74076,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B02-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B02-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B02-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B02-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B02-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B02-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B03",
+      "source_verse": "37:5–8",
+      "meaning": "Primeiro sonho dos feixes; irmãos se irritam.",
+      "sentence_range": [
+        10,
+        15
+      ],
+      "start_seconds": 49.74076,
+      "end_seconds": 70.923912,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B03-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B03-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B03-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B03-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B03-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B03-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B04",
+      "source_verse": "37:9–11",
+      "meaning": "Segundo sonho; repreensão de Jacó; inveja explicitada.",
+      "sentence_range": [
+        16,
+        20
+      ],
+      "start_seconds": 70.923912,
+      "end_seconds": 91.466303,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B04-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B04-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B04-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B04-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B04-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B04-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B05",
+      "source_verse": "37:12–14",
+      "meaning": "Jacó envia José para buscar notícias perto de Siquém.",
+      "sentence_range": [
+        21,
+        23
+      ],
+      "start_seconds": 91.466303,
+      "end_seconds": 106.140215,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B05-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B05-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B05-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B05-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B05-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B05-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B06",
+      "source_verse": "37:15–17",
+      "meaning": "José procura; homem sem nome aponta Dotã.",
+      "sentence_range": [
+        24,
+        29
+      ],
+      "start_seconds": 106.140215,
+      "end_seconds": 126.330432,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B06-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B06-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B06-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B06-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B06-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B06-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B07",
+      "source_verse": "37:18–20",
+      "meaning": "Irmãos veem José distante e formam plano violento.",
+      "sentence_range": [
+        30,
+        33
+      ],
+      "start_seconds": 126.330432,
+      "end_seconds": 142.689128,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B07-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B07-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B07-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B07-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B07-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B07-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B08",
+      "source_verse": "37:21–22",
+      "meaning": "Rúben impede derramamento de sangue e propõe cisterna.",
+      "sentence_range": [
+        34,
+        38
+      ],
+      "start_seconds": 142.689128,
+      "end_seconds": 165.339671,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B08-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B08-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B08-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B08-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B08-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B08-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B09",
+      "source_verse": "37:23–24",
+      "meaning": "Túnica retirada e José posto em cisterna seca.",
+      "sentence_range": [
+        39,
+        39
+      ],
+      "start_seconds": 165.339671,
+      "end_seconds": 168.817932,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B09-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B09-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B09-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B09-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B09-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B09-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B10",
+      "source_verse": "37:25–28",
+      "meaning": "Caravana; proposta de Judá; venda por vinte moedas; viagem ao Egito.",
+      "sentence_range": [
+        40,
+        44
+      ],
+      "start_seconds": 168.817932,
+      "end_seconds": 187.892931,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B10-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B10-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B10-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B10-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B10-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B10-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B11",
+      "source_verse": "37:29–30",
+      "meaning": "Rúben encontra a cisterna vazia e se desespera.",
+      "sentence_range": [
+        45,
+        46
+      ],
+      "start_seconds": 187.892931,
+      "end_seconds": 202.849996,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B11-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B11-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B11-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B11-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B11-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B11-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B12",
+      "source_verse": "37:31–32",
+      "meaning": "Túnica manchada é enviada ao pai; sem violência gráfica.",
+      "sentence_range": [
+        47,
+        48
+      ],
+      "start_seconds": 202.849996,
+      "end_seconds": 210.773366,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B12-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B12-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B12-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B12-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B12-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B12-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B13",
+      "source_verse": "37:33–35",
+      "meaning": "Jacó reconhece a túnica, lamenta e não aceita consolo.",
+      "sentence_range": [
+        49,
+        54
+      ],
+      "start_seconds": 210.773366,
+      "end_seconds": 237.0913,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B13-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B13-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B13-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B13-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B13-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B13-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B14",
+      "source_verse": "37:36",
+      "meaning": "José chega ao Egito e é vendido a Potifar.",
+      "sentence_range": [
+        55,
+        58
+      ],
+      "start_seconds": 237.0913,
+      "end_seconds": 256.751626,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B14-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B14-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B14-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B14-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B14-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B14-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    },
+    {
+      "id": "B15",
+      "source_verse": "editorial",
+      "meaning": "Aplicação: inveja machuca; pedir ajuda e escolher cuidado.",
+      "sentence_range": [
+        59,
+        63
+      ],
+      "start_seconds": 256.751626,
+      "end_seconds": 283.104,
+      "coverage_rule": "Continuous visual coverage; includes measured pauses until next semantic beat.",
+      "shots": [
+        {
+          "id": "B15-S1",
+          "focus": "establishing/context",
+          "asset_requirement_id": "AR-B15-1",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B15-S2",
+          "focus": "character/action",
+          "asset_requirement_id": "AR-B15-2",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        },
+        {
+          "id": "B15-S3",
+          "focus": "reaction/detail",
+          "asset_requirement_id": "AR-B15-3",
+          "asset_status": "MISSING",
+          "use_rule": "Use only the exact future approved asset hash; an approved asset may be reused in multiple listed shots if its identity, scene whitelist, and crop remain approved."
+        }
+      ]
+    }
+  ],
+  "publication_state": {
+    "content_machine_qa": "PASS_BOUNDED",
+    "license_status": "LICENSE_UNKNOWN",
+    "publication_block": "Separate publication block; does not stop offline timeline construction.",
+    "human_listening": "Not a new routine gate. Naturalness/listening review remains part of final-video approval.",
+    "gates": [
+      "thumbnail approval (separate human gate)",
+      "final video approval including naturalness/listening (separate human gate)",
+      "publication authorization (separate; blocked by license evidence)"
+    ]
+  },
+  "prohibitions": [
+    "No provider calls, spend, production-protected asset reads, Telegram upload, or alteration of original audio/QA files.",
+    "No Lorena timing or audio is inferred.",
+    "No MISSING frame/placeholder is final media."
+  ]
+}
