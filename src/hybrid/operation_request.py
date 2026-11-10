@@ -2,15 +2,21 @@
 
 This module consumes supplied bytes only. It cannot open production paths,
 construct providers, resolve credentials, or create a dispatch capability.
+
+Closed fields are identifiers, hashes, counts, scope, timing, and cross-file
+references. Narrative descriptions remain free-form non-empty strings: their
+text is not treated as an authorization enum.
 """
 from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from itertools import pairwise
+from pathlib import Path
 from typing import Any
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
@@ -80,6 +86,27 @@ def _positive_count(value: object, label: str) -> int:
     if type(value) is not int or value <= 0:
         raise OperationRequestError(f"{label} must be a positive integer")
     return value
+
+
+def _nonempty_string(value: object, label: str) -> str:
+    value = _string(value, label)
+    if not value.strip():
+        raise OperationRequestError(f"{label} must be non-empty")
+    return value
+
+
+def _closed_positive_counts(value: object, keys: set[str], label: str) -> dict[str, int]:
+    value = _closed(value, keys, label)
+    return {key: _positive_count(value[key], f"{label} {key}") for key in keys}
+
+
+def _closed_bindings(value: object, keys: set[str], label: str) -> dict[str, str]:
+    value = _closed(value, keys, label)
+    bindings = {key: _nonempty_string(value[key], f"{label} {key}") for key in keys}
+    for key, item in bindings.items():
+        if key.endswith("_sha256") or key == "approved_input_sha256":
+            _digest(item, f"{label} {key}")
+    return bindings
 
 
 def _digest(value: object, label: str) -> str:
@@ -187,21 +214,26 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
     _closed(parent, {"schema", "source_root", "immutable_source_policy", "outputs", "output_hashes", "source_hashes", "counts", "qa_counts_note"}, "parent_manifest")
     if timeline["schema"] != "jose_postproduction_timeline/v1" or assets["schema"] != "jose_asset_requirements/v1" or parent["schema"] != "jose_postproduction_parent_manifest/v1":
         raise OperationRequestError("canonical schema identifier is invalid")
-    scope = manifest.get("scope")
-    if type(scope) is not dict:
-        raise OperationRequestError("request manifest channel metadata is required")
+    scope = _closed(manifest.get("scope"), {"channel", "locale", "playlist", "title", "passage", "roadmap_episode", "audience"}, "request scope")
+    for field in ("channel", "locale", "playlist", "title", "passage", "audience"):
+        _nonempty_string(scope[field], f"request scope {field}")
+    _positive_count(scope["roadmap_episode"], "request scope roadmap_episode")
     for key, expected in _EXPECTED_SCOPE.items():
-        if scope.get(key) != expected:
+        if scope[key] != expected:
             raise OperationRequestError(f"request manifest {key} metadata is required")
-    output_hashes = parent["output_hashes"]
-    if type(output_hashes) is not dict:
-        raise OperationRequestError("parent manifest output hashes are required")
+    binding_keys = {"approved_source", "approved_input_sha256", "sentence_boundary_events", "sentence_boundary_events_sha256", "audio_qa", "audio_qa_sha256", "wav", "wav_sha256", "mp3", "mp3_sha256"}
+    count_keys = {"provider_sentence_boundaries", "captions", "semantic_beats", "shot_needs", "asset_requirements_missing", "declared_narrator_words", "whitespace_split_tokens", "local_unicode_internal_hyphen_apostrophe_tokens", "immutable_audio_qa_normalized_tokens"}
+    output_keys = {"timeline.json", "subtitles.srt", "subtitles.vtt", "asset_requirements.json"}
+    output_hashes = _closed_bindings(parent["output_hashes"], output_keys, "parent manifest output_hashes")
     for name, raw in (("timeline.json", timeline_bytes), ("asset_requirements.json", asset_requirements_bytes), ("subtitles.srt", subtitles_bytes)):
-        if output_hashes.get(name) != _raw_digest(raw):
+        if output_hashes[name] != _raw_digest(raw):
             raise OperationRequestError(f"{name} hash does not match parent manifest")
-    counts, parent_counts, audio, source_hashes = timeline["counts"], parent["counts"], timeline["audio_bindings"], parent["source_hashes"]
-    if any(type(item) is not dict for item in (counts, parent_counts, audio, source_hashes)):
-        raise OperationRequestError("canonical bundle nested metadata is invalid")
+    counts = _closed_positive_counts(timeline["counts"], count_keys, "timeline counts")
+    parent_counts = _closed_positive_counts(parent["counts"], count_keys, "parent manifest counts")
+    audio = _closed_bindings(timeline["audio_bindings"], binding_keys, "timeline audio_bindings")
+    source_hashes = _closed_bindings(parent["source_hashes"], binding_keys, "parent manifest source_hashes")
+    if source_hashes != audio:
+        raise OperationRequestError("parent manifest source hashes do not match timeline audio bindings")
     captions = _positive_count(counts.get("captions"), "caption count")
     beats_count = _positive_count(counts.get("semantic_beats"), "beat count")
     shots_count = _positive_count(counts.get("shot_needs"), "shot count")
@@ -218,8 +250,15 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
     previous_end: Decimal | None = None
     for beat in beats:
         beat = _closed(beat, {"id", "source_verse", "meaning", "sentence_range", "start_seconds", "end_seconds", "coverage_rule", "shots"}, "timeline beat")
-        beat_id = _string(beat["id"], "beat id")
+        beat_id = _nonempty_string(beat["id"], "beat id")
         beat_ids.append(beat_id)
+        for field in ("source_verse", "meaning", "coverage_rule"):
+            _nonempty_string(beat[field], f"timeline beat {field}")
+        sentence_range = beat["sentence_range"]
+        if (type(sentence_range) is not list or len(sentence_range) != 2
+                or any(type(item) is not int for item in sentence_range)
+                or not 1 <= sentence_range[0] <= sentence_range[1] <= captions):
+            raise OperationRequestError("timeline beat sentence_range is invalid")
         start, end = _decimal(beat["start_seconds"], "beat start"), _decimal(beat["end_seconds"], "beat end")
         if start < 0 or start >= end or end > duration:
             raise OperationRequestError("timeline beat timing is invalid")
@@ -232,8 +271,10 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
             raise OperationRequestError("timeline beat shots are required")
         for shot in beat["shots"]:
             shot = _closed(shot, {"id", "focus", "asset_requirement_id", "asset_status", "use_rule"}, "timeline shot")
-            shot_ids.append(_string(shot["id"], "shot id"))
-            referenced_assets.append(_string(shot["asset_requirement_id"], "asset requirement id"))
+            for field in ("id", "focus", "asset_requirement_id", "asset_status", "use_rule"):
+                _nonempty_string(shot[field], f"timeline shot {field}")
+            shot_ids.append(shot["id"])
+            referenced_assets.append(shot["asset_requirement_id"])
     if previous_end is None or abs(previous_end - duration) > _TIMELINE_TOLERANCE:
         raise OperationRequestError("timeline beats must end at original audio duration")
     _unique(beat_ids, "beat IDs")
@@ -244,9 +285,11 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
     asset_beats: dict[str, str] = {}
     for requirement in requirements:
         requirement = _closed(requirement, {"id", "beat_id", "status", "mandatory_visual_need", "allowed_characters", "safety"}, "asset requirement")
-        identifier = _string(requirement["id"], "asset id")
+        for field in ("id", "beat_id", "status", "mandatory_visual_need", "allowed_characters", "safety"):
+            _nonempty_string(requirement[field], f"asset requirement {field}")
+        identifier = requirement["id"]
         asset_ids.append(identifier)
-        asset_beats[identifier] = _string(requirement["beat_id"], "asset beat id")
+        asset_beats[identifier] = requirement["beat_id"]
     _unique(asset_ids, "asset IDs")
     if len(asset_ids) != shots_count or set(referenced_assets) != set(asset_ids) or len(referenced_assets) != len(asset_ids):
         raise OperationRequestError("shot-to-asset relationship is incomplete or foreign")
@@ -254,8 +297,7 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
         for shot in beat["shots"]:
             if asset_beats[shot["asset_requirement_id"]] != beat["id"]:
                 raise OperationRequestError("shot-to-asset relationship crosses a foreign beat")
-    expected_parent_counts = {"captions": captions, "semantic_beats": beats_count, "shot_needs": shots_count, "asset_requirements_missing": len(asset_ids)}
-    if any(parent_counts.get(key) != value for key, value in expected_parent_counts.items()):
+    if parent_counts != counts or counts["asset_requirements_missing"] != len(asset_ids):
         raise OperationRequestError("parent manifest counts do not match canonical timeline")
     narration_sha = _digest(audio.get("approved_input_sha256"), "timeline narration hash")
     if source_hashes.get("approved_input_sha256") != narration_sha:
@@ -273,3 +315,34 @@ def build_v3_preflight_artifact(*, canonical_bundle: object, base_revision: obje
         raise OperationRequestError("code_revision must be a full lowercase Git SHA")
     request = {"scope": {"channel": canonical_bundle.channel, "playlist": canonical_bundle.playlist, "language": canonical_bundle.language, "title": canonical_bundle.title}, "base_revision": base_revision, "code_revision": code_revision, "editorial_artifact_hashes": canonical_bundle.artifact_hashes(), "editorial_inventory": {"audio_duration_seconds": canonical_bundle.audio_duration_seconds, "caption_cue_count": canonical_bundle.caption_cue_count, "beat_count": canonical_bundle.beat_count, "shot_count": canonical_bundle.shot_count}, "caption_gap_report": canonical_bundle.caption_gap_report, "paid_generation": False, "dispatch_permitted": False}
     return {"schema": "jose-operation-preflight/v3", "request": request, "request_sha256": _raw_digest(_canonical(request)), "parent_manifest_sha256": canonical_bundle.parent_manifest_sha256, "gate": "INDEPENDENT_QA_REQUIRED_NOT_HUMAN_APPROVAL", "status": "PREPRODUCTION_READY", "human_approval": False}
+
+
+def _verified_checkout_revisions(checkout_root: str | Path) -> tuple[str, str]:
+    """Read provenance from Git; byte parsing intentionally has no Git authority."""
+    root = Path(checkout_root)
+    try:
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        base = subprocess.check_output(["git", "merge-base", "HEAD", "origin/master"], cwd=root, text=True).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise OperationRequestError("verified checkout Git revisions are required") from error
+    if not _GIT_SHA.fullmatch(head) or not _GIT_SHA.fullmatch(base):
+        raise OperationRequestError("verified checkout returned invalid Git revisions")
+    return head, base
+
+
+def generate_v4_preflight_artifact(*, canonical_bundle: object, checkout_root: str | Path) -> dict[str, object]:
+    """Create the durable non-authorizing preflight from a verified checkout."""
+    code_revision, base_revision = _verified_checkout_revisions(checkout_root)
+    v3 = build_v3_preflight_artifact(
+        canonical_bundle=canonical_bundle,
+        base_revision=base_revision,
+        code_revision=code_revision,
+    )
+    return {
+        **v3,
+        "schema": "jose-operation-preflight/v4",
+        "supersedes": {
+            "schema": "jose-operation-preflight/v3",
+            "reason": "v3 accepted caller-supplied revision strings; v4 captures Git HEAD and merge-base origin/master from the verified checkout.",
+        },
+    }
