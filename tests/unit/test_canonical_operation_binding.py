@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -180,6 +181,61 @@ def test_windows_junction_source_is_rejected_before_target_bytes_are_read(tmp_pa
 
     with pytest.raises(PermissionError, match="reparse|unavailable"):
         verify_canonical_operation_binding(redirected, transcript_path=redirected.transcript_path)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native junction race is Windows-only")
+def test_windows_pinned_snapshot_never_reads_through_racing_junction(tmp_path):
+    from src.hybrid.canonical_operation_binding import (
+        CanonicalOperationBindingError,
+        _stable_bytes,
+    )
+
+    production = Path("C:/HermesStudio/production").resolve(strict=False)
+    assert production != tmp_path.resolve()
+    assert production not in tmp_path.resolve().parents
+    safe = tmp_path / "safe"
+    foreign = tmp_path / "foreign"
+    safe.mkdir()
+    foreign.mkdir()
+    (safe / "capability").write_bytes(b"approved-fixture")
+    (foreign / "capability").write_bytes(b"forged-fixture")
+    junction = tmp_path / "racing-junction"
+
+    def make_junction(target: Path) -> bool:
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+            check=False,
+            capture_output=True,
+        )
+        return completed.returncode == 0
+
+    if not make_junction(safe):
+        pytest.skip("mklink /J unavailable")
+
+    stopped = threading.Event()
+
+    def swap_targets() -> None:
+        try:
+            for index in range(16):
+                try:
+                    os.rmdir(junction)
+                except OSError:
+                    continue
+                make_junction(foreign if index % 2 else safe)
+        finally:
+            stopped.set()
+
+    racer = threading.Thread(target=swap_targets)
+    racer.start()
+    observed = []
+    while not stopped.is_set():
+        try:
+            observed.append(_stable_bytes(junction / "capability", "racing fixture"))
+        except CanonicalOperationBindingError:
+            pass
+    racer.join(timeout=5)
+    assert not racer.is_alive()
+    assert observed == []
 
 
 @pytest.mark.parametrize("database_name", ["canonical-state.sqlite3", "ledger.sqlite3"])

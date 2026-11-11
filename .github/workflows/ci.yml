@@ -176,4 +176,6 @@ jobs:
             echo "- Python project detected: \`${{ steps.project.outputs.python_project }}\`"
             echo "- Unit tests detected: \`${{ steps.project.outputs.unit_tests }}\`"
             echo "- Ruff changed-Python lint is required (ruff==0.17.3)."
+            echo "- Paired private Hermes PR6 coverage is not claimed by public Studio CI."
+            echo "- The paired check must be run manually/private-side with \`HERMES_PAIRED_ROOT\`; see \`docs/paired-hermes-pr6-check.md\`."
           } >> "$GITHUB_STEP_SUMMARY"

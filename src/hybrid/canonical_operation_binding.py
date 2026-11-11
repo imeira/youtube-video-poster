@@ -27,6 +27,168 @@ class CanonicalOperationBindingError(PermissionError):
     """A fixed canonical source did not prove the requested operation binding."""
 
 
+_WINDOWS_FILE_ALL_ACCESS = 0x1F01FF
+_WINDOWS_SYSTEM_SID = "S-1-5-18"
+_WINDOWS_ADMINS_SID = "S-1-5-32-544"
+
+
+def _windows_validate_protected_dacl_snapshot(
+    snapshot: dict[str, object], expected_process_sid: str, label: str
+) -> None:
+    """Require the publisher's protected DACL, bound to this process token."""
+    expected_aces = (
+        (expected_process_sid, _WINDOWS_FILE_ALL_ACCESS, False),
+        (_WINDOWS_SYSTEM_SID, _WINDOWS_FILE_ALL_ACCESS, False),
+        (_WINDOWS_ADMINS_SID, _WINDOWS_FILE_ALL_ACCESS, False),
+    )
+    if (
+        snapshot.get("owner_sid") != expected_process_sid
+        or snapshot.get("dacl_protected") is not True
+        or snapshot.get("aces") != expected_aces
+    ):
+        raise CanonicalOperationBindingError(f"{label} protected DACL is invalid")
+
+
+def _windows_current_process_sid() -> str:
+    """Derive the reader identity from its current Win32 process token."""
+    if sys.platform != "win32":
+        raise CanonicalOperationBindingError("Windows token SID is unavailable")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    open_process_token = advapi32.OpenProcessToken
+    open_process_token.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)
+    ]
+    open_process_token.restype = ctypes.c_int
+    get_token_information = advapi32.GetTokenInformation
+    get_token_information.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    get_token_information.restype = ctypes.c_int
+    convert_sid = advapi32.ConvertSidToStringSidW
+    convert_sid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    convert_sid.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+    current_process = kernel32.GetCurrentProcess
+    current_process.restype = ctypes.c_void_p
+
+    token = ctypes.c_void_p()
+    if not open_process_token(current_process(), 0x0008, ctypes.byref(token)):
+        raise CanonicalOperationBindingError("Windows process token is unavailable")
+    try:
+        needed = ctypes.c_uint32()
+        get_token_information(token, 1, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            raise CanonicalOperationBindingError("Windows process token is unavailable")
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not get_token_information(
+            token, 1, buffer, needed.value, ctypes.byref(needed)
+        ):
+            raise CanonicalOperationBindingError("Windows process token is unavailable")
+        sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        text = ctypes.c_wchar_p()
+        if not convert_sid(sid, ctypes.byref(text)) or not text.value:
+            raise CanonicalOperationBindingError("Windows process SID is unavailable")
+        try:
+            return text.value
+        finally:
+            local_free(text)
+    finally:
+        close_handle(token)
+
+
+def _windows_security_snapshot_from_handle(handle: int, label: str) -> dict[str, object]:
+    """Read owner and every ACE from the same native handle used for bytes."""
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_security_info = advapi32.GetSecurityInfo
+    get_security_info.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_security_info.restype = ctypes.c_uint32
+    get_control = advapi32.GetSecurityDescriptorControl
+    get_control.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_ushort), ctypes.POINTER(ctypes.c_uint32)
+    ]
+    get_control.restype = ctypes.c_int
+    convert_sid = advapi32.ConvertSidToStringSidW
+    convert_sid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    convert_sid.restype = ctypes.c_int
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    def sid_text(sid: ctypes.c_void_p) -> str:
+        text = ctypes.c_wchar_p()
+        if not convert_sid(sid, ctypes.byref(text)) or not text.value:
+            raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+        try:
+            return text.value
+        finally:
+            local_free(text)
+
+    owner, dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    result = get_security_info(
+        handle, 1, 0x00000001 | 0x00000004,
+        ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
+    )
+    if result or not owner.value or not dacl.value or not descriptor.value:
+        if descriptor.value:
+            local_free(descriptor)
+        raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+    try:
+        control, revision = ctypes.c_ushort(), ctypes.c_uint32()
+        if not get_control(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+            raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+        header = ctypes.string_at(dacl, 8)
+        acl_size = int.from_bytes(header[2:4], "little")
+        ace_count = int.from_bytes(header[4:6], "little")
+        if acl_size < 8:
+            raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+        offset, aces = 8, []
+        for _ in range(ace_count):
+            if offset + 12 > acl_size:
+                raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+            ace = ctypes.string_at(dacl.value + offset, 12)
+            ace_type, ace_flags = ace[0], ace[1]
+            ace_size = int.from_bytes(ace[2:4], "little")
+            if ace_type != 0 or ace_size < 12 or offset + ace_size > acl_size:
+                raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+            aces.append(
+                (
+                    sid_text(ctypes.c_void_p(dacl.value + offset + 8)),
+                    int.from_bytes(ace[4:8], "little"),
+                    bool(ace_flags & 0x10),
+                )
+            )
+            offset += ace_size
+        if offset != acl_size:
+            raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+        return {
+            "owner_sid": sid_text(owner),
+            "dacl_protected": bool(control.value & 0x1000),
+            "aces": tuple(aces),
+        }
+    finally:
+        local_free(descriptor)
+
+
 @dataclass(frozen=True)
 class CanonicalOperationBinding:
     """Repository-selected paths and pins for one literal operation ID."""
@@ -120,7 +282,7 @@ def _require_no_sqlite_sidecars(path: Path, label: str) -> None:
         raise CanonicalOperationBindingError(f"{label} WAL/SHM sidecar is present")
 
 
-def _stable_bytes_posix(path: Path, label: str) -> bytes:
+def _stable_bytes_posix(path: Path, label: str, *, protected: bool = False) -> bytes:
     """Open an absolute path as a pinned dirfd chain; never resolve a final string."""
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise CanonicalOperationBindingError(f"{label} unsupported platform boundary")
@@ -138,8 +300,16 @@ def _stable_bytes_posix(path: Path, label: str) -> bytes:
             descriptors.append(current)
         final = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
         descriptors.append(final)
-        if not stat.S_ISREG(os.fstat(final).st_mode):
+        information = os.fstat(final)
+        if not stat.S_ISREG(information.st_mode):
             raise CanonicalOperationBindingError(f"{label} is not a regular file")
+        if protected and (
+            information.st_uid != os.getuid()
+            or stat.S_IMODE(information.st_mode) & 0o077
+        ):
+            raise CanonicalOperationBindingError(
+                f"{label} is not an owner-only protected file"
+            )
         chunks: list[bytes] = []
         while chunk := os.read(final, 1024 * 1024):
             chunks.append(chunk)
@@ -151,13 +321,20 @@ def _stable_bytes_posix(path: Path, label: str) -> bytes:
             os.close(descriptor)
 
 
-def _stable_bytes_windows(path: Path, label: str) -> bytes:
+def _stable_bytes_windows(
+    path: Path, label: str, *, protected: bool = False,
+    share_delete_with_pinned_publisher: bool = False,
+) -> bytes:
     """Pin every ancestor HANDLE with no delete sharing before reading the file.
 
     FILE_FLAG_OPEN_REPARSE_POINT applies only to each object opened, not to its
     ancestors.  Opening and retaining every directory handle (without
     FILE_SHARE_DELETE) prevents a junction swap between validation and the
-    final file handle.  All validation and reads are through Win32 HANDLEs;
+    final file handle.  The sole exception is an Hermes IPC capability whose
+    publisher holds the root open without FILE_SHARE_DELETE for the complete
+    export lifetime: that reader shares DELETE so it can coexist with the
+    publisher's DELETE-access pin while the publisher remains the rename guard.
+    All validation and reads are through Win32 HANDLEs;
     ``os.open`` is deliberately never used on Windows.
     """
     if sys.platform != "win32":
@@ -175,11 +352,25 @@ def _stable_bytes_windows(path: Path, label: str) -> bytes:
     read_file = kernel32.ReadFile
     read_file.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p]
     read_file.restype = ctypes.c_int
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32
+    ]
+    get_final_path.restype = ctypes.c_uint32
     invalid = ctypes.c_void_p(-1).value
     generic_read, file_list_directory = 0x80000000, 0x0001
-    share_read_write = 0x00000001 | 0x00000002  # deliberately excludes DELETE
+    share_read_write = 0x00000001 | 0x00000002
+    share_mode = share_read_write | (0x00000004 if share_delete_with_pinned_publisher else 0)
     open_existing, reparse, backup_semantics = 3, 0x00200000, 0x02000000
     reparse_attribute, directory_attribute = 0x0400, 0x0010
+
+    def verify_protected_dacl(handle: int) -> None:
+        """Bind the same read handle to the intrinsic reader-token identity."""
+        expected_process_sid = _windows_current_process_sid()
+        snapshot = _windows_security_snapshot_from_handle(handle, label)
+        _windows_validate_protected_dacl_snapshot(
+            snapshot, expected_process_sid, label
+        )
 
     class FileInformation(ctypes.Structure):
         _fields_ = [
@@ -198,35 +389,116 @@ def _stable_bytes_windows(path: Path, label: str) -> bytes:
             raise CanonicalOperationBindingError(f"{label} handle inspection failed")
         return information
 
+    def normalized_handle_path(handle: int) -> str:
+        size = get_final_path(handle, None, 0, 0)
+        if not size:
+            raise CanonicalOperationBindingError(
+                f"{label} final handle path inspection failed"
+            )
+        buffer = ctypes.create_unicode_buffer(size + 1)
+        written = get_final_path(handle, buffer, len(buffer), 0)
+        if not written or written >= len(buffer):
+            raise CanonicalOperationBindingError(
+                f"{label} final handle path inspection failed"
+            )
+        value = buffer.value
+        if value.startswith("\\\\?\\UNC\\"):
+            return ("\\\\" + value[8:]).rstrip("\\").casefold()
+        value = value.removeprefix("\\\\?\\")
+        return value.rstrip("\\").casefold()
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("length", ctypes.c_ushort),
+            ("maximum_length", ctypes.c_ushort),
+            ("buffer", ctypes.c_wchar_p),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", ctypes.c_ulong),
+            ("root_directory", ctypes.c_void_p),
+            ("object_name", ctypes.POINTER(UnicodeString)),
+            ("attributes", ctypes.c_ulong),
+            ("security_descriptor", ctypes.c_void_p),
+            ("security_quality_of_service", ctypes.c_void_p),
+        ]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_long), ("information", ctypes.c_void_p)]
+
+    nt_create_file = ctypes.WinDLL("ntdll", use_last_error=True).NtCreateFile
+    nt_create_file.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint32,
+        ctypes.POINTER(ObjectAttributes), ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+    ]
+    nt_create_file.restype = ctypes.c_long
+
+    def open_child(parent: int, name: str, *, directory: bool) -> int:
+        """Open one literal child relative to the already pinned parent HANDLE."""
+        name_buffer = ctypes.create_unicode_buffer(name)
+        unicode_name = UnicodeString(
+            len(name.encode("utf-16-le")),
+            (len(name) + 1) * 2,
+            ctypes.cast(name_buffer, ctypes.c_wchar_p),
+        )
+        attributes = ObjectAttributes(
+            ctypes.sizeof(ObjectAttributes), parent, ctypes.pointer(unicode_name),
+            0x40, None, None,  # OBJ_CASE_INSENSITIVE
+        )
+        handle, status = ctypes.c_void_p(), IoStatusBlock()
+        options = 0x20 | reparse | (0x1 if directory else 0x40)
+        result = nt_create_file(
+            ctypes.byref(handle),
+            ((file_list_directory | 0x80) if directory else generic_read) | 0x00100000,
+            ctypes.byref(attributes), ctypes.byref(status), None, 0, share_mode,
+            1, options, None, 0,
+        )
+        if result < 0 or handle.value == invalid:
+            raise CanonicalOperationBindingError(
+                f"{label} child handle is unavailable ({result:#x})"
+            )
+        return handle.value
+
     absolute = path.absolute()
     if not absolute.is_absolute() or not absolute.name:
         raise CanonicalOperationBindingError(f"{label} is unavailable")
-    ancestors = [Path(absolute.anchor)]
-    cursor = Path(absolute.anchor)
-    for part in absolute.parent.relative_to(absolute.anchor).parts:
-        cursor /= part
-        ancestors.append(cursor)
     handles: list[int] = []
     try:
-        for ancestor in ancestors:
-            handle = create_file(str(ancestor), file_list_directory, share_read_write, None, open_existing, reparse | backup_semantics, None)
-            if handle == invalid:
-                raise CanonicalOperationBindingError(f"{label} ancestor handle is unavailable")
+        # A volume root has no mutable parent.  Every mutable component is
+        # subsequently opened relative to this retained HANDLE, never by a
+        # re-resolved absolute string that a post-publisher junction can steer.
+        handle = create_file(
+            str(Path(absolute.anchor)), file_list_directory, share_mode, None,
+            open_existing, reparse | backup_semantics, None,
+        )
+        if handle == invalid:
+            raise CanonicalOperationBindingError(f"{label} ancestor handle is unavailable")
+        handles.append(handle)
+        information = handle_information(handle)
+        if information.attributes & reparse_attribute:
+            raise CanonicalOperationBindingError(f"{label} traverses a reparse point")
+        for part in absolute.parent.relative_to(absolute.anchor).parts:
+            handle = open_child(handles[-1], part, directory=True)
             handles.append(handle)
             information = handle_information(handle)
             if information.attributes & reparse_attribute:
                 raise CanonicalOperationBindingError(f"{label} traverses a reparse point")
-        file_handle = create_file(str(absolute), generic_read, share_read_write, None, open_existing, reparse, None)
-        if file_handle == invalid:
-            raise CanonicalOperationBindingError(f"{label} is unavailable")
+        file_handle = open_child(handles[-1], absolute.name, directory=False)
         handles.append(file_handle)
         information = handle_information(file_handle)
         file_id = (information.volume_serial, information.file_index_high, information.file_index_low)
         if (
             information.attributes & (reparse_attribute | directory_attribute)
             or file_id == (0, 0, 0)
+            or normalized_handle_path(file_handle)
+            != str(absolute).rstrip("\\").casefold()
         ):
             raise CanonicalOperationBindingError(f"{label} is not a regular non-reparse file")
+        if protected:
+            verify_protected_dacl(file_handle)
         chunks: list[bytes] = []
         while True:
             buffer = ctypes.create_string_buffer(1024 * 1024)
@@ -242,12 +514,18 @@ def _stable_bytes_windows(path: Path, label: str) -> bytes:
             close_handle(handle)
 
 
-def _stable_bytes(path: Path, label: str) -> bytes:
+def _stable_bytes(
+    path: Path, label: str, *, protected: bool = False,
+    share_delete_with_pinned_publisher: bool = False,
+) -> bytes:
     """Read only via a platform-native no-follow/pinned boundary."""
     if sys.platform == "win32":
-        return _stable_bytes_windows(path, label)
+        return _stable_bytes_windows(
+            path, label, protected=protected,
+            share_delete_with_pinned_publisher=share_delete_with_pinned_publisher,
+        )
     if os.name == "posix":
-        return _stable_bytes_posix(path, label)
+        return _stable_bytes_posix(path, label, protected=protected)
     raise CanonicalOperationBindingError(f"{label} unsupported platform boundary")
 
 
