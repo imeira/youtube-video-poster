@@ -186,6 +186,7 @@ def test_windows_reader_never_opens_junction_target_after_publisher_exit(tmp_pat
     """A pinned parent must make the final capability open relative to that handle."""
     import ctypes
     import subprocess
+
     import src.hybrid.canonical_operation_binding as binding
 
     root, moved, target = tmp_path / "publisher", tmp_path / "moved", tmp_path / "target"
