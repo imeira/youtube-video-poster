@@ -154,7 +154,7 @@ async def test_hero_manifest_replaces_provider_error_before_persistence(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_live_hero_requires_exact_authorization_and_reserves_once_before_post(tmp_path):
+async def test_live_hero_direct_executor_rejects_caller_authorization_before_post(tmp_path):
     _, stills = _manifest(tmp_path)
     live_still = FrozenAsset.approve(stills[0].path, "human", "LIVE")
     sheet = tmp_path / "live-sheet.png"
@@ -172,29 +172,16 @@ async def test_live_hero_requires_exact_authorization_and_reserves_once_before_p
                 {job.request_id: Price(job.endpoint, job.request_id, Decimal("0.25"), 4_000_000_000, "current-price")})
 
     baseline = Job("S001", "first", "LIVE", "runpod-live", {"input": "approved still"}, live_manifest, Decimal("0.25"))
-    baseline_auth = Authorization(baseline.request_id, "human", 4_000_000_000, Decimal("0.25"))
-    baseline_price = Price(baseline.endpoint, baseline.request_id, Decimal("0.25"), 4_000_000_000, "current-price")
-    baseline_receipt = await executor.run(baseline, provider, baseline_auth, baseline_price)
-    executor.qa(
-        baseline.request_id,
-        baseline_receipt["result_sha256"],
-        True,
-        "independent-qa",
-        reviewer_identity={"subject": "independent-qa", "issuer": "TEST"},
-    )
-
     h = RevisionHarness(tmp_path / "revision")
     target = tmp_path / "hero-manifest.json"
     scene = {"scene_id": "S001", "importance": "HIGH", "duration": 5, "motion_intent": "slow pan"}
-    await h.execute_heroes(_live_plan(), "approved-plan", live_manifest, {"S001": live_still}, [scene], provider,
-                            target, executor=executor, authorize=authorize,
-                            predecessors={"S001": baseline.request_id})
-    await h.execute_heroes(_live_plan(), "approved-plan", live_manifest, {"S001": live_still}, [scene], provider,
-                            target, executor=executor, authorize=authorize,
-                            predecessors={"S001": baseline.request_id})
-    assert provider.posts == 2  # one baseline and one authorized hero POST
+    with pytest.raises(PermissionError, match="direct Executor LIVE"):
+        await h.execute_heroes(_live_plan(), "approved-plan", live_manifest, {"S001": live_still}, [scene], provider,
+                               target, executor=executor, authorize=authorize,
+                               predecessors={"S001": baseline.request_id})
+    assert provider.posts == 0
     assert len(calls) == 1
-    assert executor.inspect(calls[0][0].request_id)["charged"] == "0.25"
+    assert executor.inspect(calls[0][0].request_id) is None
 
 
 @pytest.mark.asyncio

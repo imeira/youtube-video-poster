@@ -647,20 +647,17 @@ def test_live_preflight_price_and_budget_fail_closed(tmp_path, failure):
         error = {
             "preflight": "preflight incomplete",
             "contract": "approved deployment contract",
-            "price": "fresh live price",
-            "budget": "budget reservation",
-            "visual": "lost visual QA",
+            # These fixture routes construct a bare Executor directly.  The
+            # hardened boundary rejects that caller evidence before any price,
+            # reservation, provider, or visual-QA effect.
+            "price": "direct Executor LIVE",
+            "budget": "direct Executor LIVE",
+            "visual": "direct Executor LIVE",
         }[failure]
         with pytest.raises((ValueError, PermissionError, RuntimeError), match=error):
             asyncio.run(h.run())
-        if failure == "visual":
-            calls = (deps.image_calls, deps.review_calls)
-            with pytest.raises(ValueError, match="ambiguous LIVE visual QA"):
-                asyncio.run(h.run())
-            assert (deps.image_calls, deps.review_calls) == calls
-            assert deps.image_calls > 0 and deps.review_calls > 0
-        else:
-            assert deps.image_calls == 0
+        assert deps.image_calls == 0
+        assert deps.review_calls == 0
         if failure in {"preflight", "contract"}:
             assert deps.script_calls == 0
         assert not list((tmp_path / "run").rglob("*.mp4"))

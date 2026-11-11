@@ -231,6 +231,68 @@ def test_real_hermes_ipc_two_fresh_studio_processes_recover_without_resubmit(tmp
         assert database.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
 
 
+def _lifecycle_worker(fixture, effects: Path, output: Path, behavior: str, release: Path):
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "tests.integration.trusted_issuer_process",
+            str(fixture["root"]),
+            fixture["export"].endpoint_file,
+            fixture["export"].capability_file,
+            str(effects),
+            str(output),
+            str(int(NOW.timestamp())),
+            "--behavior",
+            behavior,
+            "--release",
+            str(release),
+        ],
+        cwd=Path.cwd(),
+    )
+
+
+def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
+    tmp_path,
+):
+    fixture = asyncio.run(_cross_repo_fixture(tmp_path))
+    effects, output, release = (
+        tmp_path / "effects.log",
+        tmp_path / "provider-output.bin",
+        tmp_path / "release",
+    )
+    try:
+        first = _lifecycle_worker(fixture, effects, output, "timeout", release)
+        second = _lifecycle_worker(fixture, effects, output, "timeout", release)
+        release.write_text("go", encoding="ascii")
+        codes = [first.wait(timeout=30), second.wait(timeout=30)]
+    finally:
+        fixture["export"].close()
+    events = effects.read_text(encoding="ascii").splitlines()
+    assert sorted(codes) == [0, 75]
+    assert events.count("POST") == 1
+    assert events.count("GET") == 1
+
+
+def test_real_hermes_ipc_cancelled_submit_recovers_without_resend(tmp_path):
+    fixture = asyncio.run(_cross_repo_fixture(tmp_path))
+    effects, output, release = (
+        tmp_path / "effects.log",
+        tmp_path / "provider-output.bin",
+        tmp_path / "release",
+    )
+    try:
+        cancelled = _lifecycle_worker(fixture, effects, output, "cancel", release)
+        release.write_text("go", encoding="ascii")
+        assert cancelled.wait(timeout=30) == 76
+        restart = _lifecycle_worker(fixture, effects, output, "recover", release)
+        assert restart.wait(timeout=30) == 0
+    finally:
+        fixture["export"].close()
+    assert effects.read_text(encoding="ascii").splitlines() == ["POST", "CANCEL", "GET"]
+    assert output.read_bytes() == b"recovered fixture image"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attack", ["revoked", "wrong_chat", "tampered", "quote", "license"])
 async def test_violations_have_zero_provider_effects(tmp_path, attack):
