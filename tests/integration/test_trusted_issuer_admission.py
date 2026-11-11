@@ -233,11 +233,14 @@ def test_real_hermes_ipc_two_fresh_studio_processes_recover_without_resubmit(tmp
 
 
 def _wait_for_ack(
-    path: Path, acknowledgement: str, *workers: subprocess.Popen[str], timeout: float = 20,
+    directory: Path, acknowledgement: str, *workers: subprocess.Popen[str], timeout: float = 20,
 ) -> None:
+    acknowledgement_path = directory / acknowledgement
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if path.exists() and acknowledgement in path.read_text(encoding="ascii").splitlines():
+        if directory.is_dir() and acknowledgement_path.exists():
+            return
+        if directory.is_file() and acknowledgement in directory.read_text(encoding="ascii").splitlines():
             return
         for worker in workers:
             if worker.poll() is not None:
@@ -247,7 +250,11 @@ def _wait_for_ack(
                     f"stdout={stdout!r}; stderr={stderr!r}"
                 )
         time.sleep(0.01)
-    raise AssertionError(f"timed out waiting for {acknowledgement}")
+    states = {
+        worker.pid: {"returncode": worker.poll()}
+        for worker in workers
+    }
+    raise AssertionError(f"timed out waiting for {acknowledgement}; workers={states}")
 
 
 def _checkpoint_rows(root: Path):
@@ -262,8 +269,7 @@ def _checkpoint_rows(root: Path):
 def _lifecycle_worker(
     fixture, effects: Path, output: Path, behavior: str, *, control: Path | None = None,
     ready: Path | None = None, launch: Path | None = None, start: Path | None = None,
-    role: str | None = None,
-    first_dispatched: Path | None = None, provider_release: Path | None = None,
+    role: str | None = None, provider_release: Path | None = None,
 ):
     command = [
         sys.executable,
@@ -280,8 +286,7 @@ def _lifecycle_worker(
     ]
     for flag, value in (
         ("--control", control), ("--ready", ready), ("--launch", launch), ("--start", start),
-        ("--role", role), ("--first-dispatched", first_dispatched),
-        ("--provider-release", provider_release),
+        ("--role", role), ("--provider-release", provider_release),
     ):
         if value is not None:
             command.extend((flag, str(value)))
@@ -302,11 +307,12 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
         tmp_path / "effects.log",
         tmp_path / "provider-output.bin",
         tmp_path / "control.log",
-        tmp_path / "ready.log",
+        tmp_path / "ready",
         tmp_path / "launch",
         tmp_path / "start",
         tmp_path / "provider-release",
     )
+    ready.mkdir()
     try:
         first = _lifecycle_worker(
             fixture, effects, output, "timeout", control=control, ready=ready,
@@ -314,7 +320,7 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
         )
         second = _lifecycle_worker(
             fixture, effects, output, "timeout", control=control, ready=ready,
-            launch=launch, start=start, role="second", first_dispatched=control,
+            launch=launch, start=start, role="second",
         )
         _wait_for_ack(ready, "LAUNCHED:first", first, second, timeout=60)
         _wait_for_ack(ready, "LAUNCHED:second", first, second, timeout=60)
@@ -322,8 +328,9 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
         _wait_for_ack(ready, "READY:first", first, second)
         _wait_for_ack(ready, "READY:second", first, second)
         start.write_text("go", encoding="ascii")
-        _wait_for_ack(control, "DISPATCHED", first, second)
+        _wait_for_ack(ready, "ATTEMPT:first", first, second)
         _wait_for_ack(ready, "ATTEMPT:second", first, second)
+        _wait_for_ack(control, "DISPATCHED", first, second)
         assert effects.read_text(encoding="ascii").splitlines() == ["POST"]
         provider_release.write_text("go", encoding="ascii")
         codes = [first.wait(timeout=30), second.wait(timeout=30)]
@@ -341,11 +348,12 @@ def test_real_hermes_ipc_cancelled_submit_recovers_without_resend(tmp_path):
         tmp_path / "effects.log",
         tmp_path / "provider-output.bin",
         tmp_path / "control.log",
-        tmp_path / "ready.log",
+        tmp_path / "ready",
         tmp_path / "launch",
         tmp_path / "start",
         tmp_path / "cancel-release",
     )
+    ready.mkdir()
     try:
         cancelled = _lifecycle_worker(
             fixture, effects, output, "cancel", control=control, ready=ready,

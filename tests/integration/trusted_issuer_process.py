@@ -57,6 +57,19 @@ def _append(path: Path, value: str) -> None:
         os.fsync(stream.fileno())
 
 
+def _signal_ready(directory: Path, value: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    acknowledgement = directory / value
+    try:
+        descriptor = os.open(acknowledgement, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise RuntimeError(f"duplicate readiness acknowledgement: {value}") from exc
+    with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+        stream.write(value + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def _wait_for(path: Path, message: str) -> None:
     deadline = time.monotonic() + 20
     while not path.exists():
@@ -79,13 +92,12 @@ def main() -> int:
     parser.add_argument("--launch", type=Path)
     parser.add_argument("--start", type=Path)
     parser.add_argument("--role", choices=("first", "second"))
-    parser.add_argument("--first-dispatched", type=Path)
     parser.add_argument("--provider-release", type=Path)
     args = parser.parse_args()
     if args.ready is not None:
         if args.launch is None or args.start is None or args.role is None:
             raise ValueError("ready rendezvous requires launch, start and role")
-        _append(args.ready, "LAUNCHED:" + args.role)
+        _signal_ready(args.ready, "LAUNCHED:" + args.role)
         _wait_for(args.launch, "parent did not release worker initialization")
     from src.hybrid.hermes_issuer_client import HermesIssuerClient
     from src.hybrid.trusted_issuer_admission import JoseTrustedIssuerAdmission
@@ -103,13 +115,9 @@ def main() -> int:
         now=lambda: args.now,
     )
     if args.ready is not None:
-        _append(args.ready, "READY:" + args.role)
+        _signal_ready(args.ready, "READY:" + args.role)
         _wait_for(args.start, "parent did not release synchronized workers")
-        if args.role == "second":
-            if args.first_dispatched is None:
-                raise ValueError("second worker requires first dispatch acknowledgement")
-            _wait_for(args.first_dispatched, "first worker did not reach provider")
-        _append(args.ready, "ATTEMPT:" + args.role)
+        _signal_ready(args.ready, "ATTEMPT:" + args.role)
     try:
         result = asyncio.run(admission.admit("JOSE_GEN37_IDENTITY_FRAME_001"))
     except asyncio.CancelledError:
