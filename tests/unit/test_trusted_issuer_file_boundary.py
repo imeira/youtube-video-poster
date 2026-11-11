@@ -179,3 +179,100 @@ def test_windows_ordinary_replacement_is_not_a_protected_capability_after_publis
     assert _windows_current_process_sid().startswith("S-")
     with pytest.raises(CanonicalOperationBindingError, match="protected DACL"):
         _stable_bytes(replacement, "Hermes replacement capability", protected=True)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows native handle boundary")
+def test_windows_reader_never_opens_junction_target_after_publisher_exit(tmp_path, monkeypatch):
+    """A pinned parent must make the final capability open relative to that handle."""
+    import ctypes
+    import subprocess
+    import src.hybrid.canonical_operation_binding as binding
+
+    root, moved, target = tmp_path / "publisher", tmp_path / "moved", tmp_path / "target"
+    root.mkdir()
+    target.mkdir()
+    capability, attacker_capability = root / "capability", target / "capability"
+    capability.write_bytes(b"publisher-capability")
+    attacker_capability.write_bytes(b"attacker-capability")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    original_create, original_read = kernel32.CreateFileW, kernel32.ReadFile
+    original_information = kernel32.GetFileInformationByHandle
+    original_information.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    original_information.restype = ctypes.c_int
+    original_final = kernel32.GetFinalPathNameByHandleW
+    original_final.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    original_final.restype = ctypes.c_uint32
+    invalid = ctypes.c_void_p(-1).value
+    counters = {"target_opens": 0, "target_reads": 0}
+    target_handles: set[int] = set()
+    swapped = False
+    inspected_paths = []
+
+    def final_path(handle):
+        size = original_final(handle, None, 0, 0)
+        buffer = ctypes.create_unicode_buffer(size + 1)
+        assert original_final(handle, buffer, len(buffer), 0)
+        return buffer.value.removeprefix("\\\\?\\").casefold()
+
+    def counted_create(path, *args):
+        handle = original_create(path, *args)
+        if handle != invalid and final_path(handle).startswith(str(target).casefold()):
+            counters["target_opens"] += 1
+            target_handles.add(handle)
+        return handle
+
+    def counted_read(handle, *args):
+        if handle in target_handles:
+            counters["target_reads"] += 1
+        return original_read(handle, *args)
+
+    def swap_after_pinning(handle, info):
+        nonlocal swapped
+        result = original_information(handle, info)
+        observed_path = final_path(handle)
+        inspected_paths.append(observed_path)
+        if not swapped and result and observed_path.rstrip("\\").endswith("\\publisher"):
+            assert kernel32.MoveFileExW(str(root), str(moved), 0)
+            linked = subprocess.run(
+                ["cmd.exe", "/c", "mklink", "/J", str(root), str(target)],
+                check=False,
+                capture_output=True,
+            )
+            assert linked.returncode == 0, linked.stderr.decode(errors="replace")
+            swapped = True
+        return result
+
+    class KernelProxy:
+        pass
+
+    proxy = KernelProxy()
+    for name in ("CloseHandle", "GetFinalPathNameByHandleW"):
+        setattr(proxy, name, getattr(kernel32, name))
+    proxy.CreateFileW = counted_create
+    proxy.ReadFile = counted_read
+    proxy.GetFileInformationByHandle = swap_after_pinning
+    original_windll = binding.ctypes.WinDLL
+    monkeypatch.setattr(
+        binding.ctypes,
+        "WinDLL",
+        lambda name, **kwargs: proxy if name.lower() == "kernel32" else original_windll(name, **kwargs),
+    )
+
+    with pytest.raises(binding.CanonicalOperationBindingError) as error:
+        binding._stable_bytes(
+            capability,
+            "post-exit capability",
+            share_delete_with_pinned_publisher=True,
+        )
+    assert swapped, (str(error.value), inspected_paths)
+    assert counters == {"target_opens": 0, "target_reads": 0}
+
+    # Positive control: the counters observe a real target handle and ReadFile.
+    handle = proxy.CreateFileW(str(attacker_capability), 0x80000000, 0x3, None, 3, 0, None)
+    try:
+        buffer, count = ctypes.create_string_buffer(64), ctypes.c_uint32()
+        assert proxy.ReadFile(handle, buffer, len(buffer), ctypes.byref(count), None)
+        assert count.value == len(b"attacker-capability")
+    finally:
+        kernel32.CloseHandle(handle)
+    assert counters == {"target_opens": 1, "target_reads": 1}

@@ -407,27 +407,86 @@ def _stable_bytes_windows(
         value = value.removeprefix("\\\\?\\")
         return value.rstrip("\\").casefold()
 
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("length", ctypes.c_ushort),
+            ("maximum_length", ctypes.c_ushort),
+            ("buffer", ctypes.c_wchar_p),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", ctypes.c_ulong),
+            ("root_directory", ctypes.c_void_p),
+            ("object_name", ctypes.POINTER(UnicodeString)),
+            ("attributes", ctypes.c_ulong),
+            ("security_descriptor", ctypes.c_void_p),
+            ("security_quality_of_service", ctypes.c_void_p),
+        ]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_long), ("information", ctypes.c_void_p)]
+
+    nt_create_file = ctypes.WinDLL("ntdll", use_last_error=True).NtCreateFile
+    nt_create_file.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint32,
+        ctypes.POINTER(ObjectAttributes), ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+    ]
+    nt_create_file.restype = ctypes.c_long
+
+    def open_child(parent: int, name: str, *, directory: bool) -> int:
+        """Open one literal child relative to the already pinned parent HANDLE."""
+        name_buffer = ctypes.create_unicode_buffer(name)
+        unicode_name = UnicodeString(
+            len(name.encode("utf-16-le")),
+            (len(name) + 1) * 2,
+            ctypes.cast(name_buffer, ctypes.c_wchar_p),
+        )
+        attributes = ObjectAttributes(
+            ctypes.sizeof(ObjectAttributes), parent, ctypes.pointer(unicode_name),
+            0x40, None, None,  # OBJ_CASE_INSENSITIVE
+        )
+        handle, status = ctypes.c_void_p(), IoStatusBlock()
+        options = 0x20 | reparse | (0x1 if directory else 0x40)
+        result = nt_create_file(
+            ctypes.byref(handle),
+            ((file_list_directory | 0x80) if directory else generic_read) | 0x00100000,
+            ctypes.byref(attributes), ctypes.byref(status), None, 0, share_mode,
+            1, options, None, 0,
+        )
+        if result < 0 or handle.value == invalid:
+            raise CanonicalOperationBindingError(
+                f"{label} child handle is unavailable ({result:#x})"
+            )
+        return handle.value
+
     absolute = path.absolute()
     if not absolute.is_absolute() or not absolute.name:
         raise CanonicalOperationBindingError(f"{label} is unavailable")
-    ancestors = [Path(absolute.anchor)]
-    cursor = Path(absolute.anchor)
-    for part in absolute.parent.relative_to(absolute.anchor).parts:
-        cursor /= part
-        ancestors.append(cursor)
     handles: list[int] = []
     try:
-        for ancestor in ancestors:
-            handle = create_file(str(ancestor), file_list_directory, share_mode, None, open_existing, reparse | backup_semantics, None)
-            if handle == invalid:
-                raise CanonicalOperationBindingError(f"{label} ancestor handle is unavailable")
+        # A volume root has no mutable parent.  Every mutable component is
+        # subsequently opened relative to this retained HANDLE, never by a
+        # re-resolved absolute string that a post-publisher junction can steer.
+        handle = create_file(
+            str(Path(absolute.anchor)), file_list_directory, share_mode, None,
+            open_existing, reparse | backup_semantics, None,
+        )
+        if handle == invalid:
+            raise CanonicalOperationBindingError(f"{label} ancestor handle is unavailable")
+        handles.append(handle)
+        information = handle_information(handle)
+        if information.attributes & reparse_attribute:
+            raise CanonicalOperationBindingError(f"{label} traverses a reparse point")
+        for part in absolute.parent.relative_to(absolute.anchor).parts:
+            handle = open_child(handles[-1], part, directory=True)
             handles.append(handle)
             information = handle_information(handle)
             if information.attributes & reparse_attribute:
                 raise CanonicalOperationBindingError(f"{label} traverses a reparse point")
-        file_handle = create_file(str(absolute), generic_read, share_mode, None, open_existing, reparse, None)
-        if file_handle == invalid:
-            raise CanonicalOperationBindingError(f"{label} is unavailable")
+        file_handle = open_child(handles[-1], absolute.name, directory=False)
         handles.append(file_handle)
         information = handle_information(file_handle)
         file_id = (information.volume_serial, information.file_index_high, information.file_index_low)
