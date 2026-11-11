@@ -159,13 +159,20 @@ def _stable_bytes_posix(path: Path, label: str, *, protected: bool = False) -> b
             os.close(descriptor)
 
 
-def _stable_bytes_windows(path: Path, label: str, *, protected: bool = False) -> bytes:
+def _stable_bytes_windows(
+    path: Path, label: str, *, protected: bool = False,
+    share_delete_with_pinned_publisher: bool = False,
+) -> bytes:
     """Pin every ancestor HANDLE with no delete sharing before reading the file.
 
     FILE_FLAG_OPEN_REPARSE_POINT applies only to each object opened, not to its
     ancestors.  Opening and retaining every directory handle (without
     FILE_SHARE_DELETE) prevents a junction swap between validation and the
-    final file handle.  All validation and reads are through Win32 HANDLEs;
+    final file handle.  The sole exception is an Hermes IPC capability whose
+    publisher holds the root open without FILE_SHARE_DELETE for the complete
+    export lifetime: that reader shares DELETE so it can coexist with the
+    publisher's DELETE-access pin while the publisher remains the rename guard.
+    All validation and reads are through Win32 HANDLEs;
     ``os.open`` is deliberately never used on Windows.
     """
     if sys.platform != "win32":
@@ -190,7 +197,8 @@ def _stable_bytes_windows(path: Path, label: str, *, protected: bool = False) ->
     get_final_path.restype = ctypes.c_uint32
     invalid = ctypes.c_void_p(-1).value
     generic_read, file_list_directory = 0x80000000, 0x0001
-    share_read_write = 0x00000001 | 0x00000002  # deliberately excludes DELETE
+    share_read_write = 0x00000001 | 0x00000002
+    share_mode = share_read_write | (0x00000004 if share_delete_with_pinned_publisher else 0)
     open_existing, reparse, backup_semantics = 3, 0x00200000, 0x02000000
     reparse_attribute, directory_attribute = 0x0400, 0x0010
 
@@ -329,14 +337,14 @@ def _stable_bytes_windows(path: Path, label: str, *, protected: bool = False) ->
     handles: list[int] = []
     try:
         for ancestor in ancestors:
-            handle = create_file(str(ancestor), file_list_directory, share_read_write, None, open_existing, reparse | backup_semantics, None)
+            handle = create_file(str(ancestor), file_list_directory, share_mode, None, open_existing, reparse | backup_semantics, None)
             if handle == invalid:
                 raise CanonicalOperationBindingError(f"{label} ancestor handle is unavailable")
             handles.append(handle)
             information = handle_information(handle)
             if information.attributes & reparse_attribute:
                 raise CanonicalOperationBindingError(f"{label} traverses a reparse point")
-        file_handle = create_file(str(absolute), generic_read, share_read_write, None, open_existing, reparse, None)
+        file_handle = create_file(str(absolute), generic_read, share_mode, None, open_existing, reparse, None)
         if file_handle == invalid:
             raise CanonicalOperationBindingError(f"{label} is unavailable")
         handles.append(file_handle)
@@ -366,10 +374,16 @@ def _stable_bytes_windows(path: Path, label: str, *, protected: bool = False) ->
             close_handle(handle)
 
 
-def _stable_bytes(path: Path, label: str, *, protected: bool = False) -> bytes:
+def _stable_bytes(
+    path: Path, label: str, *, protected: bool = False,
+    share_delete_with_pinned_publisher: bool = False,
+) -> bytes:
     """Read only via a platform-native no-follow/pinned boundary."""
     if sys.platform == "win32":
-        return _stable_bytes_windows(path, label, protected=protected)
+        return _stable_bytes_windows(
+            path, label, protected=protected,
+            share_delete_with_pinned_publisher=share_delete_with_pinned_publisher,
+        )
     if os.name == "posix":
         return _stable_bytes_posix(path, label, protected=protected)
     raise CanonicalOperationBindingError(f"{label} unsupported platform boundary")

@@ -112,9 +112,15 @@ class HermesIssuerClient:
         )
 
     @staticmethod
-    def _read_ascii(path: Path, label: str, *, protected: bool) -> str:
+    def _read_ascii(
+        path: Path, label: str, *, protected: bool,
+        share_delete_with_pinned_publisher: bool = False,
+    ) -> str:
         try:
-            raw = _stable_bytes(path, label, protected=protected)
+            raw = _stable_bytes(
+                path, label, protected=protected,
+                share_delete_with_pinned_publisher=share_delete_with_pinned_publisher,
+            )
             value = raw.decode("ascii", errors="strict")
         except (CanonicalOperationBindingError, OSError, UnicodeError) as error:
             raise HermesIssuerClientError(f"{label} is unreadable") from error
@@ -214,10 +220,12 @@ class HermesIssuerClient:
         if not isinstance(receipt_id, str) or not receipt_id or len(receipt_id) > 256:
             raise HermesIssuerClientError("bounded Hermes receipt ID is required")
         endpoint = self._read_ascii(
-            self._endpoint_file, "Hermes endpoint capability", protected=self._production
+            self._endpoint_file, "Hermes endpoint capability", protected=self._production,
+            share_delete_with_pinned_publisher=True,
         )
         token = self._read_ascii(
-            self._token_file, "Hermes HMAC capability", protected=self._production
+            self._token_file, "Hermes HMAC capability", protected=self._production,
+            share_delete_with_pinned_publisher=True,
         )
         client_nonce = secrets.token_hex(32)
         challenge = self._challenge(
