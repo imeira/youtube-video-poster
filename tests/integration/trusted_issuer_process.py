@@ -16,10 +16,13 @@ from src.hybrid.trusted_issuer_admission import JoseTrustedIssuerAdmission
 class PersistentFakeProvider:
     mode = "TEST"
 
-    def __init__(self, effects: Path, output: Path, behavior: str) -> None:
+    def __init__(self, effects: Path, output: Path, behavior: str, *,
+                 control: Path | None, provider_release: Path | None) -> None:
         self.effects = effects
         self.output = output
         self.behavior = behavior
+        self.control = control
+        self.provider_release = provider_release
 
     def _effect(self, value: str) -> None:
         with self.effects.open("a", encoding="ascii") as stream:
@@ -27,15 +30,19 @@ class PersistentFakeProvider:
             stream.flush()
             os.fsync(stream.fileno())
 
+    def _signal(self, value: str) -> None:
+        if self.control is not None:
+            _append(self.control, value)
+
     async def submit(self, job, request_id, checkpoint):
         self._effect("POST")
         checkpoint(provider_id="telegram-fixture-provider-1")
+        self._signal("DISPATCHED")
+        if self.provider_release is not None:
+            _wait_for(self.provider_release, "parent did not release blocked provider")
         if self.behavior == "cancel":
             self._effect("CANCEL")
             raise asyncio.CancelledError()
-        # Keep the irreversible-submit window open after its durable checkpoint
-        # so a released peer must contend with the same on-disk transaction.
-        await asyncio.sleep(1)
         raise TimeoutError("lost response after durable provider ID")
 
     async def recover(self, job, request_id, provider_id, partial, checkpoint):
@@ -43,6 +50,21 @@ class PersistentFakeProvider:
         self._effect("GET")
         self.output.write_bytes(b"recovered fixture image")
         return ProviderResult(self.output, Decimal("0.125"))
+
+
+def _append(path: Path, value: str) -> None:
+    with path.open("a", encoding="ascii") as stream:
+        stream.write(value + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _wait_for(path: Path, message: str) -> None:
+    deadline = time.monotonic() + 20
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError(message)
+        time.sleep(0.01)
 
 
 def main() -> int:
@@ -54,14 +76,13 @@ def main() -> int:
     parser.add_argument("output", type=Path)
     parser.add_argument("now", type=int)
     parser.add_argument("--behavior", choices=("timeout", "cancel", "recover"), default="timeout")
-    parser.add_argument("--release", type=Path)
+    parser.add_argument("--control", type=Path)
+    parser.add_argument("--ready", type=Path)
+    parser.add_argument("--start", type=Path)
+    parser.add_argument("--role", choices=("first", "second"))
+    parser.add_argument("--first-dispatched", type=Path)
+    parser.add_argument("--provider-release", type=Path)
     args = parser.parse_args()
-    if args.release is not None and args.behavior != "recover":
-        deadline = time.monotonic() + 20
-        while not args.release.exists():
-            if time.monotonic() > deadline:
-                raise TimeoutError("parent did not release synchronized probe")
-            time.sleep(0.01)
     client = HermesIssuerClient.for_test(
         endpoint_file=args.endpoint_file, token_file=args.token_file
     )
@@ -69,10 +90,21 @@ def main() -> int:
         root=args.root,
         client=client,
         provider_factory=lambda: PersistentFakeProvider(
-            args.effects, args.output, args.behavior
+            args.effects, args.output, args.behavior,
+            control=args.control, provider_release=args.provider_release,
         ),
         now=lambda: args.now,
     )
+    if args.ready is not None:
+        if args.start is None or args.role is None:
+            raise ValueError("ready rendezvous requires start and role")
+        _append(args.ready, "READY:" + args.role)
+        _wait_for(args.start, "parent did not release synchronized workers")
+        if args.role == "second":
+            if args.first_dispatched is None:
+                raise ValueError("second worker requires first dispatch acknowledgement")
+            _wait_for(args.first_dispatched, "first worker did not reach provider")
+        _append(args.ready, "ATTEMPT:" + args.role)
     try:
         result = asyncio.run(admission.admit("JOSE_GEN37_IDENTITY_FRAME_001"))
     except asyncio.CancelledError:

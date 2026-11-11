@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -231,23 +232,51 @@ def test_real_hermes_ipc_two_fresh_studio_processes_recover_without_resubmit(tmp
         assert database.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
 
 
-def _lifecycle_worker(fixture, effects: Path, output: Path, behavior: str, release: Path):
+def _wait_for_ack(path: Path, acknowledgement: str, *, timeout: float = 20) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and acknowledgement in path.read_text(encoding="ascii").splitlines():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {acknowledgement}")
+
+
+def _checkpoint_rows(root: Path):
+    with sqlite3.connect(root / "state" / "executor.sqlite3") as database:
+        row = json.loads(database.execute("SELECT data FROM jobs").fetchone()[0])
+    with sqlite3.connect(root / "state" / "ledger.sqlite3") as database:
+        columns = [column[0] for column in database.execute("SELECT * FROM claims").description]
+        claim = dict(zip(columns, database.execute("SELECT * FROM claims").fetchone()))
+    return row, claim
+
+
+def _lifecycle_worker(
+    fixture, effects: Path, output: Path, behavior: str, *, control: Path | None = None,
+    ready: Path | None = None, start: Path | None = None, role: str | None = None,
+    first_dispatched: Path | None = None, provider_release: Path | None = None,
+):
+    command = [
+        sys.executable,
+        "-m",
+        "tests.integration.trusted_issuer_process",
+        str(fixture["root"]),
+        fixture["export"].endpoint_file,
+        fixture["export"].capability_file,
+        str(effects),
+        str(output),
+        str(int(NOW.timestamp())),
+        "--behavior",
+        behavior,
+    ]
+    for flag, value in (
+        ("--control", control), ("--ready", ready), ("--start", start),
+        ("--role", role), ("--first-dispatched", first_dispatched),
+        ("--provider-release", provider_release),
+    ):
+        if value is not None:
+            command.extend((flag, str(value)))
     return subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "tests.integration.trusted_issuer_process",
-            str(fixture["root"]),
-            fixture["export"].endpoint_file,
-            fixture["export"].capability_file,
-            str(effects),
-            str(output),
-            str(int(NOW.timestamp())),
-            "--behavior",
-            behavior,
-            "--release",
-            str(release),
-        ],
+        command,
         cwd=Path.cwd(),
     )
 
@@ -256,15 +285,30 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
     tmp_path,
 ):
     fixture = asyncio.run(_cross_repo_fixture(tmp_path))
-    effects, output, release = (
+    effects, output, control, ready, start, provider_release = (
         tmp_path / "effects.log",
         tmp_path / "provider-output.bin",
-        tmp_path / "release",
+        tmp_path / "control.log",
+        tmp_path / "ready.log",
+        tmp_path / "start",
+        tmp_path / "provider-release",
     )
     try:
-        first = _lifecycle_worker(fixture, effects, output, "timeout", release)
-        second = _lifecycle_worker(fixture, effects, output, "timeout", release)
-        release.write_text("go", encoding="ascii")
+        first = _lifecycle_worker(
+            fixture, effects, output, "timeout", control=control, ready=ready,
+            start=start, role="first", provider_release=provider_release,
+        )
+        second = _lifecycle_worker(
+            fixture, effects, output, "timeout", control=control, ready=ready,
+            start=start, role="second", first_dispatched=control,
+        )
+        _wait_for_ack(ready, "READY:first")
+        _wait_for_ack(ready, "READY:second")
+        start.write_text("go", encoding="ascii")
+        _wait_for_ack(control, "DISPATCHED")
+        _wait_for_ack(ready, "ATTEMPT:second")
+        assert effects.read_text(encoding="ascii").splitlines() == ["POST"]
+        provider_release.write_text("go", encoding="ascii")
         codes = [first.wait(timeout=30), second.wait(timeout=30)]
     finally:
         fixture["export"].close()
@@ -276,16 +320,35 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
 
 def test_real_hermes_ipc_cancelled_submit_recovers_without_resend(tmp_path):
     fixture = asyncio.run(_cross_repo_fixture(tmp_path))
-    effects, output, release = (
+    effects, output, control, ready, start, cancel_release = (
         tmp_path / "effects.log",
         tmp_path / "provider-output.bin",
-        tmp_path / "release",
+        tmp_path / "control.log",
+        tmp_path / "ready.log",
+        tmp_path / "start",
+        tmp_path / "cancel-release",
     )
     try:
-        cancelled = _lifecycle_worker(fixture, effects, output, "cancel", release)
-        release.write_text("go", encoding="ascii")
+        cancelled = _lifecycle_worker(
+            fixture, effects, output, "cancel", control=control, ready=ready,
+            start=start, role="first", provider_release=cancel_release,
+        )
+        _wait_for_ack(ready, "READY:first")
+        start.write_text("go", encoding="ascii")
+        _wait_for_ack(control, "DISPATCHED")
+        row, claim = _checkpoint_rows(fixture["root"])
+        assert row["status"] == "SUBMITTED"
+        assert row["provider_id"] == "telegram-fixture-provider-1"
+        assert row["settlement_binding"]["provider_request_id"] == row["provider_id"]
+        assert claim["state"] == "RESERVED"
+        cancel_release.write_text("abort", encoding="ascii")
         assert cancelled.wait(timeout=30) == 76
-        restart = _lifecycle_worker(fixture, effects, output, "recover", release)
+        row, claim = _checkpoint_rows(fixture["root"])
+        assert row["status"] == "SUBMITTED"
+        assert row["provider_id"] == "telegram-fixture-provider-1"
+        assert row["settlement_binding"]["provider_request_id"] == row["provider_id"]
+        assert claim["state"] == "RESERVED"
+        restart = _lifecycle_worker(fixture, effects, output, "recover")
         assert restart.wait(timeout=30) == 0
     finally:
         fixture["export"].close()
