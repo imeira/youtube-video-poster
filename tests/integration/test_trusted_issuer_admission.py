@@ -232,11 +232,20 @@ def test_real_hermes_ipc_two_fresh_studio_processes_recover_without_resubmit(tmp
         assert database.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
 
 
-def _wait_for_ack(path: Path, acknowledgement: str, *, timeout: float = 20) -> None:
+def _wait_for_ack(
+    path: Path, acknowledgement: str, *workers: subprocess.Popen[str], timeout: float = 20,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists() and acknowledgement in path.read_text(encoding="ascii").splitlines():
             return
+        for worker in workers:
+            if worker.poll() is not None:
+                stdout, stderr = worker.communicate()
+                raise AssertionError(
+                    f"worker exited before {acknowledgement}: code={worker.returncode}; "
+                    f"stdout={stdout!r}; stderr={stderr!r}"
+                )
         time.sleep(0.01)
     raise AssertionError(f"timed out waiting for {acknowledgement}")
 
@@ -252,7 +261,8 @@ def _checkpoint_rows(root: Path):
 
 def _lifecycle_worker(
     fixture, effects: Path, output: Path, behavior: str, *, control: Path | None = None,
-    ready: Path | None = None, start: Path | None = None, role: str | None = None,
+    ready: Path | None = None, launch: Path | None = None, start: Path | None = None,
+    role: str | None = None,
     first_dispatched: Path | None = None, provider_release: Path | None = None,
 ):
     command = [
@@ -269,7 +279,7 @@ def _lifecycle_worker(
         behavior,
     ]
     for flag, value in (
-        ("--control", control), ("--ready", ready), ("--start", start),
+        ("--control", control), ("--ready", ready), ("--launch", launch), ("--start", start),
         ("--role", role), ("--first-dispatched", first_dispatched),
         ("--provider-release", provider_release),
     ):
@@ -278,6 +288,9 @@ def _lifecycle_worker(
     return subprocess.Popen(
         command,
         cwd=Path.cwd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
 
@@ -285,28 +298,32 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
     tmp_path,
 ):
     fixture = asyncio.run(_cross_repo_fixture(tmp_path))
-    effects, output, control, ready, start, provider_release = (
+    effects, output, control, ready, launch, start, provider_release = (
         tmp_path / "effects.log",
         tmp_path / "provider-output.bin",
         tmp_path / "control.log",
         tmp_path / "ready.log",
+        tmp_path / "launch",
         tmp_path / "start",
         tmp_path / "provider-release",
     )
     try:
         first = _lifecycle_worker(
             fixture, effects, output, "timeout", control=control, ready=ready,
-            start=start, role="first", provider_release=provider_release,
+            launch=launch, start=start, role="first", provider_release=provider_release,
         )
         second = _lifecycle_worker(
             fixture, effects, output, "timeout", control=control, ready=ready,
-            start=start, role="second", first_dispatched=control,
+            launch=launch, start=start, role="second", first_dispatched=control,
         )
-        _wait_for_ack(ready, "READY:first")
-        _wait_for_ack(ready, "READY:second")
+        _wait_for_ack(ready, "LAUNCHED:first", first, second)
+        _wait_for_ack(ready, "LAUNCHED:second", first, second)
+        launch.write_text("go", encoding="ascii")
+        _wait_for_ack(ready, "READY:first", first, second)
+        _wait_for_ack(ready, "READY:second", first, second)
         start.write_text("go", encoding="ascii")
-        _wait_for_ack(control, "DISPATCHED")
-        _wait_for_ack(ready, "ATTEMPT:second")
+        _wait_for_ack(control, "DISPATCHED", first, second)
+        _wait_for_ack(ready, "ATTEMPT:second", first, second)
         assert effects.read_text(encoding="ascii").splitlines() == ["POST"]
         provider_release.write_text("go", encoding="ascii")
         codes = [first.wait(timeout=30), second.wait(timeout=30)]
@@ -320,22 +337,25 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
 
 def test_real_hermes_ipc_cancelled_submit_recovers_without_resend(tmp_path):
     fixture = asyncio.run(_cross_repo_fixture(tmp_path))
-    effects, output, control, ready, start, cancel_release = (
+    effects, output, control, ready, launch, start, cancel_release = (
         tmp_path / "effects.log",
         tmp_path / "provider-output.bin",
         tmp_path / "control.log",
         tmp_path / "ready.log",
+        tmp_path / "launch",
         tmp_path / "start",
         tmp_path / "cancel-release",
     )
     try:
         cancelled = _lifecycle_worker(
             fixture, effects, output, "cancel", control=control, ready=ready,
-            start=start, role="first", provider_release=cancel_release,
+            launch=launch, start=start, role="first", provider_release=cancel_release,
         )
-        _wait_for_ack(ready, "READY:first")
+        _wait_for_ack(ready, "LAUNCHED:first", cancelled)
+        launch.write_text("go", encoding="ascii")
+        _wait_for_ack(ready, "READY:first", cancelled)
         start.write_text("go", encoding="ascii")
-        _wait_for_ack(control, "DISPATCHED")
+        _wait_for_ack(control, "DISPATCHED", cancelled)
         row, claim = _checkpoint_rows(fixture["root"])
         assert row["status"] == "SUBMITTED"
         assert row["provider_id"] == "telegram-fixture-provider-1"

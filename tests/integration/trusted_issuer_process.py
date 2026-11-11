@@ -8,10 +8,6 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
-from src.hybrid.execution import ProviderResult
-from src.hybrid.hermes_issuer_client import HermesIssuerClient
-from src.hybrid.trusted_issuer_admission import JoseTrustedIssuerAdmission
-
 
 class PersistentFakeProvider:
     mode = "TEST"
@@ -46,6 +42,8 @@ class PersistentFakeProvider:
         raise TimeoutError("lost response after durable provider ID")
 
     async def recover(self, job, request_id, provider_id, partial, checkpoint):
+        from src.hybrid.execution import ProviderResult
+
         assert provider_id == "telegram-fixture-provider-1"
         self._effect("GET")
         self.output.write_bytes(b"recovered fixture image")
@@ -78,11 +76,20 @@ def main() -> int:
     parser.add_argument("--behavior", choices=("timeout", "cancel", "recover"), default="timeout")
     parser.add_argument("--control", type=Path)
     parser.add_argument("--ready", type=Path)
+    parser.add_argument("--launch", type=Path)
     parser.add_argument("--start", type=Path)
     parser.add_argument("--role", choices=("first", "second"))
     parser.add_argument("--first-dispatched", type=Path)
     parser.add_argument("--provider-release", type=Path)
     args = parser.parse_args()
+    if args.ready is not None:
+        if args.launch is None or args.start is None or args.role is None:
+            raise ValueError("ready rendezvous requires launch, start and role")
+        _append(args.ready, "LAUNCHED:" + args.role)
+        _wait_for(args.launch, "parent did not release worker initialization")
+    from src.hybrid.hermes_issuer_client import HermesIssuerClient
+    from src.hybrid.trusted_issuer_admission import JoseTrustedIssuerAdmission
+
     client = HermesIssuerClient.for_test(
         endpoint_file=args.endpoint_file, token_file=args.token_file
     )
@@ -96,8 +103,6 @@ def main() -> int:
         now=lambda: args.now,
     )
     if args.ready is not None:
-        if args.start is None or args.role is None:
-            raise ValueError("ready rendezvous requires start and role")
         _append(args.ready, "READY:" + args.role)
         _wait_for(args.start, "parent did not release synchronized workers")
         if args.role == "second":

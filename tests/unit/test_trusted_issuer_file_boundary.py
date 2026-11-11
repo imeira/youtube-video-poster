@@ -196,7 +196,9 @@ def test_windows_reader_never_opens_junction_target_after_publisher_exit(tmp_pat
     capability.write_bytes(b"publisher-capability")
     attacker_capability.write_bytes(b"attacker-capability")
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
     original_create, original_read = kernel32.CreateFileW, kernel32.ReadFile
+    original_nt_create = ntdll.NtCreateFile
     original_information = kernel32.GetFileInformationByHandle
     original_information.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     original_information.restype = ctypes.c_int
@@ -215,17 +217,31 @@ def test_windows_reader_never_opens_junction_target_after_publisher_exit(tmp_pat
         assert original_final(handle, buffer, len(buffer), 0)
         return buffer.value.removeprefix("\\\\?\\").casefold()
 
-    def counted_create(path, *args):
-        handle = original_create(path, *args)
-        if handle != invalid and final_path(handle).startswith(str(target).casefold()):
+    def count_target_handle(handle):
+        if (
+            handle != invalid
+            and final_path(handle) == str(attacker_capability).casefold()
+        ):
             counters["target_opens"] += 1
             target_handles.add(handle)
+
+    def counted_create(path, *args):
+        handle = original_create(path, *args)
+        count_target_handle(handle)
         return handle
 
+    def counted_nt_create(*args):
+        result = original_nt_create(*args)
+        handle = ctypes.cast(args[0], ctypes.POINTER(ctypes.c_void_p))[0]
+        if result >= 0:
+            count_target_handle(handle)
+        return result
+
     def counted_read(handle, *args):
-        if handle in target_handles:
+        result = original_read(handle, *args)
+        if handle in target_handles and result and args[2]._obj.value:
             counters["target_reads"] += 1
-        return original_read(handle, *args)
+        return result
 
     def swap_after_pinning(handle, info):
         nonlocal swapped
@@ -246,17 +262,26 @@ def test_windows_reader_never_opens_junction_target_after_publisher_exit(tmp_pat
     class KernelProxy:
         pass
 
+    class NtdllProxy:
+        pass
+
     proxy = KernelProxy()
     for name in ("CloseHandle", "GetFinalPathNameByHandleW"):
         setattr(proxy, name, getattr(kernel32, name))
     proxy.CreateFileW = counted_create
     proxy.ReadFile = counted_read
     proxy.GetFileInformationByHandle = swap_after_pinning
+    ntdll_proxy = NtdllProxy()
+    ntdll_proxy.NtCreateFile = counted_nt_create
     original_windll = binding.ctypes.WinDLL
     monkeypatch.setattr(
         binding.ctypes,
         "WinDLL",
-        lambda name, **kwargs: proxy if name.lower() == "kernel32" else original_windll(name, **kwargs),
+        lambda name, **kwargs: (
+            proxy if name.lower() == "kernel32"
+            else ntdll_proxy if name.lower() == "ntdll"
+            else original_windll(name, **kwargs)
+        ),
     )
 
     with pytest.raises(binding.CanonicalOperationBindingError) as error:
@@ -268,12 +293,6 @@ def test_windows_reader_never_opens_junction_target_after_publisher_exit(tmp_pat
     assert swapped, (str(error.value), inspected_paths)
     assert counters == {"target_opens": 0, "target_reads": 0}
 
-    # Positive control: the counters observe a real target handle and ReadFile.
-    handle = proxy.CreateFileW(str(attacker_capability), 0x80000000, 0x3, None, 3, 0, None)
-    try:
-        buffer, count = ctypes.create_string_buffer(64), ctypes.c_uint32()
-        assert proxy.ReadFile(handle, buffer, len(buffer), ctypes.byref(count), None)
-        assert count.value == len(b"attacker-capability")
-    finally:
-        kernel32.CloseHandle(handle)
+    # Positive control: production's relative NtCreateFile path reaches the target.
+    assert binding._stable_bytes(attacker_capability, "attacker capability") == b"attacker-capability"
     assert counters == {"target_opens": 1, "target_reads": 1}
