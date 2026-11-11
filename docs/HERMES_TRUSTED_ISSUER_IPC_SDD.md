@@ -7,7 +7,24 @@
 - `production()` is fixed to `C:/HermesStudio/production/trusted-issuer` and the fixed Hermes capability location. It accepts no root, endpoint, token, receipt, provider, ledger, quote, license, verifier, or clock from its caller. A missing or unprotected deployment returns `BLOCKED` before executor, ledger, credential, or provider construction.
 - `for_test_ipc()` is an explicit TEST-only composition used by the cross-repository integration fixture. It can use a controlled local endpoint and a TEST provider only. It is not LIVE authority.
 
-The production IPC client reads an owner-protected endpoint file and bearer-capability file, then makes exactly one bounded JSON-lines local request:
+The production IPC client reads an endpoint file and bearer-capability file from
+the same protected native handles it will read. On Windows, each handle must
+have the exact, protected, non-inherited full-control ACE sequence for the
+reader process token SID, `SYSTEM`, and `BUILTIN\\Administrators`; the file
+owner must equal the intrinsic current-process token SID. A caller cannot
+supply that SID, root, endpoint, or token.
+
+That protected-DACL and process-SID relation is the durable trust anchor after
+the publisher exits: an ordinary attacker-owned replacement has an inherited or
+different-owner contract and is rejected before bytes are read. No permanently
+live publisher daemon is required for that claim. The threat model is a
+distinct, non-administrator local principal; `SYSTEM`, administrators, and code
+already executing with the publisher's SID are outside it. While the publisher
+is live, only the two authenticated Hermes capability reads share delete so
+they can coexist with its rename pin; generic protected reads never share
+delete.
+
+After the protected reads, the client makes exactly one bounded JSON-lines local request:
 
 ```json
 {"token":"…","request":{"method":"receipt.current","receipt_id":"…"}}

@@ -27,6 +27,168 @@ class CanonicalOperationBindingError(PermissionError):
     """A fixed canonical source did not prove the requested operation binding."""
 
 
+_WINDOWS_FILE_ALL_ACCESS = 0x1F01FF
+_WINDOWS_SYSTEM_SID = "S-1-5-18"
+_WINDOWS_ADMINS_SID = "S-1-5-32-544"
+
+
+def _windows_validate_protected_dacl_snapshot(
+    snapshot: dict[str, object], expected_process_sid: str, label: str
+) -> None:
+    """Require the publisher's protected DACL, bound to this process token."""
+    expected_aces = (
+        (expected_process_sid, _WINDOWS_FILE_ALL_ACCESS, False),
+        (_WINDOWS_SYSTEM_SID, _WINDOWS_FILE_ALL_ACCESS, False),
+        (_WINDOWS_ADMINS_SID, _WINDOWS_FILE_ALL_ACCESS, False),
+    )
+    if (
+        snapshot.get("owner_sid") != expected_process_sid
+        or snapshot.get("dacl_protected") is not True
+        or snapshot.get("aces") != expected_aces
+    ):
+        raise CanonicalOperationBindingError(f"{label} protected DACL is invalid")
+
+
+def _windows_current_process_sid() -> str:
+    """Derive the reader identity from its current Win32 process token."""
+    if sys.platform != "win32":
+        raise CanonicalOperationBindingError("Windows token SID is unavailable")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    open_process_token = advapi32.OpenProcessToken
+    open_process_token.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)
+    ]
+    open_process_token.restype = ctypes.c_int
+    get_token_information = advapi32.GetTokenInformation
+    get_token_information.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    get_token_information.restype = ctypes.c_int
+    convert_sid = advapi32.ConvertSidToStringSidW
+    convert_sid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    convert_sid.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+    current_process = kernel32.GetCurrentProcess
+    current_process.restype = ctypes.c_void_p
+
+    token = ctypes.c_void_p()
+    if not open_process_token(current_process(), 0x0008, ctypes.byref(token)):
+        raise CanonicalOperationBindingError("Windows process token is unavailable")
+    try:
+        needed = ctypes.c_uint32()
+        get_token_information(token, 1, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            raise CanonicalOperationBindingError("Windows process token is unavailable")
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not get_token_information(
+            token, 1, buffer, needed.value, ctypes.byref(needed)
+        ):
+            raise CanonicalOperationBindingError("Windows process token is unavailable")
+        sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        text = ctypes.c_wchar_p()
+        if not convert_sid(sid, ctypes.byref(text)) or not text.value:
+            raise CanonicalOperationBindingError("Windows process SID is unavailable")
+        try:
+            return text.value
+        finally:
+            local_free(text)
+    finally:
+        close_handle(token)
+
+
+def _windows_security_snapshot_from_handle(handle: int, label: str) -> dict[str, object]:
+    """Read owner and every ACE from the same native handle used for bytes."""
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_security_info = advapi32.GetSecurityInfo
+    get_security_info.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_security_info.restype = ctypes.c_uint32
+    get_control = advapi32.GetSecurityDescriptorControl
+    get_control.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_ushort), ctypes.POINTER(ctypes.c_uint32)
+    ]
+    get_control.restype = ctypes.c_int
+    convert_sid = advapi32.ConvertSidToStringSidW
+    convert_sid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    convert_sid.restype = ctypes.c_int
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    def sid_text(sid: ctypes.c_void_p) -> str:
+        text = ctypes.c_wchar_p()
+        if not convert_sid(sid, ctypes.byref(text)) or not text.value:
+            raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+        try:
+            return text.value
+        finally:
+            local_free(text)
+
+    owner, dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    result = get_security_info(
+        handle, 1, 0x00000001 | 0x00000004,
+        ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
+    )
+    if result or not owner.value or not dacl.value or not descriptor.value:
+        if descriptor.value:
+            local_free(descriptor)
+        raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+    try:
+        control, revision = ctypes.c_ushort(), ctypes.c_uint32()
+        if not get_control(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+            raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+        header = ctypes.string_at(dacl, 8)
+        acl_size = int.from_bytes(header[2:4], "little")
+        ace_count = int.from_bytes(header[4:6], "little")
+        if acl_size < 8:
+            raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+        offset, aces = 8, []
+        for _ in range(ace_count):
+            if offset + 12 > acl_size:
+                raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+            ace = ctypes.string_at(dacl.value + offset, 12)
+            ace_type, ace_flags = ace[0], ace[1]
+            ace_size = int.from_bytes(ace[2:4], "little")
+            if ace_type != 0 or ace_size < 12 or offset + ace_size > acl_size:
+                raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+            aces.append(
+                (
+                    sid_text(ctypes.c_void_p(dacl.value + offset + 8)),
+                    int.from_bytes(ace[4:8], "little"),
+                    bool(ace_flags & 0x10),
+                )
+            )
+            offset += ace_size
+        if offset != acl_size:
+            raise CanonicalOperationBindingError(f"{label} protected DACL inspection failed")
+        return {
+            "owner_sid": sid_text(owner),
+            "dacl_protected": bool(control.value & 0x1000),
+            "aces": tuple(aces),
+        }
+    finally:
+        local_free(descriptor)
+
+
 @dataclass(frozen=True)
 class CanonicalOperationBinding:
     """Repository-selected paths and pins for one literal operation ID."""
@@ -203,93 +365,12 @@ def _stable_bytes_windows(
     reparse_attribute, directory_attribute = 0x0400, 0x0010
 
     def verify_protected_dacl(handle: int) -> None:
-        """Validate owner/SYSTEM/Administrators allow ACEs on this exact handle."""
-        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-        get_security_info = advapi32.GetSecurityInfo
-        get_security_info.argtypes = [
-            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
-            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        get_security_info.restype = ctypes.c_uint32
-        get_ace = advapi32.GetAce
-        get_ace.argtypes = [
-            ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)
-        ]
-        get_ace.restype = ctypes.c_int
-        equal_sid = advapi32.EqualSid
-        equal_sid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        equal_sid.restype = ctypes.c_int
-        create_well_known_sid = advapi32.CreateWellKnownSid
-        create_well_known_sid.argtypes = [
-            ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_uint32),
-        ]
-        create_well_known_sid.restype = ctypes.c_int
-        local_free = kernel32.LocalFree
-        local_free.argtypes = [ctypes.c_void_p]
-        local_free.restype = ctypes.c_void_p
-
-        owner = ctypes.c_void_p()
-        dacl = ctypes.c_void_p()
-        descriptor = ctypes.c_void_p()
-        result = get_security_info(
-            handle, 1, 0x00000001 | 0x00000004,
-            ctypes.byref(owner), None, ctypes.byref(dacl), None,
-            ctypes.byref(descriptor),
+        """Bind the same read handle to the intrinsic reader-token identity."""
+        expected_process_sid = _windows_current_process_sid()
+        snapshot = _windows_security_snapshot_from_handle(handle, label)
+        _windows_validate_protected_dacl_snapshot(
+            snapshot, expected_process_sid, label
         )
-        if result or not owner.value or not dacl.value or not descriptor.value:
-            if descriptor.value:
-                local_free(descriptor)
-            raise CanonicalOperationBindingError(
-                f"{label} protected DACL inspection failed"
-            )
-
-        class Acl(ctypes.Structure):
-            _fields_ = [
-                ("revision", ctypes.c_ubyte), ("sbz1", ctypes.c_ubyte),
-                ("size", ctypes.c_ushort), ("ace_count", ctypes.c_ushort),
-                ("sbz2", ctypes.c_ushort),
-            ]
-
-        allowed = [owner]
-        sid_buffers = []
-        try:
-            for sid_type in (22, 26):  # LocalSystem, Builtin Administrators
-                size = ctypes.c_uint32(68)
-                buffer = ctypes.create_string_buffer(size.value)
-                if not create_well_known_sid(
-                    sid_type, None, buffer, ctypes.byref(size)
-                ):
-                    raise CanonicalOperationBindingError(
-                        f"{label} protected principal inspection failed"
-                    )
-                sid_buffers.append(buffer)
-                allowed.append(ctypes.cast(buffer, ctypes.c_void_p))
-            acl = ctypes.cast(dacl, ctypes.POINTER(Acl)).contents
-            for index in range(acl.ace_count):
-                ace = ctypes.c_void_p()
-                if not get_ace(dacl, index, ctypes.byref(ace)):
-                    raise CanonicalOperationBindingError(
-                        f"{label} protected DACL inspection failed"
-                    )
-                ace_type = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))[0]
-                if ace_type in {5, 9, 11}:
-                    # Object/callback allow ACE layouts differ; fail closed
-                    # instead of accidentally skipping a grant.
-                    raise CanonicalOperationBindingError(
-                        f"{label} ACL contains an unsupported granting ACE"
-                    )
-                if ace_type != 0:
-                    continue
-                sid = ctypes.c_void_p(ace.value + 8)
-                if not any(equal_sid(sid, principal) for principal in allowed):
-                    raise CanonicalOperationBindingError(
-                        f"{label} ACL grants another principal"
-                    )
-        finally:
-            local_free(descriptor)
 
     class FileInformation(ctypes.Structure):
         _fields_ = [
