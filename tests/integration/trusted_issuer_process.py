@@ -92,7 +92,6 @@ def main() -> int:
     parser.add_argument("--launch", type=Path)
     parser.add_argument("--start", type=Path)
     parser.add_argument("--role", choices=("first", "second"))
-    parser.add_argument("--first-dispatched", type=Path)
     parser.add_argument("--provider-release", type=Path)
     args = parser.parse_args()
     if args.ready is not None:
@@ -118,10 +117,6 @@ def main() -> int:
     if args.ready is not None:
         _signal_ready(args.ready, "READY:" + args.role)
         _wait_for(args.start, "parent did not release synchronized workers")
-        if args.role == "second":
-            if args.first_dispatched is None:
-                raise ValueError("second worker requires first dispatch acknowledgement")
-            _wait_for(args.first_dispatched, "first worker did not reach provider")
         _signal_ready(args.ready, "ATTEMPT:" + args.role)
     try:
         result = asyncio.run(admission.admit("JOSE_GEN37_IDENTITY_FRAME_001"))

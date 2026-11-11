@@ -269,8 +269,7 @@ def _checkpoint_rows(root: Path):
 def _lifecycle_worker(
     fixture, effects: Path, output: Path, behavior: str, *, control: Path | None = None,
     ready: Path | None = None, launch: Path | None = None, start: Path | None = None,
-    role: str | None = None,
-    first_dispatched: Path | None = None, provider_release: Path | None = None,
+    role: str | None = None, provider_release: Path | None = None,
 ):
     command = [
         sys.executable,
@@ -287,8 +286,7 @@ def _lifecycle_worker(
     ]
     for flag, value in (
         ("--control", control), ("--ready", ready), ("--launch", launch), ("--start", start),
-        ("--role", role), ("--first-dispatched", first_dispatched),
-        ("--provider-release", provider_release),
+        ("--role", role), ("--provider-release", provider_release),
     ):
         if value is not None:
             command.extend((flag, str(value)))
@@ -322,7 +320,7 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
         )
         second = _lifecycle_worker(
             fixture, effects, output, "timeout", control=control, ready=ready,
-            launch=launch, start=start, role="second", first_dispatched=control,
+            launch=launch, start=start, role="second",
         )
         _wait_for_ack(ready, "LAUNCHED:first", first, second, timeout=60)
         _wait_for_ack(ready, "LAUNCHED:second", first, second, timeout=60)
@@ -330,8 +328,9 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
         _wait_for_ack(ready, "READY:first", first, second)
         _wait_for_ack(ready, "READY:second", first, second)
         start.write_text("go", encoding="ascii")
-        _wait_for_ack(control, "DISPATCHED", first, second)
+        _wait_for_ack(ready, "ATTEMPT:first", first, second)
         _wait_for_ack(ready, "ATTEMPT:second", first, second)
+        _wait_for_ack(control, "DISPATCHED", first, second)
         assert effects.read_text(encoding="ascii").splitlines() == ["POST"]
         provider_release.write_text("go", encoding="ascii")
         codes = [first.wait(timeout=30), second.wait(timeout=30)]
