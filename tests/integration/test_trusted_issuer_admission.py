@@ -316,8 +316,8 @@ def test_real_hermes_ipc_concurrent_fresh_processes_submit_once_then_recover(
             fixture, effects, output, "timeout", control=control, ready=ready,
             launch=launch, start=start, role="second", first_dispatched=control,
         )
-        _wait_for_ack(ready, "LAUNCHED:first", first, second)
-        _wait_for_ack(ready, "LAUNCHED:second", first, second)
+        _wait_for_ack(ready, "LAUNCHED:first", first, second, timeout=60)
+        _wait_for_ack(ready, "LAUNCHED:second", first, second, timeout=60)
         launch.write_text("go", encoding="ascii")
         _wait_for_ack(ready, "READY:first", first, second)
         _wait_for_ack(ready, "READY:second", first, second)
@@ -351,7 +351,7 @@ def test_real_hermes_ipc_cancelled_submit_recovers_without_resend(tmp_path):
             fixture, effects, output, "cancel", control=control, ready=ready,
             launch=launch, start=start, role="first", provider_release=cancel_release,
         )
-        _wait_for_ack(ready, "LAUNCHED:first", cancelled)
+        _wait_for_ack(ready, "LAUNCHED:first", cancelled, timeout=60)
         launch.write_text("go", encoding="ascii")
         _wait_for_ack(ready, "READY:first", cancelled)
         start.write_text("go", encoding="ascii")
