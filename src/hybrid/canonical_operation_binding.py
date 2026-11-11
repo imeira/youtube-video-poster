@@ -120,7 +120,7 @@ def _require_no_sqlite_sidecars(path: Path, label: str) -> None:
         raise CanonicalOperationBindingError(f"{label} WAL/SHM sidecar is present")
 
 
-def _stable_bytes_posix(path: Path, label: str) -> bytes:
+def _stable_bytes_posix(path: Path, label: str, *, protected: bool = False) -> bytes:
     """Open an absolute path as a pinned dirfd chain; never resolve a final string."""
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise CanonicalOperationBindingError(f"{label} unsupported platform boundary")
@@ -138,8 +138,16 @@ def _stable_bytes_posix(path: Path, label: str) -> bytes:
             descriptors.append(current)
         final = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
         descriptors.append(final)
-        if not stat.S_ISREG(os.fstat(final).st_mode):
+        information = os.fstat(final)
+        if not stat.S_ISREG(information.st_mode):
             raise CanonicalOperationBindingError(f"{label} is not a regular file")
+        if protected and (
+            information.st_uid != os.getuid()
+            or stat.S_IMODE(information.st_mode) & 0o077
+        ):
+            raise CanonicalOperationBindingError(
+                f"{label} is not an owner-only protected file"
+            )
         chunks: list[bytes] = []
         while chunk := os.read(final, 1024 * 1024):
             chunks.append(chunk)
@@ -151,7 +159,7 @@ def _stable_bytes_posix(path: Path, label: str) -> bytes:
             os.close(descriptor)
 
 
-def _stable_bytes_windows(path: Path, label: str) -> bytes:
+def _stable_bytes_windows(path: Path, label: str, *, protected: bool = False) -> bytes:
     """Pin every ancestor HANDLE with no delete sharing before reading the file.
 
     FILE_FLAG_OPEN_REPARSE_POINT applies only to each object opened, not to its
@@ -175,11 +183,105 @@ def _stable_bytes_windows(path: Path, label: str) -> bytes:
     read_file = kernel32.ReadFile
     read_file.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p]
     read_file.restype = ctypes.c_int
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32
+    ]
+    get_final_path.restype = ctypes.c_uint32
     invalid = ctypes.c_void_p(-1).value
     generic_read, file_list_directory = 0x80000000, 0x0001
     share_read_write = 0x00000001 | 0x00000002  # deliberately excludes DELETE
     open_existing, reparse, backup_semantics = 3, 0x00200000, 0x02000000
     reparse_attribute, directory_attribute = 0x0400, 0x0010
+
+    def verify_protected_dacl(handle: int) -> None:
+        """Validate owner/SYSTEM/Administrators allow ACEs on this exact handle."""
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        get_security_info = advapi32.GetSecurityInfo
+        get_security_info.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        get_security_info.restype = ctypes.c_uint32
+        get_ace = advapi32.GetAce
+        get_ace.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)
+        ]
+        get_ace.restype = ctypes.c_int
+        equal_sid = advapi32.EqualSid
+        equal_sid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        equal_sid.restype = ctypes.c_int
+        create_well_known_sid = advapi32.CreateWellKnownSid
+        create_well_known_sid.argtypes = [
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        create_well_known_sid.restype = ctypes.c_int
+        local_free = kernel32.LocalFree
+        local_free.argtypes = [ctypes.c_void_p]
+        local_free.restype = ctypes.c_void_p
+
+        owner = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
+        descriptor = ctypes.c_void_p()
+        result = get_security_info(
+            handle, 1, 0x00000001 | 0x00000004,
+            ctypes.byref(owner), None, ctypes.byref(dacl), None,
+            ctypes.byref(descriptor),
+        )
+        if result or not owner.value or not dacl.value or not descriptor.value:
+            if descriptor.value:
+                local_free(descriptor)
+            raise CanonicalOperationBindingError(
+                f"{label} protected DACL inspection failed"
+            )
+
+        class Acl(ctypes.Structure):
+            _fields_ = [
+                ("revision", ctypes.c_ubyte), ("sbz1", ctypes.c_ubyte),
+                ("size", ctypes.c_ushort), ("ace_count", ctypes.c_ushort),
+                ("sbz2", ctypes.c_ushort),
+            ]
+
+        allowed = [owner]
+        sid_buffers = []
+        try:
+            for sid_type in (22, 26):  # LocalSystem, Builtin Administrators
+                size = ctypes.c_uint32(68)
+                buffer = ctypes.create_string_buffer(size.value)
+                if not create_well_known_sid(
+                    sid_type, None, buffer, ctypes.byref(size)
+                ):
+                    raise CanonicalOperationBindingError(
+                        f"{label} protected principal inspection failed"
+                    )
+                sid_buffers.append(buffer)
+                allowed.append(ctypes.cast(buffer, ctypes.c_void_p))
+            acl = ctypes.cast(dacl, ctypes.POINTER(Acl)).contents
+            for index in range(acl.ace_count):
+                ace = ctypes.c_void_p()
+                if not get_ace(dacl, index, ctypes.byref(ace)):
+                    raise CanonicalOperationBindingError(
+                        f"{label} protected DACL inspection failed"
+                    )
+                ace_type = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))[0]
+                if ace_type in {5, 9, 11}:
+                    # Object/callback allow ACE layouts differ; fail closed
+                    # instead of accidentally skipping a grant.
+                    raise CanonicalOperationBindingError(
+                        f"{label} ACL contains an unsupported granting ACE"
+                    )
+                if ace_type != 0:
+                    continue
+                sid = ctypes.c_void_p(ace.value + 8)
+                if not any(equal_sid(sid, principal) for principal in allowed):
+                    raise CanonicalOperationBindingError(
+                        f"{label} ACL grants another principal"
+                    )
+        finally:
+            local_free(descriptor)
 
     class FileInformation(ctypes.Structure):
         _fields_ = [
@@ -197,6 +299,24 @@ def _stable_bytes_windows(path: Path, label: str) -> bytes:
         if not get_information(handle, ctypes.byref(information)):
             raise CanonicalOperationBindingError(f"{label} handle inspection failed")
         return information
+
+    def normalized_handle_path(handle: int) -> str:
+        size = get_final_path(handle, None, 0, 0)
+        if not size:
+            raise CanonicalOperationBindingError(
+                f"{label} final handle path inspection failed"
+            )
+        buffer = ctypes.create_unicode_buffer(size + 1)
+        written = get_final_path(handle, buffer, len(buffer), 0)
+        if not written or written >= len(buffer):
+            raise CanonicalOperationBindingError(
+                f"{label} final handle path inspection failed"
+            )
+        value = buffer.value
+        if value.startswith("\\\\?\\UNC\\"):
+            return ("\\\\" + value[8:]).rstrip("\\").casefold()
+        value = value.removeprefix("\\\\?\\")
+        return value.rstrip("\\").casefold()
 
     absolute = path.absolute()
     if not absolute.is_absolute() or not absolute.name:
@@ -225,8 +345,12 @@ def _stable_bytes_windows(path: Path, label: str) -> bytes:
         if (
             information.attributes & (reparse_attribute | directory_attribute)
             or file_id == (0, 0, 0)
+            or normalized_handle_path(file_handle)
+            != str(absolute).rstrip("\\").casefold()
         ):
             raise CanonicalOperationBindingError(f"{label} is not a regular non-reparse file")
+        if protected:
+            verify_protected_dacl(file_handle)
         chunks: list[bytes] = []
         while True:
             buffer = ctypes.create_string_buffer(1024 * 1024)
@@ -242,12 +366,12 @@ def _stable_bytes_windows(path: Path, label: str) -> bytes:
             close_handle(handle)
 
 
-def _stable_bytes(path: Path, label: str) -> bytes:
+def _stable_bytes(path: Path, label: str, *, protected: bool = False) -> bytes:
     """Read only via a platform-native no-follow/pinned boundary."""
     if sys.platform == "win32":
-        return _stable_bytes_windows(path, label)
+        return _stable_bytes_windows(path, label, protected=protected)
     if os.name == "posix":
-        return _stable_bytes_posix(path, label)
+        return _stable_bytes_posix(path, label, protected=protected)
     raise CanonicalOperationBindingError(f"{label} unsupported platform boundary")
 
 

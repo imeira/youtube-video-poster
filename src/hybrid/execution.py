@@ -135,8 +135,6 @@ class Executor:
         _authenticated_budget_bridge=None,
         _jaco_final_admission_verifier=None,
         _jaco_production_binding: dict | None = None,
-        _trusted_issuer_verifier=None,
-        _trusted_issuer_binding: dict | None = None,
     ):
         self._database = Path(database)
         self._database.parent.mkdir(parents=True, exist_ok=True)
@@ -152,19 +150,6 @@ class Executor:
         # Deliberately private, factory-installed binding.  This is not a
         # general LIVE switch: only the fixed Jacó FLUX3 composition can use it.
         self._jaco_production_binding = _jaco_production_binding
-        if (_trusted_issuer_verifier is None) != (_trusted_issuer_binding is None):
-            raise ValueError("trusted issuer verifier and binding must be composed together")
-        if _trusted_issuer_verifier is not None and (
-            not callable(_trusted_issuer_verifier)
-            or not isinstance(_trusted_issuer_binding, dict)
-            or set(_trusted_issuer_binding) != {"kind", "auth_scope"}
-            or _trusted_issuer_binding.get("kind") != "HERMES_TRUSTED_ISSUER"
-            or not isinstance(_trusted_issuer_binding.get("auth_scope"), str)
-            or not _trusted_issuer_binding["auth_scope"].startswith("HERMES_RECEIPT:")
-        ):
-            raise ValueError("fixed Hermes trusted issuer composition is invalid")
-        self._trusted_issuer_verifier = _trusted_issuer_verifier
-        self._trusted_issuer_binding = _trusted_issuer_binding
         if (_authenticated_budget_composition is None) != (
             _authenticated_budget_bridge is None
         ) or (
@@ -392,7 +377,8 @@ class Executor:
         return configured
 
     def _verify_prepared_fal_admission(
-        self, job: Job, row: dict, *, require_admitted_marker=True
+        self, job: Job, row: dict, *, require_admitted_marker=True,
+        trusted_issuer_loader=None,
     ) -> None:
         """Require the configured ledger's exact durable reservation before POST."""
         ledger = self._standing_ledger
@@ -466,16 +452,13 @@ class Executor:
                 job, generic_marker, self.database, self._standing_ledger, row
             )
             generic_final_admission = True
-        trusted_issuer_admission = False
-        if self._trusted_issuer_verifier is not None:
-            if (
-                job.mode != "LIVE"
-                or self._trusted_issuer_binding is None
-                or binding["auth_scope"] != self._trusted_issuer_binding["auth_scope"]
-                or self._trusted_issuer_verifier(job) is not True
-            ):
+        trusted_issuer_admission = trusted_issuer_loader is not None
+        if trusted_issuer_admission:
+            expected_scope = self._authorize_trusted_issuer(
+                trusted_issuer_loader, job
+            )
+            if job.mode != "LIVE" or binding["auth_scope"] != expected_scope:
                 raise PermissionError("Hermes trusted issuer admission changed")
-            trusted_issuer_admission = True
         jaco_final_admission = False
         if job.endpoint == "blackforestlabs/flux-3/text-to-image" and not trusted_issuer_admission:
             marker = row.get("final_admission_marker")
@@ -997,6 +980,26 @@ class Executor:
         billing_snapshot_generation=None,
         billing_snapshot_owner=None,
     ):
+        return self._prepare_intent(
+            job,
+            auth_scope=auth_scope,
+            billing_snapshot_generation=billing_snapshot_generation,
+            billing_snapshot_owner=billing_snapshot_owner,
+        )
+
+    def _prepare_trusted_issuer_intent(self, job: Job, loader):
+        auth_scope = self._authorize_trusted_issuer(loader, job)
+        return self._prepare_intent(job, auth_scope=auth_scope, trusted_issuer_loader=loader)
+
+    def _prepare_intent(
+        self,
+        job: Job,
+        *,
+        auth_scope=None,
+        billing_snapshot_generation=None,
+        billing_snapshot_owner=None,
+        trusted_issuer_loader=None,
+    ):
         """Durably record a non-submitting intent for external admission.
 
         This deliberately performs no provider construction or network I/O.  A
@@ -1022,13 +1025,12 @@ class Executor:
                 and self._jaco_production_binding.get("kind")
                 == "JACO_FLUX3_FIXED_PRODUCTION_COMPOSITION"
             )
-            trusted_live = (
-                job.mode == "LIVE"
-                and self._trusted_issuer_verifier is not None
-                and isinstance(self._trusted_issuer_binding, dict)
-                and self._trusted_issuer_binding.get("kind") == "HERMES_TRUSTED_ISSUER"
-                and self._trusted_issuer_verifier(job) is True
+            trusted_scope = (
+                self._authorize_trusted_issuer(trusted_issuer_loader, job)
+                if trusted_issuer_loader is not None
+                else None
             )
+            trusted_live = job.mode == "LIVE" and trusted_scope is not None
             if job.mode != "TEST" and not jaco_live and not trusted_live:
                 raise PermissionError(
                     "raw prepared intent cannot authorize LIVE admission"
@@ -1036,7 +1038,7 @@ class Executor:
             expected_scope = (
                 self._jaco_production_binding["auth_scope"]
                 if jaco_live else (
-                    self._trusted_issuer_binding["auth_scope"]
+                    trusted_scope
                     if trusted_live else "TEST_LOCAL_ONLY"
                 )
             )
@@ -1183,6 +1185,14 @@ class Executor:
                      charged=str(actual), actual_cost=str(actual), cache_hit=False)
         return self.inspect(job.request_id)
 
+    @staticmethod
+    def _authorize_trusted_issuer(loader, job: Job) -> str:
+        module = importlib.import_module("src.hybrid.trusted_issuer_admission")
+        loader_type = getattr(module, "_TrustedIssuerExecutionLoader", None)
+        if loader_type is None or type(loader) is not loader_type:
+            raise PermissionError("fixed trusted issuer loader is required")
+        return loader.authorize(job)
+
     async def run(
         self,
         job: Job,
@@ -1192,9 +1202,62 @@ class Executor:
         settlement_checkpoint: SettlementCheckpoint | None = None,
         submit_prepared: bool = False,
     ):
+        return await self._run(
+            job,
+            provider,
+            authorization=authorization,
+            price=price,
+            settlement_checkpoint=settlement_checkpoint,
+            submit_prepared=submit_prepared,
+        )
+
+    async def _run_trusted_issuer(
+        self, job: Job, provider: Provider, loader, *, authorization, price
+    ):
+        self._authorize_trusted_issuer(loader, job)
+        return await self._run(
+            job,
+            provider,
+            authorization=authorization,
+            price=price,
+            submit_prepared=True,
+            trusted_issuer_loader=loader,
+        )
+
+    async def _run(
+        self,
+        job: Job,
+        provider: Provider,
+        authorization=None,
+        price=None,
+        settlement_checkpoint: SettlementCheckpoint | None = None,
+        submit_prepared: bool = False,
+        trusted_issuer_loader=None,
+    ):
         job = deepcopy(job)  # Caller mutation cannot change identity during await.
         if job.mode not in {"TEST", "LIVE"} or provider.mode != job.mode:
             raise PermissionError("TEST/LIVE provider mode mismatch")
+        if (
+            job.mode == "LIVE"
+            and trusted_issuer_loader is None
+            and self._jaco_production_binding is None
+        ):
+            existing = self.inspect(job.request_id)
+            generic_marker = (
+                existing.get("generic_admission_marker")
+                if isinstance(existing, dict)
+                else None
+            )
+            if generic_marker is None:
+                raise PermissionError(
+                    "direct Executor LIVE cannot be authorized by caller evidence"
+                )
+            validate_generic_admission_marker = importlib.import_module(
+                "src.hybrid.qualified_episode_operation"
+            ).validate_generic_admission_marker
+            validate_generic_admission_marker(
+                job, generic_marker, self.database, self._standing_ledger, existing
+            )
         money(job.cost)
         if not job.scene or not job.endpoint or job.cost <= 0:
             raise ValueError(
@@ -1379,7 +1442,9 @@ class Executor:
                 if row["status"] == "PREPARED" and submit_prepared:
                     # A boolean is not authority: before the irreversible POST,
                     # re-read the configured ledger's exact durable reservation.
-                    self._verify_prepared_fal_admission(job, row)
+                    self._verify_prepared_fal_admission(
+                        job, row, trusted_issuer_loader=trusted_issuer_loader
+                    )
                     self._change(
                         job.request_id,
                         status="SUBMITTING",

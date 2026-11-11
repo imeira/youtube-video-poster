@@ -13,11 +13,16 @@ from pathlib import Path
 import pytest
 
 OPERATION_ID = "JOSE_GEN37_IDENTITY_FRAME_001"
-HERMES_ROOT = Path(os.environ.get(
-    "HERMES_PAIRED_ROOT", "C:/Users/meira/AppData/Local/hermes/cache/scratch/r67/h"
-))
-HERMES_HEAD = "5969fd7bb2d4c317048d218531307ec9a125d17a"
+_HERMES_PAIRED_ROOT = os.environ.get("HERMES_PAIRED_ROOT")
+HERMES_ROOT = Path(_HERMES_PAIRED_ROOT) if _HERMES_PAIRED_ROOT else Path("paired-hermes-unset")
+# Private paired CI supplies its immutable checked-out issuer SHA. The legacy pin
+# remains the explicit manual default for the original reviewed pairing.
+HERMES_HEAD = os.environ.get("HERMES_EXPECTED_SHA", "5969fd7bb2d4c317048d218531307ec9a125d17a")
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+pytestmark = pytest.mark.skipif(
+    _HERMES_PAIRED_ROOT is None,
+    reason="paired Hermes coverage is run manually/private-side with HERMES_PAIRED_ROOT",
+)
 
 
 def _canonical(value: object) -> bytes:
@@ -169,6 +174,11 @@ async def _cross_repo_fixture(tmp_path: Path, *, actual_chat: str = "42"):
     operation_path.write_bytes(_canonical(operation))
     export = service.studio_receipt_export
     export.start()
+    published_endpoint = Path(export.endpoint_file).read_text(encoding="ascii")
+    if os.name == "nt":
+        assert published_endpoint.startswith("test+tcp+hmac://127.0.0.1:")
+    else:
+        assert "://" not in published_endpoint and Path(published_endpoint).is_absolute()
     return {
         "root": protected, "service": service, "export": export, "receipt": receipt,
         "operation": operation, "operation_path": operation_path, "documents": documents,
@@ -250,10 +260,15 @@ async def test_violations_have_zero_provider_effects(tmp_path, attack):
     assert not (fixture["root"] / "state" / "executor.sqlite3").exists()
 
 
-def test_production_is_fixed_and_reports_unprovisioned_without_raising():
-    from src.hybrid.trusted_issuer_admission import JoseTrustedIssuerAdmission
+def test_production_is_fixed_and_reports_unprovisioned_without_raising(
+    monkeypatch, tmp_path
+):
+    import src.hybrid.trusted_issuer_admission as admission
 
-    blocked = JoseTrustedIssuerAdmission.production()
+    fixture_root = tmp_path / "unprovisioned-production-fixture"
+    fixture_root.mkdir()
+    monkeypatch.setattr(admission, "_PRODUCTION_ROOT", fixture_root)
+    blocked = admission.JoseTrustedIssuerAdmission.production()
     assert blocked["status"] == "BLOCKED"
     with pytest.raises(TypeError):
-        JoseTrustedIssuerAdmission.production(root=Path("attacker"))
+        admission.JoseTrustedIssuerAdmission.production(root=Path("attacker"))

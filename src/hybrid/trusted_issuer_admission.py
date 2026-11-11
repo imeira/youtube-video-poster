@@ -13,11 +13,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from src.hybrid.canonical_operation_binding import (
+    CanonicalOperationBindingError,
+    _stable_bytes,
+)
 from src.hybrid.execution import Authorization, Executor, Job, Price
 from src.hybrid.hermes_issuer_client import (
     HermesIssuerClient,
     HermesIssuerClientError,
-    _verify_protection,
 )
 from src.hybrid.live import FalFluxProvider
 from src.hybrid.planner import Config
@@ -29,6 +32,7 @@ _JOSE_EPISODE_ID = "JOSE_GENESIS37"
 _PRODUCTION_ROOT = Path("C:/HermesStudio/production/trusted-issuer")
 _SHA = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _TOKEN = object()
+_EXECUTION_TOKEN = object()
 _HERMES_DESCRIPTOR_FIELDS = {
     "schema_version", "descriptor_id", "operation_id", "episode_id", "operation_kind",
     "provider_id", "endpoint_id", "input_binding_sha256", "standing_policy_id",
@@ -125,18 +129,13 @@ def _protected_path(path: Path, label: str, *, production: bool) -> Path:
         checked = reject_reparse_path(path)
     except (OSError, ValueError) as error:
         raise TrustedIssuerAdmissionError(f"{label} is unavailable or reparse-linked") from error
-    if production and checked.exists() and checked.is_file():
-        try:
-            _verify_protection(checked)
-        except HermesIssuerClientError as error:
-            raise TrustedIssuerAdmissionError(f"{label} is not protected") from error
     return checked
 
 
 def _literal_child(root: Path, name: object, label: str, *, production: bool) -> Path:
     if not isinstance(name, str) or not name or any(v in name for v in ("/", "\\", ":", "..")):
         raise TrustedIssuerAdmissionError(f"{label} filename is not source-owned")
-    return _protected_path(root / name, label, production=production)
+    return root / name
 
 
 @dataclass(frozen=True, init=False)
@@ -177,8 +176,8 @@ class _FrozenRootPolicyLoader:
         binding = _closed(binding, {"name", "sha256"}, f"{label} binding")
         path = _literal_child(self._root, binding["name"], label, production=self._production)
         try:
-            raw = path.read_bytes()
-        except OSError as error:
+            raw = _stable_bytes(path, label, protected=self._production)
+        except (CanonicalOperationBindingError, OSError) as error:
             raise TrustedIssuerAdmissionError(f"{label} is unavailable") from error
         actual = sha256(raw).hexdigest()
         if actual != _digest(binding["sha256"], f"{label} binding"):
@@ -203,20 +202,47 @@ class _ProviderRegistry:
 
 
 class _RevalidatingProvider:
-    __slots__ = ("_provider", "_verify", "mode")
+    __slots__ = ("_admission", "_expected", "_provider", "mode")
 
-    def __init__(self, provider: object, verify: Callable[[], _VerifiedAdmission], mode: str):
+    def __init__(self, provider: object, admission: JoseTrustedIssuerAdmission,
+                 expected: _VerifiedAdmission, mode: str):
         if getattr(provider, "mode", None) != mode:
             raise TrustedIssuerAdmissionError("registered provider mode changed")
-        self._provider, self._verify, self.mode = provider, verify, mode
+        self._provider = provider
+        self._admission = admission
+        self._expected = expected
+        self.mode = mode
 
     async def submit(self, job, request_id, checkpoint):
-        self._verify()
+        self._admission._verify(self._expected)
         return await self._provider.submit(job, request_id, checkpoint)
 
     async def recover(self, job, request_id, provider_id, partial, checkpoint):
-        self._verify()
+        self._admission._verify(self._expected)
         return await self._provider.recover(job, request_id, provider_id, partial, checkpoint)
+
+
+class _TrustedIssuerExecutionLoader:
+    """Non-forgeable loader that reopens the fixed protected issuer source."""
+
+    __slots__ = ("_admission", "_expected")
+
+    def __init__(self, admission: JoseTrustedIssuerAdmission,
+                 expected: _VerifiedAdmission, *, _token: object) -> None:
+        if (
+            _token is not _EXECUTION_TOKEN
+            or type(admission) is not JoseTrustedIssuerAdmission
+            or type(expected) is not _VerifiedAdmission
+        ):
+            raise TypeError("trusted issuer execution loaders are composition-owned")
+        self._admission = admission
+        self._expected = expected
+
+    def authorize(self, job: Job) -> str:
+        verified = self._admission._verify(self._expected)
+        if job.mode != "LIVE" or verified.job != job:
+            raise TrustedIssuerAdmissionError("trusted issuer job binding changed")
+        return f"HERMES_RECEIPT:{verified.receipt_id}"
 
 
 class JoseTrustedIssuerAdmission:
@@ -265,11 +291,12 @@ class JoseTrustedIssuerAdmission:
                    now=now, production=False, _token=_TOKEN)
 
     def _source(self) -> dict[str, Any]:
-        path = _protected_path(self._root / "operations" / f"{JOSE_OPERATION_ID}.json",
-                               "Jose operation descriptor", production=self._production)
+        path = self._root / "operations" / f"{JOSE_OPERATION_ID}.json"
         try:
-            raw = path.read_bytes()
-        except OSError as error:
+            raw = _stable_bytes(
+                path, "Jose operation descriptor", protected=self._production
+            )
+        except (CanonicalOperationBindingError, OSError) as error:
             raise TrustedIssuerAdmissionError("Jose operation descriptor is unavailable") from error
         operation = _closed(_strict(raw, "Jose operation descriptor"), {
             "schema", "operation_id", "episode_id", "mode", "scene", "category",
@@ -469,25 +496,20 @@ class JoseTrustedIssuerAdmission:
             experiment_limit_usd=str(capability.maximum_usd), mode=job.mode,
         )
         auth_scope = f"HERMES_RECEIPT:{admitted.receipt_id}"
-        executor_kwargs: dict[str, Any] = {}
-        if job.mode == "LIVE":
-            executor_kwargs = {
-                "_trusted_issuer_binding": {
-                    "kind": "HERMES_TRUSTED_ISSUER", "auth_scope": auth_scope,
-                },
-                "_trusted_issuer_verifier": (
-                    lambda candidate: self._verify(admitted).job.request_id == candidate.request_id
-                ),
-            }
         executor = Executor(
             state / "executor.sqlite3", Config(limit=capability.maximum_usd, concurrency=1),
-            standing_ledger=ledger, **executor_kwargs,
+            standing_ledger=ledger,
+        )
+        execution_loader = (
+            _TrustedIssuerExecutionLoader(self, admitted, _token=_EXECUTION_TOKEN)
+            if job.mode == "LIVE" else None
         )
         self._verify(admitted)
         if executor.inspect(job.request_id) is None:
-            executor.prepare_intent(
-                job, auth_scope=auth_scope if job.mode == "LIVE" else "TEST_LOCAL_ONLY"
-            )
+            if execution_loader is None:
+                executor.prepare_intent(job, auth_scope="TEST_LOCAL_ONLY")
+            else:
+                executor._prepare_trusted_issuer_intent(job, execution_loader)
         self._verify(admitted)
         ledger.reserve(
             job.request_id, _JOSE_EPISODE_ID, job.endpoint, capability.maximum_usd,
@@ -497,7 +519,7 @@ class JoseTrustedIssuerAdmission:
         )
         registry = _ProviderRegistry(job.endpoint, self._provider_factory)
         provider = _RevalidatingProvider(
-            registry.create(job.endpoint), lambda: self._verify(admitted), job.mode
+            registry.create(job.endpoint), self, admitted, job.mode
         )
         authorization = price = None
         if job.mode == "LIVE":
@@ -509,6 +531,9 @@ class JoseTrustedIssuerAdmission:
                 job.endpoint, job.request_id, job.cost, valid_until,
                 admitted.quote["evidence_sha256"],
             )
-        return await executor.run(
-            job, provider, authorization=authorization, price=price, submit_prepared=True
-        )
+        if execution_loader is not None:
+            return await executor._run_trusted_issuer(
+                job, provider, execution_loader,
+                authorization=authorization, price=price,
+            )
+        return await executor.run(job, provider, submit_prepared=True)

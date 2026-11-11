@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import time
 from dataclasses import replace
 from decimal import Decimal
@@ -295,7 +296,7 @@ async def test_executor_reconciles_provider_local_checkpoint_without_resubmit(tm
 
 
 @pytest.mark.asyncio
-async def test_live_requires_bound_authorization_and_fresh_price(tmp_path):
+async def test_direct_live_rejects_even_well_formed_caller_evidence(tmp_path):
     request = job(tmp_path, mode="LIVE", manifest=manifest(tmp_path, "LIVE"))
     executor = Executor(tmp_path / "jobs.db", Config())
     provider = Provider(tmp_path)
@@ -317,19 +318,176 @@ async def test_live_requires_bound_authorization_and_fresh_price(tmp_path):
     with pytest.raises(PermissionError):
         await executor.run(replace(request, mode="TEST"), provider, auth, price)
     assert provider.calls == 0
-    first_receipt = await executor.run(request, provider, auth, price)
-    assert first_receipt["mode"] == "LIVE"
-    expired_auth = replace(auth, valid_until=0)
-    expired_price = replace(price, valid_until=0)
-    assert (
-        await executor.run(request, provider, expired_auth, expired_price)
-        == first_receipt
-    )
-    assert provider.calls == 1
+    with pytest.raises(PermissionError, match="direct Executor LIVE"):
+        await executor.run(request, provider, auth, price)
+    assert executor.inspect(request.request_id) is None
+    assert provider.calls == 0
+
+
+def test_executor_constructor_has_no_trusted_issuer_injection_api(tmp_path):
+    parameters = inspect.signature(Executor).parameters
+
+    assert "_trusted_issuer_verifier" not in parameters
+    assert "_trusted_issuer_binding" not in parameters
+    with pytest.raises(TypeError):
+        Executor(
+            tmp_path / "jobs.db",
+            Config(),
+            _trusted_issuer_verifier=lambda _job: True,
+            _trusted_issuer_binding={
+                "kind": "HERMES_TRUSTED_ISSUER",
+                "auth_scope": "HERMES_RECEIPT:forged",
+            },
+        )
 
 
 @pytest.mark.asyncio
-async def test_live_partial_recovery_does_not_require_new_submission_authority(
+async def test_direct_live_rejects_forged_authorization_before_reservation(tmp_path):
+    request = job(tmp_path, mode="LIVE", manifest=manifest(tmp_path, "LIVE"))
+    executor = Executor(tmp_path / "jobs.db", Config())
+    provider = Provider(tmp_path)
+    provider.mode = "LIVE"
+    authorization = Authorization(
+        request.request_id, "HERMES_TRUSTED_ISSUER", time.time() + 60, request.cost
+    )
+    price = Price(
+        request.endpoint,
+        request.request_id,
+        request.cost,
+        time.time() + 60,
+        "forged issuer evidence",
+    )
+
+    with pytest.raises(PermissionError, match="direct Executor LIVE"):
+        await executor.run(request, provider, authorization, price)
+
+    assert executor.inspect(request.request_id) is None
+    assert provider.calls == 0
+
+
+def test_direct_live_prepare_rejects_foreign_ledger_and_scope(tmp_path):
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    request = job(tmp_path, mode="LIVE", manifest=manifest(tmp_path, "LIVE"))
+    ledger = StandingBudgetLedger(
+        tmp_path / "foreign.sqlite3",
+        policy_sha256="a" * 64,
+        episode_limit_usd="1",
+        month_limit_usd="1",
+        experiment_limit_usd="1",
+        mode="LIVE",
+    )
+    executor = Executor(tmp_path / "jobs.db", Config(), standing_ledger=ledger)
+
+    with pytest.raises(PermissionError, match="raw prepared intent cannot authorize LIVE"):
+        executor.prepare_intent(request, auth_scope="HERMES_RECEIPT:forged")
+
+    assert executor.inspect(request.request_id) is None
+
+
+@pytest.mark.asyncio
+async def test_direct_live_rejects_foreign_executor_journal_before_provider(
+    monkeypatch, tmp_path
+):
+    request = job(tmp_path, mode="LIVE", manifest=manifest(tmp_path, "LIVE"))
+    executor = Executor(tmp_path / "jobs.db", Config())
+    provider = Provider(tmp_path)
+    provider.mode = "LIVE"
+    monkeypatch.setattr(
+        executor,
+        "inspect",
+        lambda _request_id: {
+            "status": "SUBMITTED",
+            "generic_admission_marker": None,
+        },
+    )
+
+    with pytest.raises(PermissionError, match="direct Executor LIVE"):
+        await executor.run(request, provider)
+
+    assert provider.calls == provider.recoveries == 0
+
+
+@pytest.mark.asyncio
+async def test_fixed_trusted_loader_is_rechecked_at_prepare_and_submit(
+    monkeypatch, tmp_path
+):
+    import src.hybrid.trusted_issuer_admission as admission
+    from src.hybrid.standing_budget import StandingBudgetLedger
+
+    request = job(tmp_path, mode="LIVE", manifest=manifest(tmp_path, "LIVE"))
+    capability = admission.FinancialCapability(
+        operation_id=admission.JOSE_OPERATION_ID,
+        episode_id="JOSE_GENESIS37",
+        policy_sha256="a" * 64,
+        currency="USD",
+        maximum_usd=request.cost,
+        _token=admission._TOKEN,
+    )
+    expected = admission._VerifiedAdmission(
+        "b" * 64,
+        "c" * 64,
+        "fixture-receipt",
+        request,
+        capability,
+        {},
+    )
+    composed = object.__new__(admission.JoseTrustedIssuerAdmission)
+    checks = []
+
+    def verify(self, prior=None):
+        assert self is composed
+        assert prior is None or prior is expected
+        checks.append(prior)
+        return expected
+
+    monkeypatch.setattr(admission.JoseTrustedIssuerAdmission, "_verify", verify)
+    loader = admission._TrustedIssuerExecutionLoader(
+        composed, expected, _token=admission._EXECUTION_TOKEN
+    )
+    ledger = StandingBudgetLedger(
+        tmp_path / "standing.sqlite3",
+        policy_sha256=capability.policy_sha256,
+        episode_limit_usd=str(request.cost),
+        month_limit_usd=str(request.cost),
+        experiment_limit_usd=str(request.cost),
+        mode="LIVE",
+    )
+    executor = Executor(
+        tmp_path / "jobs.db", Config(limit=request.cost), standing_ledger=ledger
+    )
+    executor._prepare_trusted_issuer_intent(request, loader)
+    scope = "HERMES_RECEIPT:fixture-receipt"
+    ledger.reserve(
+        request.request_id,
+        "JOSE_GENESIS37",
+        request.endpoint,
+        request.cost,
+        settlement_mode="FAL_READBACK_V2",
+        auth_scope=scope,
+        provider_request_id="UNASSIGNED",
+        authority_mode="LIVE",
+    )
+    provider = Provider(tmp_path)
+    provider.mode = "LIVE"
+    authorization = Authorization(
+        request.request_id, "HERMES_TRUSTED_ISSUER", time.time() + 60, request.cost
+    )
+    price = Price(
+        request.endpoint, request.request_id, request.cost, time.time() + 60, "fixture"
+    )
+
+    receipt = await executor._run_trusted_issuer(
+        request, provider, loader, authorization=authorization, price=price
+    )
+
+    assert receipt["status"] == "COMPLETE"
+    assert provider.calls == 1
+    assert len(checks) >= 4
+
+
+@pytest.mark.asyncio
+async def test_direct_live_cannot_create_partial_state_for_later_recovery(
     tmp_path,
 ):
     request = job(tmp_path, mode="LIVE", manifest=manifest(tmp_path, "LIVE"))
@@ -345,14 +503,15 @@ async def test_live_partial_recovery_does_not_require_new_submission_authority(
         "official receipt",
     )
     auth = Authorization(request.request_id, "human", time.time() + 60, request.cost)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(PermissionError, match="direct Executor LIVE"):
         await executor.run(request, provider, auth, price)
 
     provider.crash = False
-    receipt = await executor.run(request, provider)
+    with pytest.raises(PermissionError, match="direct Executor LIVE"):
+        await executor.run(request, provider)
 
-    assert receipt["status"] == "COMPLETE"
-    assert provider.calls == provider.recoveries == 1
+    assert executor.inspect(request.request_id) is None
+    assert provider.calls == provider.recoveries == 0
 
 
 @pytest.mark.asyncio

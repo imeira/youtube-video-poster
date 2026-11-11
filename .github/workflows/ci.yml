@@ -65,13 +65,6 @@ jobs:
         if: steps.project.outputs.python_project == 'true'
         run: python -m pip install -e ".[dev]"
 
-      - name: Check out paired Hermes receipt issuer
-        uses: actions/checkout@v5
-        with:
-          repository: imeira/hermes
-          ref: 5969fd7bb2d4c317048d218531307ec9a125d17a
-          path: paired-hermes
-
       - name: Validate workflow YAML
         shell: bash
         run: |
@@ -159,14 +152,6 @@ jobs:
           python scripts/run_offline_tests.py tests/unit/ -m "not slow" --tb=short -q \
             --junitxml=reports/pytest.xml
 
-      - name: Run Hermes trusted-issuer integration
-        if: steps.project.outputs.python_project == 'true'
-        shell: bash
-        env:
-          HERMES_PAIRED_ROOT: ${{ github.workspace }}/paired-hermes
-        run: |
-          python -m pytest tests/integration/test_trusted_issuer_admission.py --tb=short -q
-
       - name: Note absent Python tests
         if: steps.project.outputs.unit_tests != 'true'
         run: echo "No tests/unit directory on this branch; Python test gate skipped." >> "$GITHUB_STEP_SUMMARY"
@@ -191,4 +176,6 @@ jobs:
             echo "- Python project detected: \`${{ steps.project.outputs.python_project }}\`"
             echo "- Unit tests detected: \`${{ steps.project.outputs.unit_tests }}\`"
             echo "- Ruff changed-Python lint is required (ruff==0.17.3)."
+            echo "- Paired private Hermes PR6 coverage is not claimed by public Studio CI."
+            echo "- The paired check must be run manually/private-side with \`HERMES_PAIRED_ROOT\`; see \`docs/paired-hermes-pr6-check.md\`."
           } >> "$GITHUB_STEP_SUMMARY"
