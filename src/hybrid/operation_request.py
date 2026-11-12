@@ -32,6 +32,12 @@ _EXPECTED_SCOPE = {
     "locale": "pt-BR",
     "title": "José e sua túnica especial",
 }
+_CANONICAL_PASSAGE = "Gênesis 37"
+_CANONICAL_BEAT_VERSES = (
+    "37:2", "37:3–4", "37:5–8", "37:9–11", "37:12–14", "37:15–17",
+    "37:18–20", "37:21–22", "37:23–24", "37:25–28", "37:29–30",
+    "37:31–32", "37:33–35", "37:36", "editorial",
+)
 
 
 class OperationRequestError(ValueError):
@@ -249,6 +255,8 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
     for key, expected in _EXPECTED_SCOPE.items():
         if scope[key] != expected:
             raise OperationRequestError(f"request manifest {key} metadata is required")
+    if scope["passage"] != _CANONICAL_PASSAGE:
+        raise OperationRequestError("request manifest passage must be literal Gênesis 37")
     binding_keys = {"approved_source", "approved_input_sha256", "sentence_boundary_events", "sentence_boundary_events_sha256", "audio_qa", "audio_qa_sha256", "wav", "wav_sha256", "mp3", "mp3_sha256"}
     count_keys = {"provider_sentence_boundaries", "captions", "semantic_beats", "shot_needs", "asset_requirements_missing", "declared_narrator_words", "whitespace_split_tokens", "local_unicode_internal_hyphen_apostrophe_tokens", "immutable_audio_qa_normalized_tokens"}
     output_keys = {"timeline.json", "subtitles.srt", "subtitles.vtt", "asset_requirements.json"}
@@ -277,12 +285,14 @@ def parse_canonical_editorial_bundle(*, timeline_bytes: bytes, asset_requirement
     shot_ids: list[str] = []
     referenced_assets: list[str] = []
     previous_end: Decimal | None = None
-    for beat in beats:
+    for beat_index, beat in enumerate(beats):
         beat = _closed(beat, {"id", "source_verse", "meaning", "sentence_range", "start_seconds", "end_seconds", "coverage_rule", "shots"}, "timeline beat")
         beat_id = _nonempty_string(beat["id"], "beat id")
         beat_ids.append(beat_id)
         for field in ("source_verse", "meaning", "coverage_rule"):
             _nonempty_string(beat[field], f"timeline beat {field}")
+        if beat["source_verse"] != _CANONICAL_BEAT_VERSES[beat_index]:
+            raise OperationRequestError("timeline source verse is outside canonical Gênesis 37 coverage")
         sentence_range = beat["sentence_range"]
         if (type(sentence_range) is not list or len(sentence_range) != 2
                 or any(type(item) is not int for item in sentence_range)
@@ -377,78 +387,52 @@ def generate_v4_preflight_artifact(*, canonical_bundle: object, checkout_root: s
     }
 
 
-_SHOT_ASSETS = (
-    ("A01", "A02", "A02"), ("A03", "A04", "A05"), ("A06", "A07", "A05"),
-    ("A08", "A09", "A05"), ("A10", "A11", "A11"), ("A12", "A13", "A13"),
-    ("A14", "A15", "A15"), ("A16", "A17", "A17"), ("A18", "A18", "A19"),
-    ("A20", "A21", "A21"), ("A22", "A22", "A22"), ("A23", "A23", "A23"),
-    ("A23", "A23", "A23"), ("A20", "A21", "A21"), ("A01", "A02", "A02"),
-)
-_ASSET_DIRECTION = {
-    "A01": "campo de Canaã e rebanho, sem personagem obrigatório",
-    "A02": "José de 17 anos com rebanho, túnica especial longa sem cor alegada",
-    "A03": "Jacó/Israel idoso e José em encontro familiar seguro",
-    "A04": "mãos de Jacó entregando a túnica especial a José, anatomia legível",
-    "A05": "irmãos em reação de ressentimento, separados, sem ameaça física",
-    "A06": "sonho dos feixes em linguagem infantil simbólica, sem coroas ou tronos",
-    "A07": "José contando o primeiro sonho a irmãos, composição respeitosa",
-    "A08": "sonho do sol, lua e onze estrelas como símbolo, não como pessoas curvadas",
-    "A09": "Jacó repreende José com expressão preocupada, sem violência",
-    "A10": "Jacó envia José perto de Siquém, partida familiar segura",
-    "A11": "José caminhando e procurando os irmãos, paisagem de Canaã",
-    "A12": "José procurando no campo; homem sem nome ao longe",
-    "A13": "homem sem nome aponta a direção de Dotã para José, mãos e braços legíveis",
-    "A14": "irmãos observam José de longe; tensão sem gesto violento",
-    "A15": "conversa tensa dos irmãos, sem armas, ferimentos ou agressão",
-    "A16": "Rúben intervém diante dos irmãos, braços e mãos anatomicamente claros",
-    "A17": "cisterna seca vista de forma não gráfica; José protegido e sem ferimentos",
-    "A18": "cisterna seca e seu entorno; nenhum José quando a cena exigir que esteja vazia",
-    "A19": "túnica especial retirada apresentada sem violência gráfica",
-    "A20": "caravana de ismaelitas/midianitas em deslocamento, sem estereótipos ofensivos",
-    "A21": "Judá e irmãos perto da caravana; moedas discretas, sem glorificar a venda",
-    "A22": "Rúben encontra a cisterna vazia e reage com desespero não gráfico",
-    "A23": "Jacó recebe e reconhece a túnica manchada, lamento contido e não gráfico",
-}
 _ARTICULATED_BEATS = {"B02", "B08", "B10"}
 _THUMBNAIL_COPY = ("JOSÉ E SUA TÚNICA ESPECIAL", "A INVEJA MACHUCA", "GÊNESIS 37")
 
 
-def _validate_preflight_for_packet(preflight: object, bundle: CanonicalEditorialBundle) -> None:
-    if type(preflight) is not dict or preflight.get("schema") != "jose-operation-preflight/v4":
+def _validate_preflight_for_packet(preflight_bytes: object, bundle: CanonicalEditorialBundle) -> dict[str, Any]:
+    preflight = _strict_bytes_json(preflight_bytes, "preflight")
+    _closed(preflight, {"schema", "request", "request_sha256", "parent_manifest_sha256", "gate", "status", "human_approval", "supersedes"}, "preflight")
+    if preflight["schema"] != "jose-operation-preflight/v4":
         raise OperationRequestError("v4 preflight is required")
-    request = preflight.get("request")
-    if type(request) is not dict or preflight.get("status") != "PREPRODUCTION_READY":
+    request = _closed(preflight["request"], {"scope", "base_revision", "code_revision", "editorial_artifact_hashes", "editorial_inventory", "caption_gap_report", "paid_generation", "dispatch_permitted"}, "preflight request")
+    if preflight["status"] != "PREPRODUCTION_READY" or preflight["gate"] != "INDEPENDENT_QA_REQUIRED_NOT_HUMAN_APPROVAL" or preflight["human_approval"] is not False:
         raise OperationRequestError("preflight must remain preproduction ready")
-    if request.get("paid_generation") is not False or request.get("dispatch_permitted") is not False:
+    if request["paid_generation"] is not False or request["dispatch_permitted"] is not False:
         raise OperationRequestError("preflight must not permit generation or dispatch")
-    if preflight.get("parent_manifest_sha256") != bundle.parent_manifest_sha256:
+    _digest(preflight["request_sha256"], "preflight request_sha256")
+    if preflight["request_sha256"] != _raw_digest(_canonical(request)):
+        raise OperationRequestError("preflight request_sha256 does not bind canonical request")
+    _closed(request["scope"], {"channel", "playlist", "language", "title"}, "preflight scope")
+    if request["scope"] != {"channel": bundle.channel, "playlist": bundle.playlist, "language": bundle.language, "title": bundle.title}:
+        raise OperationRequestError("preflight scope binding mismatch")
+    for revision in ("base_revision", "code_revision"):
+        if type(request[revision]) is not str or not _GIT_SHA.fullmatch(request[revision]):
+            raise OperationRequestError(f"preflight {revision} is invalid")
+    if preflight["parent_manifest_sha256"] != bundle.parent_manifest_sha256:
         raise OperationRequestError("preflight parent manifest binding mismatch")
-    if request.get("editorial_artifact_hashes") != bundle.artifact_hashes():
+    if _closed_bindings(request["editorial_artifact_hashes"], set(bundle.artifact_hashes()), "preflight editorial hashes") != bundle.artifact_hashes():
         raise OperationRequestError("preflight editorial hash binding mismatch")
-    if request.get("editorial_inventory") != {
-        "audio_duration_seconds": bundle.audio_duration_seconds,
-        "caption_cue_count": bundle.caption_cue_count,
-        "beat_count": bundle.beat_count,
-        "shot_count": bundle.shot_count,
-    }:
+    inventory = _closed(request["editorial_inventory"], {"audio_duration_seconds", "caption_cue_count", "beat_count", "shot_count"}, "preflight editorial inventory")
+    if inventory != {"audio_duration_seconds": bundle.audio_duration_seconds, "caption_cue_count": bundle.caption_cue_count, "beat_count": bundle.beat_count, "shot_count": bundle.shot_count}:
         raise OperationRequestError("preflight editorial inventory mismatch")
+    gaps = _closed(request["caption_gap_report"], {"inter_cue_gaps_seconds", "trailing_gap_seconds", "policy"}, "preflight caption gaps")
+    if gaps != bundle.caption_gap_report:
+        raise OperationRequestError("preflight caption gap binding mismatch")
+    supersedes = _closed(preflight["supersedes"], {"schema", "reason"}, "preflight supersedes")
+    if supersedes["schema"] != "jose-operation-preflight/v3" or not _nonempty_string(supersedes["reason"], "preflight supersedes reason"):
+        raise OperationRequestError("preflight supersedes binding is invalid")
+    return preflight
 
 
 def compile_jose_preproduction_packet(*, timeline_bytes: bytes, asset_requirements_bytes: bytes,
                                      subtitles_bytes: bytes, vtt_bytes: bytes,
                                      parent_manifest_bytes: bytes, request_manifest_bytes: bytes,
-                                     preflight: object, thumbnail_brief_bytes: bytes) -> dict[str, object]:
-    """Compile the verified José bytes into an offline visual-production packet.
-
-    This is a pure compiler: it opens no paths and cannot construct a provider,
-    renderer, delivery client, or executable authority.
-    """
-    bundle = parse_canonical_editorial_bundle(
-        timeline_bytes=timeline_bytes, asset_requirements_bytes=asset_requirements_bytes,
-        subtitles_bytes=subtitles_bytes, vtt_bytes=vtt_bytes,
-        parent_manifest_bytes=parent_manifest_bytes, request_manifest_bytes=request_manifest_bytes,
-    )
-    _validate_preflight_for_packet(preflight, bundle)
+                                     preflight_bytes: bytes, thumbnail_brief_bytes: bytes) -> dict[str, object]:
+    """Compile validated bytes into a non-promotable offline production packet."""
+    bundle = parse_canonical_editorial_bundle(timeline_bytes=timeline_bytes, asset_requirements_bytes=asset_requirements_bytes, subtitles_bytes=subtitles_bytes, vtt_bytes=vtt_bytes, parent_manifest_bytes=parent_manifest_bytes, request_manifest_bytes=request_manifest_bytes)
+    _validate_preflight_for_packet(preflight_bytes, bundle)
     if not isinstance(thumbnail_brief_bytes, bytes):
         raise OperationRequestError("thumbnail brief must be bytes")
     try:
@@ -459,59 +443,18 @@ def compile_jose_preproduction_packet(*, timeline_bytes: bytes, asset_requiremen
         raise OperationRequestError("thumbnail brief lacks immutable child-safe copy")
     timeline = _strict_bytes_json(timeline_bytes, "timeline")
     assets_source = _strict_bytes_json(asset_requirements_bytes, "asset_requirements")
-    identity = assets_source["identity_requirements"]
-    if type(identity) is not dict or set(_ASSET_DIRECTION) != {asset for group in _SHOT_ASSETS for asset in group}:
-        raise OperationRequestError("asset compiler catalog is incomplete")
-    coverage: list[dict[str, object]] = []
-    asset_to_shots: dict[str, list[str]] = {asset: [] for asset in _ASSET_DIRECTION}
-    for beat, asset_ids in zip(timeline["beats"], _SHOT_ASSETS):
-        for shot, asset_id in zip(beat["shots"], asset_ids):
-            asset_to_shots[asset_id].append(shot["id"])
-            coverage.append({
-                "beat_id": beat["id"], "shot_id": shot["id"], "source_verse": beat["source_verse"],
-                "semantic_relation": beat["meaning"], "focus": shot["focus"],
-                "asset_id": asset_id, "asset_status": "ASSETS_REQUIRED",
-            })
-    plans: list[dict[str, object]] = []
-    for asset_id, direction in _ASSET_DIRECTION.items():
-        plans.append({
-            "asset_id": asset_id, "status": "ASSETS_REQUIRED", "covered_shots": asset_to_shots[asset_id],
-            "prompt": (
-                "Animação 3D infantil, formas arredondadas, luz acolhedora, Gênesis 37; "
-                f"{direction}. Somente o elenco permitido pelo beat; identidade canônica "
-                "aprovada por image-to-image é obrigatória antes de qualquer geração final. "
-                "Sem texto, logotipo, marca-d’água, violência gráfica, Deus em forma humana, "
-                "pessoas extras, anatomia defeituosa ou túnica com cor não comprovada."
-            ),
-            "required_identity_ids": [key for key in identity if key != "ID-LORENA"],
-            "references": "MISSING_CANONICAL_REFERENCES",
-        })
+    identity, requirements = assets_source["identity_requirements"], assets_source["asset_requirements"]
+    if type(identity) is not dict or type(requirements) is not list:
+        raise OperationRequestError("validated asset source is required")
+    requirements_by_id = {row["id"]: row for row in requirements}
+    coverage, plans = [], []
+    for beat in timeline["beats"]:
+        for shot in beat["shots"]:
+            requirement = requirements_by_id[shot["asset_requirement_id"]]
+            coverage.append({"beat_id": beat["id"], "shot_id": shot["id"], "source_verse": beat["source_verse"], "semantic_relation": beat["meaning"], "focus": shot["focus"], "asset_requirement_id": requirement["id"], "asset_status": "ASSETS_REQUIRED"})
+            plans.append({"asset_requirement_id": requirement["id"], "status": "ASSETS_REQUIRED", "covered_shots": [shot["id"]], "allowed_characters": requirement["allowed_characters"], "safety": requirement["safety"], "prompt": f"Passagem validada {_CANONICAL_PASSAGE}, verso {beat['source_verse']}; relação: {beat['meaning']}; foco: {shot['focus']}; necessidade visual: {requirement['mandatory_visual_need']}; elenco permitido: {requirement['allowed_characters']}; segurança: {requirement['safety']}", "references": "MISSING_CANONICAL_REFERENCES"})
     motion = []
     for beat in timeline["beats"]:
         route = "ARTICULATED_I2V_REQUIRED_AFTER_APPROVED_SOURCE" if beat["id"] in _ARTICULATED_BEATS else "LOCAL_COMPOSITION_AFTER_APPROVED_SOURCE"
-        motion.append({"beat_id": beat["id"], "route": route, "status": "ASSETS_REQUIRED",
-                       "reason": beat["meaning"], "source_frame": "MISSING_APPROVED_ASSET_HASH"})
-    return {
-        "schema": "jose-gen37-production-packet/v1", "mode": "PREPRODUCTION_ONLY",
-        "status": "ASSETS_REQUIRED", "non_promotable": True,
-        "source_bindings": {"preflight_sha256": _raw_digest(_canonical(preflight)),
-                            "thumbnail_brief_sha256": _raw_digest(thumbnail_brief_bytes),
-                            **bundle.artifact_hashes(), "narration_input_sha256": bundle.narration_input_sha256},
-        "scope": {"channel": bundle.channel, "playlist": bundle.playlist, "language": bundle.language, "title": bundle.title},
-        "reference_inventory": {
-            "available": {"editorial_bundle": "HASH_BOUND", "narration_timeline": "HASH_BOUND", "thumbnail_brief": "HASH_BOUND"},
-            "missing": {"canonical_identity_references": "ASSETS_REQUIRED", "approved_visual_assets": "ASSETS_REQUIRED", "approved_motion_clips": "ASSETS_REQUIRED"},
-        },
-        "eligibility": {"audio": "LICENSE_UNKNOWN_NOT_ELIGIBLE", "provider_dispatch": "BLOCKED",
-                        "render": "BLOCKED", "telegram": "BLOCKED", "publication": "BLOCKED"},
-        "coverage": {"counts": {"beats": bundle.beat_count, "shots": bundle.shot_count, "assets_planned": len(plans)}, "shots": coverage},
-        "assets": {"status": "ASSETS_REQUIRED", "canonical_identity_requirements": identity,
-                   "references": "MISSING_CANONICAL_REFERENCES", "plan": plans},
-        "motion_inventory": motion,
-        "closing_lorena": {"status": "ASSETS_REQUIRED", "role": "CLOSING_ONLY_NOT_OFFICIAL_NARRATION",
-                            "identity": "CANONICAL_C_V3_REQUIRED", "voice": "LORENA_V9_REQUIRED",
-                            "maximum_duration_s": 10, "audio_binding": "MISSING"},
-        "thumbnail": {"status": "ASSETS_REQUIRED", "geometry": "1280x720", "channel": bundle.channel,
-                      "playlist": bundle.playlist, "copy": list(_THUMBNAIL_COPY),
-                      "gate_order": ["THUMBNAIL_HUMAN_APPROVAL", "VIDEO_HUMAN_APPROVAL", "EXPLICIT_LATER_PUBLICATION_ORDER"]},
-    }
+        motion.append({"beat_id": beat["id"], "route": route, "status": "ASSETS_REQUIRED", "reason": beat["meaning"], "source_frame": "MISSING_APPROVED_ASSET_HASH"})
+    return {"schema": "jose-gen37-production-packet/v1", "mode": "PREPRODUCTION_ONLY", "status": "ASSETS_REQUIRED", "non_promotable": True, "source_bindings": {"preflight_sha256": _raw_digest(preflight_bytes), "thumbnail_brief_sha256": _raw_digest(thumbnail_brief_bytes), **bundle.artifact_hashes(), "narration_input_sha256": bundle.narration_input_sha256}, "scope": {"channel": bundle.channel, "playlist": bundle.playlist, "language": bundle.language, "title": bundle.title}, "reference_inventory": {"available": {"editorial_bundle": "HASH_BOUND", "narration_timeline": "HASH_BOUND", "thumbnail_brief": "HASH_BOUND"}, "missing": {"canonical_identity_references": "ASSETS_REQUIRED", "approved_visual_assets": "ASSETS_REQUIRED", "approved_motion_clips": "ASSETS_REQUIRED"}}, "eligibility": {"audio": "LICENSE_UNKNOWN_NOT_ELIGIBLE", "provider_dispatch": "BLOCKED", "render": "BLOCKED", "telegram": "BLOCKED", "publication": "BLOCKED"}, "coverage": {"counts": {"beats": bundle.beat_count, "shots": bundle.shot_count, "asset_requirements": len(requirements), "reusable_plans": 0, "existing_media": 0}, "shots": coverage}, "assets": {"status": "ASSETS_REQUIRED", "canonical_identity_requirements": identity, "references": "MISSING_CANONICAL_REFERENCES", "reuse_equivalence": {"version": "none/v1", "eligible_pairs": []}, "plan": plans}, "motion_inventory": motion, "closing_lorena": {"status": "ASSETS_REQUIRED", "role": "CLOSING_ONLY_NOT_OFFICIAL_NARRATION", "identity": "CANONICAL_C_V3_REQUIRED", "voice": "LORENA_V9_REQUIRED", "maximum_duration_s": 10, "audio_binding": "MISSING"}, "thumbnail": {"status": "ASSETS_REQUIRED", "geometry": "1280x720", "channel": bundle.channel, "playlist": bundle.playlist, "copy": list(_THUMBNAIL_COPY), "gate_order": ["THUMBNAIL_HUMAN_APPROVAL", "VIDEO_HUMAN_APPROVAL", "EXPLICIT_LATER_PUBLICATION_ORDER"]}}

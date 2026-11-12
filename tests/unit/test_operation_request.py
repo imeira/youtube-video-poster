@@ -315,7 +315,7 @@ def test_compiler_emits_non_promotable_packet_with_complete_shot_coverage():
         vtt_bytes=bundle["vtt"],
         parent_manifest_bytes=bundle["parent"],
         request_manifest_bytes=bundle["manifest"],
-        preflight=generate_v4_preflight_artifact(canonical_bundle=_parse(bundle), checkout_root=REPOSITORY),
+        preflight_bytes=_raw(generate_v4_preflight_artifact(canonical_bundle=_parse(bundle), checkout_root=REPOSITORY)),
         thumbnail_brief_bytes=(
             b"JOS\xc3\x89 E SUA T\xc3\x9aNICA ESPECIAL\nA INVEJA MACHUCA\nG\xc3\x8aNESIS 37\n"
         ),
@@ -324,7 +324,10 @@ def test_compiler_emits_non_promotable_packet_with_complete_shot_coverage():
     assert packet["mode"] == "PREPRODUCTION_ONLY"
     assert packet["status"] == "ASSETS_REQUIRED"
     assert packet["eligibility"]["audio"] == "LICENSE_UNKNOWN_NOT_ELIGIBLE"
-    assert packet["coverage"]["counts"] == {"beats": 15, "shots": 45, "assets_planned": 23}
+    assert packet["coverage"]["counts"] == {
+        "beats": 15, "shots": 45, "asset_requirements": 45,
+        "reusable_plans": 0, "existing_media": 0,
+    }
     assert len(packet["coverage"]["shots"]) == 45
     assert {item["shot_id"] for item in packet["coverage"]["shots"]} == {
         f"B{beat:02}-S{shot}" for beat in range(1, 16) for shot in range(1, 4)
@@ -337,3 +340,98 @@ def test_compiler_emits_non_promotable_packet_with_complete_shot_coverage():
     ]
     assert packet["reference_inventory"]["available"]["editorial_bundle"] == "HASH_BOUND"
     assert packet["reference_inventory"]["missing"]["canonical_identity_references"] == "ASSETS_REQUIRED"
+
+
+def test_compiler_derives_all_requirement_plans_and_distinct_counts():
+    from src.hybrid.operation_request import (
+        compile_jose_preproduction_packet,
+        generate_v4_preflight_artifact,
+    )
+
+    bundle = _read_bundle()
+    preflight = generate_v4_preflight_artifact(canonical_bundle=_parse(bundle), checkout_root=REPOSITORY)
+    packet = compile_jose_preproduction_packet(
+        timeline_bytes=bundle["timeline"], asset_requirements_bytes=bundle["assets"],
+        subtitles_bytes=bundle["subtitles"], vtt_bytes=bundle["vtt"],
+        parent_manifest_bytes=bundle["parent"], request_manifest_bytes=bundle["manifest"],
+        preflight_bytes=_raw(preflight),
+        thumbnail_brief_bytes=b"JOS\xc3\x89 E SUA T\xc3\x9aNICA ESPECIAL\nA INVEJA MACHUCA\nG\xc3\x8aNESIS 37\n",
+    )
+
+    source = json.loads(bundle["assets"])["asset_requirements"]
+    assert packet["coverage"]["counts"] == {
+        "beats": 15, "shots": 45, "asset_requirements": 45,
+        "reusable_plans": 0, "existing_media": 0,
+    }
+    assert [plan["asset_requirement_id"] for plan in packet["assets"]["plan"]] == [row["id"] for row in source]
+    assert all(plan["status"] == "ASSETS_REQUIRED" for plan in packet["assets"]["plan"])
+    assert all(plan["allowed_characters"] in plan["prompt"] and plan["safety"] in plan["prompt"] for plan in packet["assets"]["plan"])
+
+
+@pytest.mark.parametrize("mutation", ["extra", "missing", "rehash"])
+def test_compiler_rejects_forged_or_rehashed_v4_preflight(mutation: str):
+    from src.hybrid.operation_request import (
+        OperationRequestError,
+        compile_jose_preproduction_packet,
+        generate_v4_preflight_artifact,
+    )
+
+    bundle = _read_bundle()
+    preflight = generate_v4_preflight_artifact(canonical_bundle=_parse(bundle), checkout_root=REPOSITORY)
+    if mutation == "extra":
+        preflight["unbound_extra"] = True
+    elif mutation == "missing":
+        del preflight["gate"]
+    else:
+        preflight["request"]["scope"]["title"] = "forjado"
+    with pytest.raises(OperationRequestError):
+        compile_jose_preproduction_packet(
+            timeline_bytes=bundle["timeline"], asset_requirements_bytes=bundle["assets"],
+            subtitles_bytes=bundle["subtitles"], vtt_bytes=bundle["vtt"],
+            parent_manifest_bytes=bundle["parent"], request_manifest_bytes=bundle["manifest"],
+            preflight_bytes=_raw(preflight),
+            thumbnail_brief_bytes=b"JOS\xc3\x89 E SUA T\xc3\x9aNICA ESPECIAL\nA INVEJA MACHUCA\nG\xc3\x8aNESIS 37\n",
+        )
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"schema":"jose-operation-preflight/v4","schema":"jose-operation-preflight/v4"}',
+    b'{"schema":NaN}',
+])
+def test_compiler_rejects_duplicate_or_nonfinite_preflight_bytes(raw: bytes):
+    from src.hybrid.operation_request import (
+        OperationRequestError,
+        compile_jose_preproduction_packet,
+    )
+
+    bundle = _read_bundle()
+    with pytest.raises(OperationRequestError, match="strict JSON"):
+        compile_jose_preproduction_packet(
+            timeline_bytes=bundle["timeline"], asset_requirements_bytes=bundle["assets"],
+            subtitles_bytes=bundle["subtitles"], vtt_bytes=bundle["vtt"],
+            parent_manifest_bytes=bundle["parent"], request_manifest_bytes=bundle["manifest"],
+            preflight_bytes=raw,
+            thumbnail_brief_bytes=b"JOS\xc3\x89 E SUA T\xc3\x9aNICA ESPECIAL\nA INVEJA MACHUCA\nG\xc3\x8aNESIS 37\n",
+        )
+
+
+@pytest.mark.parametrize("mutation", ["passage", "verse", "reorder"])
+def test_canonical_genesis37_scope_rejects_changed_or_reordered_source(mutation: str):
+    from src.hybrid.operation_request import OperationRequestError
+
+    bundle = _read_bundle()
+    if mutation == "passage":
+        manifest = json.loads(bundle["manifest"])
+        manifest["scope"]["passage"] = "Gênesis 1"
+        bundle["manifest"] = _raw(manifest)
+    else:
+        timeline = json.loads(bundle["timeline"])
+        if mutation == "verse":
+            timeline["beats"][0]["source_verse"] = "1:1"
+        else:
+            timeline["beats"][0]["source_verse"], timeline["beats"][1]["source_verse"] = (
+                timeline["beats"][1]["source_verse"], timeline["beats"][0]["source_verse"])
+        bundle["timeline"] = _raw(timeline)
+        bundle = _rehash_parent(bundle)
+    with pytest.raises(OperationRequestError, match="passage|source verse"):
+        _parse(bundle)
