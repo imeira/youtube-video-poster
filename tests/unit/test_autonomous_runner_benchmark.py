@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
 
 
-def _short_benchmark_scratch(name: str) -> Path:
-    """Avoid CI's filesystem root while retaining a short Windows test path."""
-    temporary = Path(tempfile.gettempdir())
-    base = temporary if temporary.parent == Path(temporary.anchor) else temporary.parent
-    return base / name
+def _short_benchmark_scratch(tmp_path: Path, name: str) -> Path:
+    """Keep fixture-only paths under pytest's explicitly selected base."""
+    assert name in {"b", "c"}
+    return tmp_path.parent / name
 
 
 def test_public_cli_events_do_not_subtract_parent_and_worker_monotonic_clocks(tmp_path):
@@ -81,8 +78,10 @@ def test_public_cli_benchmark_uses_explicit_scratch_and_reads_child_tempdir(
 ):
     from src.hybrid.runner_benchmark import run_public_cli_benchmark
 
-    scratch = _short_benchmark_scratch(f"bct-{os.getpid()}")
-    monkeypatch.setenv("TMPDIR", str(tmp_path / "untrusted-parent-tmp"))
+    scratch = _short_benchmark_scratch(tmp_path, "b")
+    inherited = tmp_path / "nested" / "inherited" / "temp"
+    for variable in ("TMPDIR", "TMP", "TEMP", "HERMES_HOME"):
+        monkeypatch.setenv(variable, str(inherited / variable.lower()))
     result = run_public_cli_benchmark(
         tmp_path / "benchmark-output", repeats=1, scratch_root=scratch
     )
@@ -99,7 +98,7 @@ def test_public_cli_benchmark_exercises_fresh_process_worker_resume_and_cache(tm
     result = run_public_cli_benchmark(
         tmp_path / "benchmark",
         repeats=3,
-        scratch_root=_short_benchmark_scratch(f"bct-full-{os.getpid()}"),
+        scratch_root=_short_benchmark_scratch(tmp_path, "c"),
     )
 
     assert result["schema"] == "next-video-public-cli-benchmark/v1"

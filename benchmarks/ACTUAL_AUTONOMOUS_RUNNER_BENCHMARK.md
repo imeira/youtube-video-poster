@@ -2,7 +2,7 @@
 
 ## Scope
 
-Generated with:
+Recorded command from the original report (preserved, not a new execution):
 
 ```text
 python -m src.hybrid.runner_benchmark --output-dir benchmarks/public_cli_benchmark --repeats 3
@@ -11,9 +11,13 @@ python -m src.hybrid.runner_benchmark --output-dir benchmarks/public_cli_benchma
 This standalone harness invokes real public CLI subprocesses for every sample:
 `start -> worker --once -> status -> fresh-process resume`. It creates the existing two-scene compiled TEST fixture once, reuses its same packet hashes for concurrency `1` and `2`, and runs three samples per setting.
 
-The harness sets only `HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON` (`SLOW=0.35s`, `FAST=0.15s`) on the existing `FixtureProvider`. It uses a native scratch directory for `TMP`, `TEMP`, and `TMPDIR`, rejects `C:/HermesStudio/production`, makes no network/provider/credential call, and is not a production command.
+The TEST fixture delay is configured through `HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON` (`SLOW=0.35s`, `FAST=0.15s`) on the existing `FixtureProvider`. The current harness derives each child's `TMP`, `TEMP`, `TMPDIR`, and `HERMES_HOME` from the selected scratch root, rather than inheriting the caller's temp directories. It rejects `C:/HermesStudio/production`, makes no network/provider/credential call, and is not a production command.
 
-## Actual results
+For a new Windows run, add an explicit, shallow `--scratch-root` inside the approved scratch area; invoke its pytest coverage with one explicit, shallow, unique `--basetemp` in that area. Only fixture directory labels are shortened: logical request IDs, full digest values, and existing request-namespace rules are unchanged. This is a test/benchmark scratch requirement, not a claim to repair general Windows long-path infrastructure.
+
+## Historical results — not current acceptance
+
+The table and linked JSON below are preserved from the original recorded run. They do not validate the later event-identity and clock-domain corrections. Current acceptance requires fresh, separately retained evidence from the current code; this historical table must not be used to claim a current speedup.
 
 | Persisted runner concurrency | Samples | Median worker wall time (s) |
 |---:|---:|---:|
