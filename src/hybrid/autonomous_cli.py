@@ -39,6 +39,18 @@ _BENCHMARK_EVENT_CLOCK_DOMAIN = "fixture-process-monotonic-relative/v1"
 _BENCHMARK_EVENT_PROCESS_STARTED = time.monotonic()
 
 
+def _benchmark_event_identity() -> dict[str, str | int]:
+    """Return the harness-issued TEST worker identity for one event."""
+    worker_run_id = os.environ.get("HERMES_TEST_BENCHMARK_WORKER_RUN_ID")
+    if (
+        not isinstance(worker_run_id, str)
+        or len(worker_run_id) != 32
+        or any(char not in "0123456789abcdef" for char in worker_run_id)
+    ):
+        raise RuntimeError("TEST benchmark worker run identity is invalid")
+    return {"worker_run_id": worker_run_id, "worker_pid": os.getpid()}
+
+
 def _start_checkpoint(_name: str) -> None:
     """Acceptance tests may monkeypatch this in-process hook to simulate death.
 
@@ -156,6 +168,7 @@ class FixtureProvider:
                 "clock_domain": _BENCHMARK_EVENT_CLOCK_DOMAIN,
                 "process_elapsed_s": time.monotonic() - _BENCHMARK_EVENT_PROCESS_STARTED,
                 "tempdir": str(Path(tempfile.gettempdir()).resolve()),
+                **_benchmark_event_identity(),
             }
             with path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record, sort_keys=True) + "\n")
@@ -582,6 +595,7 @@ def _compiled_image_qa(reject_scene: str | None = None):
                         "clock_domain": _BENCHMARK_EVENT_CLOCK_DOMAIN,
                         "process_elapsed_s": time.monotonic() - _BENCHMARK_EVENT_PROCESS_STARTED,
                         "tempdir": str(Path(tempfile.gettempdir()).resolve()),
+                        **_benchmark_event_identity(),
                     }, sort_keys=True) + "\n")
         return {"approved": scene != reject_scene, "reviewer": "TEST local image assertion (not human)", "reviewer_identity": {"subject": "TEST-local-image-qa", "issuer": "TEST assertion, not human approval"}, "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": ["TEST_LOCAL_ASSERTION"]}
     return verdict
