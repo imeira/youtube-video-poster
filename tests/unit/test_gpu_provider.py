@@ -73,11 +73,11 @@ class TestRunPodGPUProvider:
         provider = RunPodGPUProvider(api_key="test_key")
         assert provider.available() is True
 
-    def test_unavailable_without_key(self):
+    def test_unavailable_without_key(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(RunPodGPUProvider, "_read_api_key", lambda _provider: "")
         provider = RunPodGPUProvider(api_key="")
-        # _read_api_key may find key from .env, so just test the property
-        # If key is empty AND no .env key found, available() is False
-        assert provider.api_key == "" or provider.available() is True
+        assert provider.api_key == ""
+        assert provider.available() is False
 
     def test_estimate_cost_returns_float(self):
         provider = RunPodGPUProvider(api_key="test_key")
