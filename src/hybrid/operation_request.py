@@ -375,3 +375,143 @@ def generate_v4_preflight_artifact(*, canonical_bundle: object, checkout_root: s
             "reason": "v3 accepted caller-supplied revision strings; v4 captures Git HEAD and merge-base origin/master from the verified checkout.",
         },
     }
+
+
+_SHOT_ASSETS = (
+    ("A01", "A02", "A02"), ("A03", "A04", "A05"), ("A06", "A07", "A05"),
+    ("A08", "A09", "A05"), ("A10", "A11", "A11"), ("A12", "A13", "A13"),
+    ("A14", "A15", "A15"), ("A16", "A17", "A17"), ("A18", "A18", "A19"),
+    ("A20", "A21", "A21"), ("A22", "A22", "A22"), ("A23", "A23", "A23"),
+    ("A23", "A23", "A23"), ("A20", "A21", "A21"), ("A01", "A02", "A02"),
+)
+_ASSET_DIRECTION = {
+    "A01": "campo de Canaã e rebanho, sem personagem obrigatório",
+    "A02": "José de 17 anos com rebanho, túnica especial longa sem cor alegada",
+    "A03": "Jacó/Israel idoso e José em encontro familiar seguro",
+    "A04": "mãos de Jacó entregando a túnica especial a José, anatomia legível",
+    "A05": "irmãos em reação de ressentimento, separados, sem ameaça física",
+    "A06": "sonho dos feixes em linguagem infantil simbólica, sem coroas ou tronos",
+    "A07": "José contando o primeiro sonho a irmãos, composição respeitosa",
+    "A08": "sonho do sol, lua e onze estrelas como símbolo, não como pessoas curvadas",
+    "A09": "Jacó repreende José com expressão preocupada, sem violência",
+    "A10": "Jacó envia José perto de Siquém, partida familiar segura",
+    "A11": "José caminhando e procurando os irmãos, paisagem de Canaã",
+    "A12": "José procurando no campo; homem sem nome ao longe",
+    "A13": "homem sem nome aponta a direção de Dotã para José, mãos e braços legíveis",
+    "A14": "irmãos observam José de longe; tensão sem gesto violento",
+    "A15": "conversa tensa dos irmãos, sem armas, ferimentos ou agressão",
+    "A16": "Rúben intervém diante dos irmãos, braços e mãos anatomicamente claros",
+    "A17": "cisterna seca vista de forma não gráfica; José protegido e sem ferimentos",
+    "A18": "cisterna seca e seu entorno; nenhum José quando a cena exigir que esteja vazia",
+    "A19": "túnica especial retirada apresentada sem violência gráfica",
+    "A20": "caravana de ismaelitas/midianitas em deslocamento, sem estereótipos ofensivos",
+    "A21": "Judá e irmãos perto da caravana; moedas discretas, sem glorificar a venda",
+    "A22": "Rúben encontra a cisterna vazia e reage com desespero não gráfico",
+    "A23": "Jacó recebe e reconhece a túnica manchada, lamento contido e não gráfico",
+}
+_ARTICULATED_BEATS = {"B02", "B08", "B10"}
+_THUMBNAIL_COPY = ("JOSÉ E SUA TÚNICA ESPECIAL", "A INVEJA MACHUCA", "GÊNESIS 37")
+
+
+def _validate_preflight_for_packet(preflight: object, bundle: CanonicalEditorialBundle) -> None:
+    if type(preflight) is not dict or preflight.get("schema") != "jose-operation-preflight/v4":
+        raise OperationRequestError("v4 preflight is required")
+    request = preflight.get("request")
+    if type(request) is not dict or preflight.get("status") != "PREPRODUCTION_READY":
+        raise OperationRequestError("preflight must remain preproduction ready")
+    if request.get("paid_generation") is not False or request.get("dispatch_permitted") is not False:
+        raise OperationRequestError("preflight must not permit generation or dispatch")
+    if preflight.get("parent_manifest_sha256") != bundle.parent_manifest_sha256:
+        raise OperationRequestError("preflight parent manifest binding mismatch")
+    if request.get("editorial_artifact_hashes") != bundle.artifact_hashes():
+        raise OperationRequestError("preflight editorial hash binding mismatch")
+    if request.get("editorial_inventory") != {
+        "audio_duration_seconds": bundle.audio_duration_seconds,
+        "caption_cue_count": bundle.caption_cue_count,
+        "beat_count": bundle.beat_count,
+        "shot_count": bundle.shot_count,
+    }:
+        raise OperationRequestError("preflight editorial inventory mismatch")
+
+
+def compile_jose_preproduction_packet(*, timeline_bytes: bytes, asset_requirements_bytes: bytes,
+                                     subtitles_bytes: bytes, vtt_bytes: bytes,
+                                     parent_manifest_bytes: bytes, request_manifest_bytes: bytes,
+                                     preflight: object, thumbnail_brief_bytes: bytes) -> dict[str, object]:
+    """Compile the verified José bytes into an offline visual-production packet.
+
+    This is a pure compiler: it opens no paths and cannot construct a provider,
+    renderer, delivery client, or executable authority.
+    """
+    bundle = parse_canonical_editorial_bundle(
+        timeline_bytes=timeline_bytes, asset_requirements_bytes=asset_requirements_bytes,
+        subtitles_bytes=subtitles_bytes, vtt_bytes=vtt_bytes,
+        parent_manifest_bytes=parent_manifest_bytes, request_manifest_bytes=request_manifest_bytes,
+    )
+    _validate_preflight_for_packet(preflight, bundle)
+    if not isinstance(thumbnail_brief_bytes, bytes):
+        raise OperationRequestError("thumbnail brief must be bytes")
+    try:
+        thumbnail_text = thumbnail_brief_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise OperationRequestError("thumbnail brief must be UTF-8") from error
+    if any(copy not in thumbnail_text for copy in _THUMBNAIL_COPY):
+        raise OperationRequestError("thumbnail brief lacks immutable child-safe copy")
+    timeline = _strict_bytes_json(timeline_bytes, "timeline")
+    assets_source = _strict_bytes_json(asset_requirements_bytes, "asset_requirements")
+    identity = assets_source["identity_requirements"]
+    if type(identity) is not dict or set(_ASSET_DIRECTION) != {asset for group in _SHOT_ASSETS for asset in group}:
+        raise OperationRequestError("asset compiler catalog is incomplete")
+    coverage: list[dict[str, object]] = []
+    asset_to_shots: dict[str, list[str]] = {asset: [] for asset in _ASSET_DIRECTION}
+    for beat, asset_ids in zip(timeline["beats"], _SHOT_ASSETS):
+        for shot, asset_id in zip(beat["shots"], asset_ids):
+            asset_to_shots[asset_id].append(shot["id"])
+            coverage.append({
+                "beat_id": beat["id"], "shot_id": shot["id"], "source_verse": beat["source_verse"],
+                "semantic_relation": beat["meaning"], "focus": shot["focus"],
+                "asset_id": asset_id, "asset_status": "ASSETS_REQUIRED",
+            })
+    plans: list[dict[str, object]] = []
+    for asset_id, direction in _ASSET_DIRECTION.items():
+        plans.append({
+            "asset_id": asset_id, "status": "ASSETS_REQUIRED", "covered_shots": asset_to_shots[asset_id],
+            "prompt": (
+                "Animação 3D infantil, formas arredondadas, luz acolhedora, Gênesis 37; "
+                f"{direction}. Somente o elenco permitido pelo beat; identidade canônica "
+                "aprovada por image-to-image é obrigatória antes de qualquer geração final. "
+                "Sem texto, logotipo, marca-d’água, violência gráfica, Deus em forma humana, "
+                "pessoas extras, anatomia defeituosa ou túnica com cor não comprovada."
+            ),
+            "required_identity_ids": [key for key in identity if key != "ID-LORENA"],
+            "references": "MISSING_CANONICAL_REFERENCES",
+        })
+    motion = []
+    for beat in timeline["beats"]:
+        route = "ARTICULATED_I2V_REQUIRED_AFTER_APPROVED_SOURCE" if beat["id"] in _ARTICULATED_BEATS else "LOCAL_COMPOSITION_AFTER_APPROVED_SOURCE"
+        motion.append({"beat_id": beat["id"], "route": route, "status": "ASSETS_REQUIRED",
+                       "reason": beat["meaning"], "source_frame": "MISSING_APPROVED_ASSET_HASH"})
+    return {
+        "schema": "jose-gen37-production-packet/v1", "mode": "PREPRODUCTION_ONLY",
+        "status": "ASSETS_REQUIRED", "non_promotable": True,
+        "source_bindings": {"preflight_sha256": _raw_digest(_canonical(preflight)),
+                            "thumbnail_brief_sha256": _raw_digest(thumbnail_brief_bytes),
+                            **bundle.artifact_hashes(), "narration_input_sha256": bundle.narration_input_sha256},
+        "scope": {"channel": bundle.channel, "playlist": bundle.playlist, "language": bundle.language, "title": bundle.title},
+        "reference_inventory": {
+            "available": {"editorial_bundle": "HASH_BOUND", "narration_timeline": "HASH_BOUND", "thumbnail_brief": "HASH_BOUND"},
+            "missing": {"canonical_identity_references": "ASSETS_REQUIRED", "approved_visual_assets": "ASSETS_REQUIRED", "approved_motion_clips": "ASSETS_REQUIRED"},
+        },
+        "eligibility": {"audio": "LICENSE_UNKNOWN_NOT_ELIGIBLE", "provider_dispatch": "BLOCKED",
+                        "render": "BLOCKED", "telegram": "BLOCKED", "publication": "BLOCKED"},
+        "coverage": {"counts": {"beats": bundle.beat_count, "shots": bundle.shot_count, "assets_planned": len(plans)}, "shots": coverage},
+        "assets": {"status": "ASSETS_REQUIRED", "canonical_identity_requirements": identity,
+                   "references": "MISSING_CANONICAL_REFERENCES", "plan": plans},
+        "motion_inventory": motion,
+        "closing_lorena": {"status": "ASSETS_REQUIRED", "role": "CLOSING_ONLY_NOT_OFFICIAL_NARRATION",
+                            "identity": "CANONICAL_C_V3_REQUIRED", "voice": "LORENA_V9_REQUIRED",
+                            "maximum_duration_s": 10, "audio_binding": "MISSING"},
+        "thumbnail": {"status": "ASSETS_REQUIRED", "geometry": "1280x720", "channel": bundle.channel,
+                      "playlist": bundle.playlist, "copy": list(_THUMBNAIL_COPY),
+                      "gate_order": ["THUMBNAIL_HUMAN_APPROVAL", "VIDEO_HUMAN_APPROVAL", "EXPLICIT_LATER_PUBLICATION_ORDER"]},
+    }

@@ -299,3 +299,41 @@ def test_v4_generator_reads_the_actual_checkout_git_revisions():
     assert artifact["request"]["code_revision"] == expected_head
     assert artifact["request"]["base_revision"] == expected_base
     assert BASE_SHA == "8a4f3921b8ea8caef4caf15506aff19b8aff3116"
+
+
+def test_compiler_emits_non_promotable_packet_with_complete_shot_coverage():
+    from src.hybrid.operation_request import (
+        compile_jose_preproduction_packet,
+        generate_v4_preflight_artifact,
+    )
+
+    bundle = _read_bundle()
+    packet = compile_jose_preproduction_packet(
+        timeline_bytes=bundle["timeline"],
+        asset_requirements_bytes=bundle["assets"],
+        subtitles_bytes=bundle["subtitles"],
+        vtt_bytes=bundle["vtt"],
+        parent_manifest_bytes=bundle["parent"],
+        request_manifest_bytes=bundle["manifest"],
+        preflight=generate_v4_preflight_artifact(canonical_bundle=_parse(bundle), checkout_root=REPOSITORY),
+        thumbnail_brief_bytes=(
+            b"JOS\xc3\x89 E SUA T\xc3\x9aNICA ESPECIAL\nA INVEJA MACHUCA\nG\xc3\x8aNESIS 37\n"
+        ),
+    )
+
+    assert packet["mode"] == "PREPRODUCTION_ONLY"
+    assert packet["status"] == "ASSETS_REQUIRED"
+    assert packet["eligibility"]["audio"] == "LICENSE_UNKNOWN_NOT_ELIGIBLE"
+    assert packet["coverage"]["counts"] == {"beats": 15, "shots": 45, "assets_planned": 23}
+    assert len(packet["coverage"]["shots"]) == 45
+    assert {item["shot_id"] for item in packet["coverage"]["shots"]} == {
+        f"B{beat:02}-S{shot}" for beat in range(1, 16) for shot in range(1, 4)
+    }
+    assert all(item["status"] == "ASSETS_REQUIRED" for item in packet["assets"]["plan"])
+    assert packet["closing_lorena"]["status"] == "ASSETS_REQUIRED"
+    assert packet["closing_lorena"]["maximum_duration_s"] == 10
+    assert packet["thumbnail"]["copy"] == [
+        "JOSÉ E SUA TÚNICA ESPECIAL", "A INVEJA MACHUCA", "GÊNESIS 37"
+    ]
+    assert packet["reference_inventory"]["available"]["editorial_bundle"] == "HASH_BOUND"
+    assert packet["reference_inventory"]["missing"]["canonical_identity_references"] == "ASSETS_REQUIRED"
