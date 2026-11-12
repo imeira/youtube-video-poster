@@ -261,7 +261,10 @@ def worker(workspace: Path, request_id: str, *, once: bool, concurrency: int | N
             result = asyncio.run(_serve_test_host(worker, concurrency=persisted))
         except KeyboardInterrupt:
             result = {"status": "STOPPED", "mode": "TEST"}
-    return result | {"mode": "TEST", "request_id": request_id, "concurrency": persisted, "publication": "DISABLED"}
+    return result | {
+        "mode": "TEST", "request_id": request_id, "concurrency": persisted,
+        "worker_pid": os.getpid(), "publication": "DISABLED",
+    }
 
 
 def main(argv=None) -> int:

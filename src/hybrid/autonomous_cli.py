@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 import uuid
 from decimal import Decimal
@@ -34,6 +35,20 @@ from src.hybrid.standing_budget import StandingBudgetLedger
 COMPILED_PACKET_FILES = ("compiled.json", "manifest.json", "policy.json")
 TEST_COMPILED_PROVIDER = "test-local-fixture"
 TEST_COMPILED_COST = Decimal("0.01")
+_BENCHMARK_EVENT_CLOCK_DOMAIN = "fixture-process-monotonic-relative/v1"
+_BENCHMARK_EVENT_PROCESS_STARTED = time.monotonic()
+
+
+def _benchmark_event_identity() -> dict[str, str | int]:
+    """Return the harness-issued TEST worker identity for one event."""
+    worker_run_id = os.environ.get("HERMES_TEST_BENCHMARK_WORKER_RUN_ID")
+    if (
+        not isinstance(worker_run_id, str)
+        or len(worker_run_id) != 32
+        or any(char not in "0123456789abcdef" for char in worker_run_id)
+    ):
+        raise RuntimeError("TEST benchmark worker run identity is invalid")
+    return {"worker_run_id": worker_run_id, "worker_pid": os.getpid()}
 
 
 def _start_checkpoint(_name: str) -> None:
@@ -146,7 +161,15 @@ class FixtureProvider:
         path = self.root / "fixture-events.jsonl"
         with file_lock(self.root / "fixture-events.lock"):
             previous = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-            record = {"sequence": len(previous) + 1, "event": event, "scene": scene, "monotonic_s": time.monotonic()}
+            record = {
+                "sequence": len(previous) + 1,
+                "event": event,
+                "scene": scene,
+                "clock_domain": _BENCHMARK_EVENT_CLOCK_DOMAIN,
+                "process_elapsed_s": time.monotonic() - _BENCHMARK_EVENT_PROCESS_STARTED,
+                "tempdir": str(Path(tempfile.gettempdir()).resolve()),
+                **_benchmark_event_identity(),
+            }
             with path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record, sort_keys=True) + "\n")
 
@@ -565,7 +588,15 @@ def _compiled_image_qa(reject_scene: str | None = None):
             with file_lock(provider_root / "fixture-events.lock"):
                 previous = event_path.read_text(encoding="utf-8").splitlines()
                 with event_path.open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps({"sequence": len(previous) + 1, "event": "qa_completed", "scene": scene, "monotonic_s": time.monotonic()}, sort_keys=True) + "\n")
+                    stream.write(json.dumps({
+                        "sequence": len(previous) + 1,
+                        "event": "qa_completed",
+                        "scene": scene,
+                        "clock_domain": _BENCHMARK_EVENT_CLOCK_DOMAIN,
+                        "process_elapsed_s": time.monotonic() - _BENCHMARK_EVENT_PROCESS_STARTED,
+                        "tempdir": str(Path(tempfile.gettempdir()).resolve()),
+                        **_benchmark_event_identity(),
+                    }, sort_keys=True) + "\n")
         return {"approved": scene != reject_scene, "reviewer": "TEST local image assertion (not human)", "reviewer_identity": {"subject": "TEST-local-image-qa", "issuer": "TEST assertion, not human approval"}, "request_id": receipt["request_id"], "result_sha256": receipt["result_sha256"], "codes": ["TEST_LOCAL_ASSERTION"]}
     return verdict
 
