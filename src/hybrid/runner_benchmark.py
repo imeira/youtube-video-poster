@@ -348,12 +348,32 @@ def _public_cli_command(arguments: list[str], env: dict[str, str]) -> dict[str, 
     return {"argv": ["studio", "next-video", *arguments], "exit_code": completed.returncode, "wall_time_s": time.monotonic() - started, "stdout_sha256": sha256(completed.stdout.encode()).hexdigest(), "result": payload}
 
 
-def _public_cli_events(workspace: Path, request_id: str) -> tuple[dict[str, float], dict[str, float], int]:
+def _public_cli_events(
+    workspace: Path, request_id: str
+) -> tuple[dict[str, None], dict[str, float], dict[str, float], int, str]:
     event_file = workspace / "TC" / request_id[:16] / "provider" / "fixture-events.jsonl"
     events = [json.loads(line) for line in event_file.read_text(encoding="utf-8").splitlines() if line]
-    starts = {event["scene"]: event["monotonic_s"] for event in events if event["event"] == "submit_started"}
-    ends = {event["scene"]: event["monotonic_s"] for event in events if event["event"] == "submit_completed"}
-    qa = {event["scene"]: event["monotonic_s"] - ends[event["scene"]] for event in events if event["event"] == "qa_completed"}
+    clock_domains = {event.get("clock_domain") for event in events}
+    if clock_domains != {"fixture-process-monotonic-relative/v1"}:
+        raise AssertionError("public CLI fixture events must share one relative clock domain")
+    tempdirs = {event.get("tempdir") for event in events}
+    if len(tempdirs) != 1 or not isinstance(next(iter(tempdirs)), str):
+        raise AssertionError("public CLI fixture events must record one child tempdir")
+    starts = {
+        event["scene"]: event["process_elapsed_s"]
+        for event in events
+        if event["event"] == "submit_started"
+    }
+    ends = {
+        event["scene"]: event["process_elapsed_s"]
+        for event in events
+        if event["event"] == "submit_completed"
+    }
+    qa = {
+        event["scene"]: event["process_elapsed_s"] - ends[event["scene"]]
+        for event in events
+        if event["event"] == "qa_completed"
+    }
     if set(starts) != {"SLOW", "FAST"} or set(qa) != {"SLOW", "FAST"}:
         raise AssertionError("public CLI fixture evidence is incomplete")
     active = peak = 0
@@ -362,7 +382,11 @@ def _public_cli_events(workspace: Path, request_id: str) -> tuple[dict[str, floa
             active += 1; peak = max(peak, active)
         elif event["event"] == "submit_completed":
             active -= 1
-    return starts, qa, peak
+    # The command runner measures each subprocess separately.  It has no
+    # shared admission timestamp with the worker's monotonic clock, so queue
+    # wait cannot be derived across process clock domains.  Keep it explicit
+    # rather than publishing the worker's absolute monotonic uptime as wait.
+    return {scene: None for scene in sorted(starts)}, starts, qa, peak, next(iter(tempdirs))
 
 
 def _public_cli_sample(root: Path, packet: Path, concurrency: int) -> dict[str, Any]:
@@ -379,15 +403,20 @@ def _public_cli_sample(root: Path, packet: Path, concurrency: int) -> dict[str, 
         raise AssertionError(commands)
     provider = workspace / "TC" / request_id[:16] / "provider"
     initial_posts = json.loads((provider / "fixture-post-count.json").read_text(encoding="utf-8"))["posts"]
-    queue_wait, qa_durations, peak = _public_cli_events(workspace, request_id)
+    queue_wait, worker_elapsed, qa_durations, peak, child_tempdir = _public_cli_events(workspace, request_id)
+    child_tempdir_verified = Path(child_tempdir).resolve() == scratch.resolve()
+    if not child_tempdir_verified:
+        raise AssertionError("public CLI child did not honor the explicit scratch tempdir")
     runner = json.loads((workspace / "TC" / request_id[:16] / "runner" / "runner.json").read_text(encoding="utf-8"))
     Path(next(provider.glob("*.TEST.png"))).write_bytes(b"tampered-public-cli-benchmark")
     commands["tamper_resume"] = _public_cli_command(["resume", "--workspace", str(workspace), "--request-id", request_id, "--concurrency", str(concurrency)], environment)
     posts_after = json.loads((provider / "fixture-post-count.json").read_text(encoding="utf-8"))["posts"]
-    return {"concurrency": concurrency, "request_id": request_id, "commands": commands, "worker_wall_time_s": commands["worker"]["wall_time_s"], "queue_wait_s": queue_wait, "qa_durations_s": qa_durations, "peak_inflight": peak, "initial_submit_count": initial_posts, "fresh_resume_submit_count": 0, "cache_hits": len(runner["qa"]), "status_snapshot": commands["status"]["result"]["queue"].get("snapshot"), "tamper_cache_rejected": commands["tamper_resume"]["exit_code"] == 1, "tamper_submit_count": posts_after - initial_posts}
+    return {"concurrency": concurrency, "request_id": request_id, "commands": commands, "worker_wall_time_s": commands["worker"]["wall_time_s"], "queue_wait_s": queue_wait, "queue_wait_status": "UNKNOWN_CROSS_PROCESS_CLOCK_DOMAIN", "worker_elapsed_to_submit_s": worker_elapsed, "fixture_event_clock_domain": "fixture-process-monotonic-relative/v1", "child_tempdir": child_tempdir, "child_tempdir_verified": child_tempdir_verified, "qa_durations_s": qa_durations, "peak_inflight": peak, "initial_submit_count": initial_posts, "fresh_resume_submit_count": 0, "cache_hits": len(runner["qa"]), "status_snapshot": commands["status"]["result"]["queue"].get("snapshot"), "tamper_cache_rejected": commands["tamper_resume"]["exit_code"] == 1, "tamper_submit_count": posts_after - initial_posts}
 
 
-def run_public_cli_benchmark(root: Path, *, repeats: int = 3) -> dict[str, Any]:
+def run_public_cli_benchmark(
+    root: Path, *, repeats: int = 3, scratch_root: Path | None = None
+) -> dict[str, Any]:
     """Measure public CLI subprocesses; never claim a production speedup."""
     if type(repeats) is not int or not 1 <= repeats <= 10:
         raise ValueError("repeats must be a bounded integer from 1 through 10")
@@ -396,7 +425,10 @@ def run_public_cli_benchmark(root: Path, *, repeats: int = 3) -> dict[str, Any]:
         raise ValueError("benchmark rejects the production root")
     # Keep subprocess workspace below Windows' legacy path limit; the requested
     # output root receives only the final JSON artifact.
-    scratch_root = Path(os.environ.get("TMPDIR", root / ".work")).resolve()
+    scratch_root = (root / ".work" if scratch_root is None else scratch_root).resolve()
+    if str(scratch_root).replace("\\", "/").casefold().startswith("c:/hermesstudio/production"):
+        raise ValueError("benchmark rejects the production scratch root")
+    scratch_root.mkdir(parents=True, exist_ok=True)
     work = scratch_root / ("public-cli-" + sha256(str(root).encode()).hexdigest()[:16])
     if work.exists(): shutil.rmtree(work)
     packet = _public_cli_packet(work / "same-hash-packet")
@@ -413,8 +445,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("benchmarks/public_cli_benchmark"))
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--scratch-root", type=Path)
     args = parser.parse_args()
-    result = run_public_cli_benchmark(args.output_dir, repeats=args.repeats)
+    result = run_public_cli_benchmark(
+        args.output_dir, repeats=args.repeats, scratch_root=args.scratch_root
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
