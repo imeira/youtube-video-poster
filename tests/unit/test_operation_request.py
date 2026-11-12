@@ -415,6 +415,28 @@ def test_compiler_rejects_duplicate_or_nonfinite_preflight_bytes(raw: bytes):
         )
 
 
+@pytest.mark.parametrize("field", ["caption_cue_count", "beat_count", "shot_count"])
+def test_compiler_rejects_boolean_preflight_inventory_quantities(field: str):
+    from src.hybrid.operation_request import (
+        OperationRequestError,
+        compile_jose_preproduction_packet,
+        generate_v4_preflight_artifact,
+    )
+
+    bundle = _read_bundle()
+    preflight = generate_v4_preflight_artifact(canonical_bundle=_parse(bundle), checkout_root=REPOSITORY)
+    preflight["request"]["editorial_inventory"][field] = True
+    preflight["request_sha256"] = sha256(_raw(preflight["request"])).hexdigest()
+    with pytest.raises(OperationRequestError, match="positive integer"):
+        compile_jose_preproduction_packet(
+            timeline_bytes=bundle["timeline"], asset_requirements_bytes=bundle["assets"],
+            subtitles_bytes=bundle["subtitles"], vtt_bytes=bundle["vtt"],
+            parent_manifest_bytes=bundle["parent"], request_manifest_bytes=bundle["manifest"],
+            preflight_bytes=_raw(preflight),
+            thumbnail_brief_bytes=b"JOS\xc3\x89 E SUA T\xc3\x9aNICA ESPECIAL\nA INVEJA MACHUCA\nG\xc3\x8aNESIS 37\n",
+        )
+
+
 @pytest.mark.parametrize("mutation", ["passage", "verse", "reorder"])
 def test_canonical_genesis37_scope_rejects_changed_or_reordered_source(mutation: str):
     from src.hybrid.operation_request import OperationRequestError

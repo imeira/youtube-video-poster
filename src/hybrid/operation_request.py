@@ -415,6 +415,9 @@ def _validate_preflight_for_packet(preflight_bytes: object, bundle: CanonicalEdi
     if _closed_bindings(request["editorial_artifact_hashes"], set(bundle.artifact_hashes()), "preflight editorial hashes") != bundle.artifact_hashes():
         raise OperationRequestError("preflight editorial hash binding mismatch")
     inventory = _closed(request["editorial_inventory"], {"audio_duration_seconds", "caption_cue_count", "beat_count", "shot_count"}, "preflight editorial inventory")
+    _nonempty_string(inventory["audio_duration_seconds"], "preflight audio duration")
+    for key in ("caption_cue_count", "beat_count", "shot_count"):
+        _positive_count(inventory[key], f"preflight editorial inventory {key}")
     if inventory != {"audio_duration_seconds": bundle.audio_duration_seconds, "caption_cue_count": bundle.caption_cue_count, "beat_count": bundle.beat_count, "shot_count": bundle.shot_count}:
         raise OperationRequestError("preflight editorial inventory mismatch")
     gaps = _closed(request["caption_gap_report"], {"inter_cue_gaps_seconds", "trailing_gap_seconds", "policy"}, "preflight caption gaps")
