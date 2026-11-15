@@ -80,6 +80,34 @@ def policy():
     }
 
 
+def final_video_only_packet():
+    plan = {"episode": "TEST-JOSE", "script_sha256": "a" * 64}
+    frames = {"frame-001": "b" * 64}
+    import hashlib
+    import json
+
+    digest = lambda value: hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    receipt = lambda value, reviewer="machine-reviewer": {
+        "approved": True,
+        "artifact_sha256": digest(value),
+        "producer_identity": {"subject": "producer", "issuer": "TEST"},
+        "reviewer_identity": {"subject": reviewer, "issuer": "TEST"},
+    }
+    return {
+        "plan": plan,
+        "frames": frames,
+        "review_policy": {
+            "schema": 1,
+            "profile": "final-video-only-v1",
+            "human_gates": ["video"],
+            "publication_enabled": False,
+            "machine_qa": {"plan": receipt(plan), "frames": receipt(frames)},
+        },
+    }
+
+
 def ledger(tmp_path, parsed=None):
     from src.hybrid.autonomous import AutonomousPolicy
     from src.hybrid.standing_budget import StandingBudgetLedger
@@ -304,6 +332,77 @@ async def test_fresh_runner_recovers_checkpointed_receipt_without_second_submit(
     assert resumed["state"] == "MEDIA_PENDING"
     assert provider.calls == 1
     assert provider.recoveries == 1
+
+
+def test_final_video_only_profile_requires_independent_machine_receipts_and_opens_one_final_gate(tmp_path):
+    import hashlib
+
+    from src.hybrid.autonomous import (
+        AutonomousPolicy,
+        AutonomousTwoGateRunner,
+        PolicyError,
+    )
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    packet = final_video_only_packet()
+    runner = AutonomousTwoGateRunner(
+        tmp_path / "run", "TEST-JOSE", parsed,
+        Executor(tmp_path / "jobs.db", Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed),
+    )
+    runner.start(packet, [job(tmp_path)])
+    request_id = runner._load()["jobs"][0]["request_id"]
+    runner._save({**runner._load(), "state": "MEDIA_PENDING", "qa": {request_id: {"approved": True}}})
+    thumbnail, video = final_media(tmp_path)
+    thumbnail_receipt = {
+        "approved": True,
+        "artifact_sha256": hashlib.sha256(thumbnail.read_bytes()).hexdigest(),
+        "producer_identity": {"subject": "thumbnail-producer", "issuer": "TEST"},
+        "reviewer_identity": {"subject": "thumbnail-machine-qa", "issuer": "TEST"},
+    }
+    staged = runner.stage_delivery(
+        thumbnail, video,
+        qa={"approved": True, "mode": "TEST", "subject": "technical-test", "issuer": "TEST", "machine_qa": {"thumbnail": thumbnail_receipt}},
+    )
+    assert staged["state"] == "WAITING_FINAL_VIDEO_APPROVAL"
+    assert staged["review_policy"]["profile"] == "final-video-only-v1"
+    with pytest.raises(ValueError, match="out of order"):
+        runner.record_human_gate("thumbnail", thumbnail, approved=True, reviewer="human")
+    with pytest.raises(ValueError, match="exact staged"):
+        runner.record_human_gate("video", thumbnail, approved=True, reviewer="human")
+    approved = runner.record_human_gate("video", video, approved=True, reviewer="human")
+    assert approved["state"] == "FINAL_VIDEO_APPROVED"
+    assert approved["gates"]["video"]["package_sha256"]
+    with pytest.raises(PolicyError, match="disabled"):
+        runner.publish(lambda _: (_ for _ in ()).throw(AssertionError("publish must not run")))
+
+
+def test_final_video_only_profile_rejects_missing_tampered_or_producer_machine_qa(tmp_path):
+    import json
+
+    from src.hybrid.autonomous import (
+        AutonomousPolicy,
+        AutonomousTwoGateRunner,
+        PolicyError,
+    )
+
+    parsed = AutonomousPolicy.from_dict(policy())
+    packet = final_video_only_packet()
+    packet["review_policy"]["machine_qa"].pop("frames")
+    with pytest.raises(ValueError, match="machine_qa"):
+        AutonomousTwoGateRunner(tmp_path / "missing", "TEST-JOSE", parsed, Executor(tmp_path / "missing.db", Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed)).start(packet, [job(tmp_path)])
+
+    packet = final_video_only_packet()
+    packet["review_policy"]["machine_qa"]["plan"]["reviewer_identity"] = packet["review_policy"]["machine_qa"]["plan"]["producer_identity"]
+    with pytest.raises(ValueError, match="independent"):
+        AutonomousTwoGateRunner(tmp_path / "producer", "TEST-JOSE", parsed, Executor(tmp_path / "producer.db", Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed)).start(packet, [job(tmp_path)])
+
+    runner = AutonomousTwoGateRunner(tmp_path / "tampered", "TEST-JOSE", parsed, Executor(tmp_path / "tampered.db", Config(limit=Decimal("1.00"))), ledger(tmp_path, parsed))
+    runner.start(final_video_only_packet(), [job(tmp_path)])
+    state = json.loads(runner.path.read_text(encoding="utf-8"))
+    state["review_policy"]["human_gates"] = ["thumbnail", "video"]
+    runner.path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(PolicyError, match="tampered"):
+        runner._load()
 
 
 def test_policy_blocks_unknown_cost_and_publish_without_valid_policy(tmp_path):

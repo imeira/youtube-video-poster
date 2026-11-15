@@ -167,6 +167,61 @@ class AutonomousPolicy:
             raise PolicyError("experiment ceiling exceeded")
 
 
+@dataclass(frozen=True)
+class EpisodeReviewPolicy:
+    """Closed, packet-bound review profile; legacy runners retain two gates."""
+
+    profile: str
+    document: dict[str, Any]
+    digest: str
+
+    @staticmethod
+    def _identity(value: object, label: str) -> tuple[str, str]:
+        if not isinstance(value, dict) or set(value) != {"subject", "issuer"}:
+            raise ValueError(f"{label} identity is malformed")
+        subject, issuer = value["subject"], value["issuer"]
+        if not all(isinstance(item, str) and item.strip() for item in (subject, issuer)):
+            raise ValueError(f"{label} identity is malformed")
+        return subject, issuer
+
+    @classmethod
+    def _machine_receipt(cls, value: object, expected_digest: str) -> None:
+        if not isinstance(value, dict) or set(value) != {
+            "approved", "artifact_sha256", "producer_identity", "reviewer_identity"
+        }:
+            raise ValueError("machine_qa receipt has unknown or missing fields")
+        if value["approved"] is not True or value["artifact_sha256"] != expected_digest:
+            raise ValueError("machine_qa receipt does not bind exact artifact bytes")
+        producer = cls._identity(value["producer_identity"], "producer")
+        reviewer = cls._identity(value["reviewer_identity"], "machine reviewer")
+        if producer == reviewer:
+            raise ValueError("machine QA reviewer must be independent from producer")
+
+    @classmethod
+    def from_packet(cls, packet: dict[str, Any]) -> EpisodeReviewPolicy:
+        raw = packet.get("review_policy")
+        if raw is None:
+            document = {"schema": 1, "profile": "two-human-gates-v1"}
+            return cls("two-human-gates-v1", document, _digest_json(document))
+        if not isinstance(raw, dict):
+            raise TypeError("review_policy must be an object")
+        if set(raw) != {"schema", "profile", "human_gates", "publication_enabled", "machine_qa"}:
+            raise ValueError("review_policy has unknown or missing fields")
+        if raw.get("schema") != 1 or raw.get("profile") != "final-video-only-v1":
+            raise ValueError("review_policy profile is not supported")
+        if raw.get("human_gates") != ["video"] or raw.get("publication_enabled") is not False:
+            raise ValueError("final-video-only policy requires one video gate and no publication")
+        if not isinstance(packet.get("plan"), dict) or not isinstance(packet.get("frames"), dict):
+            raise TypeError("final-video-only policy requires plan and frames")
+        receipts = raw.get("machine_qa")
+        if not isinstance(receipts, dict) or set(receipts) != {"plan", "frames"}:
+            raise ValueError("review_policy machine_qa must cover plan and frames")
+        cls._machine_receipt(receipts["plan"], _digest_json(packet["plan"]))
+        cls._machine_receipt(receipts["frames"], _digest_json(packet["frames"]))
+        document = json.loads(json.dumps(raw, sort_keys=True))
+        return cls("final-video-only-v1", document, _digest_json(document))
+
+
 class PersistentMetrics:
     """Idempotent request metrics; subscription quota is never currency."""
 
@@ -1015,6 +1070,12 @@ class AutonomousTwoGateRunner:
             raise PolicyError("policy changed; explicit new runner required")
         if data.get("mode") != "TEST" or data.get("namespace") != "TEST":
             raise PolicyError("runner state is not in the TEST namespace")
+        review_policy = data.get("review_policy")
+        if (
+            not isinstance(review_policy, dict)
+            or data.get("review_policy_sha256") != _digest_json(review_policy)
+        ):
+            raise PolicyError("runner review policy is missing or tampered")
         return data
 
     def _save(self, document: dict[str, Any]) -> dict[str, Any]:
@@ -1086,6 +1147,9 @@ class AutonomousTwoGateRunner:
             return self._start(packet, jobs)
 
     def _start(self, packet: dict[str, Any], jobs: list[Job]) -> dict[str, Any]:
+        if not isinstance(packet, dict):
+            raise TypeError("episode packet must be an object")
+        review_policy = EpisodeReviewPolicy.from_packet(packet)
         if self.path.exists():
             existing = self._load()
             if (
@@ -1133,6 +1197,8 @@ class AutonomousTwoGateRunner:
                 "namespace": "TEST",
                 "episode_id": self.episode_id,
                 "policy_sha256": self.policy.digest,
+                "review_policy": review_policy.document,
+                "review_policy_sha256": review_policy.digest,
                 "packet_sha256": _digest_json(packet),
                 "jobs": serialized,
                 "job_specs": [self._job_spec(job) for job in jobs],
@@ -1904,8 +1970,25 @@ class AutonomousTwoGateRunner:
                 for kind, value in document["media"].items()
             },
         }
+        if document["review_policy"].get("profile") == "final-video-only-v1":
+            if set(qa) != {"approved", "mode", "subject", "issuer", "machine_qa"}:
+                raise ValueError("final-video-only media QA has unknown or missing fields")
+            receipts = qa["machine_qa"]
+            if not isinstance(receipts, dict) or set(receipts) != {"thumbnail"}:
+                raise ValueError("final-video-only machine QA must cover thumbnail")
+            EpisodeReviewPolicy._machine_receipt(
+                receipts["thumbnail"], document["media"]["thumbnail"]["sha256"]
+            )
+            document["delivery"]["package_sha256"] = _digest_json(
+                {
+                    "review_policy_sha256": document["review_policy_sha256"],
+                    "media": document["media"],
+                }
+            )
+            document["state"] = "WAITING_FINAL_VIDEO_APPROVAL"
+        else:
+            document["state"] = "WAITING_THUMBNAIL_APPROVAL"
         document["technical_qa"] = qa
-        document["state"] = "WAITING_THUMBNAIL_APPROVAL"
         return self._save(document)
 
     def record_human_gate(
@@ -1939,10 +2022,15 @@ class AutonomousTwoGateRunner:
         self, kind: str, artifact: Path, *, approved: bool, reviewer: str
     ) -> dict[str, Any]:
         document = self._load()
-        expected = {
-            "thumbnail": "WAITING_THUMBNAIL_APPROVAL",
-            "video": "WAITING_VIDEO_APPROVAL",
-        }
+        profile = document["review_policy"].get("profile")
+        expected = (
+            {"video": "WAITING_FINAL_VIDEO_APPROVAL"}
+            if profile == "final-video-only-v1"
+            else {
+                "thumbnail": "WAITING_THUMBNAIL_APPROVAL",
+                "video": "WAITING_VIDEO_APPROVAL",
+            }
+        )
         if kind not in expected or document["state"] != expected[kind]:
             raise ValueError("human gate is out of order")
         artifact = Path(artifact)
@@ -1995,8 +2083,14 @@ class AutonomousTwoGateRunner:
             "approved": approved,
             "reviewer": reviewer,
         }
+        if profile == "final-video-only-v1":
+            document["gates"][kind]["package_sha256"] = document["delivery"][
+                "package_sha256"
+            ]
         if not approved:
             document["state"] = "REJECTED"
+        elif profile == "final-video-only-v1":
+            document["state"] = "FINAL_VIDEO_APPROVED"
         elif kind == "thumbnail":
             document["state"] = "WAITING_VIDEO_APPROVAL"
         else:
@@ -2009,6 +2103,8 @@ class AutonomousTwoGateRunner:
 
     def _publish(self, publisher: Callable[[dict], dict]) -> dict[str, Any]:
         document = self._load()
+        if document["review_policy"].get("profile") == "final-video-only-v1":
+            raise PolicyError("publication is disabled by final-video-only review policy")
         if not self.policy.publication_enabled:
             raise PolicyError(
                 "publication is disabled by policy; production remains permitted"
