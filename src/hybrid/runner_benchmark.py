@@ -17,6 +17,7 @@ import statistics
 import subprocess
 import sys
 import time
+import uuid
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -340,35 +341,94 @@ def _public_cli_packet(root: Path) -> Path:
 
 def _public_cli_command(arguments: list[str], env: dict[str, str]) -> dict[str, Any]:
     started = time.monotonic()
-    completed = subprocess.run([sys.executable, "-m", "src.cli.main", "next-video", *arguments], cwd=Path(__file__).resolve().parents[2], env=env, text=True, capture_output=True, check=False)
+    command = [sys.executable, "-m", "src.cli.main", "next-video", *arguments]
+    process = subprocess.Popen(
+        command, cwd=Path(__file__).resolve().parents[2], env=env,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    stdout, stderr = process.communicate()
     try:
-        payload = json.loads(completed.stdout)
+        payload = json.loads(stdout)
     except json.JSONDecodeError as error:
         raise RuntimeError("public next-video CLI did not emit JSON") from error
-    return {"argv": ["studio", "next-video", *arguments], "exit_code": completed.returncode, "wall_time_s": time.monotonic() - started, "stdout_sha256": sha256(completed.stdout.encode()).hexdigest(), "result": payload}
+    return {
+        "argv": ["studio", "next-video", *arguments], "exit_code": process.returncode,
+        "pid": process.pid, "wall_time_s": time.monotonic() - started,
+        "stdout_sha256": sha256(stdout.encode()).hexdigest(),
+        "stderr_sha256": sha256(stderr.encode()).hexdigest(), "result": payload,
+    }
 
 
-def _public_cli_events(workspace: Path, request_id: str) -> tuple[dict[str, float], dict[str, float], int]:
+def _public_cli_events(
+    workspace: Path, request_id: str, *, worker_run_id: str, worker_pid: int,
+) -> tuple[dict[str, None], dict[str, float], dict[str, float], int, str]:
+    """Validate one harness-bound worker lifecycle before deriving metrics."""
     event_file = workspace / "TC" / request_id[:16] / "provider" / "fixture-events.jsonl"
-    events = [json.loads(line) for line in event_file.read_text(encoding="utf-8").splitlines() if line]
-    starts = {event["scene"]: event["monotonic_s"] for event in events if event["event"] == "submit_started"}
-    ends = {event["scene"]: event["monotonic_s"] for event in events if event["event"] == "submit_completed"}
-    qa = {event["scene"]: event["monotonic_s"] - ends[event["scene"]] for event in events if event["event"] == "qa_completed"}
-    if set(starts) != {"SLOW", "FAST"} or set(qa) != {"SLOW", "FAST"}:
-        raise AssertionError("public CLI fixture evidence is incomplete")
+    try:
+        events = [json.loads(line) for line in event_file.read_text(encoding="utf-8").splitlines() if line]
+    except json.JSONDecodeError as error:
+        raise AssertionError("public CLI fixture event JSON is invalid") from error
+    required = {
+        "sequence", "event", "scene", "clock_domain", "process_elapsed_s", "tempdir",
+        "worker_run_id", "worker_pid",
+    }
+    scenes = {"SLOW", "FAST"}
+    lifecycle = {scene: [] for scene in scenes}
+    tempdirs: set[str] = set()
+    for position, event in enumerate(events, start=1):
+        if not isinstance(event, dict) or set(event) != required:
+            raise AssertionError("public CLI fixture event schema is closed")
+        if event["sequence"] != position or type(event["sequence"]) is not int:
+            raise AssertionError("public CLI fixture event sequence is not contiguous")
+        if (event["worker_run_id"], event["worker_pid"]) != (worker_run_id, worker_pid):
+            raise AssertionError("public CLI fixture event worker identity mismatches harness")
+        if event["event"] not in {"submit_started", "submit_completed", "qa_completed"} or event["scene"] not in scenes:
+            raise AssertionError("public CLI fixture event lifecycle value is invalid")
+        if event["clock_domain"] != "fixture-process-monotonic-relative/v1":
+            raise AssertionError("public CLI fixture events must share one relative clock domain")
+        elapsed = event["process_elapsed_s"]
+        if type(elapsed) not in {int, float} or not math.isfinite(elapsed) or elapsed < 0:
+            raise AssertionError("public CLI fixture event elapsed time is not finite")
+        if not isinstance(event["tempdir"], str) or not event["tempdir"]:
+            raise AssertionError("public CLI fixture event tempdir is invalid")
+        tempdirs.add(event["tempdir"])
+        lifecycle[event["scene"]].append((event["event"], float(elapsed)))
+    if len(tempdirs) != 1:
+        raise AssertionError("public CLI fixture events must record one child tempdir")
+    expected = ("submit_started", "submit_completed", "qa_completed")
+    timestamps: dict[str, dict[str, float]] = {}
+    for scene, records in lifecycle.items():
+        if tuple(event for event, _elapsed in records) != expected:
+            raise AssertionError("public CLI fixture event lifecycle is incomplete or duplicated")
+        values = {event: elapsed for event, elapsed in records}
+        if not values["submit_started"] <= values["submit_completed"] <= values["qa_completed"]:
+            raise AssertionError("public CLI fixture event lifecycle time is impossible")
+        timestamps[scene] = values
+    starts = {scene: timestamps[scene]["submit_started"] for scene in sorted(scenes)}
+    qa = {
+        scene: timestamps[scene]["qa_completed"] - timestamps[scene]["submit_completed"]
+        for scene in sorted(scenes)
+    }
     active = peak = 0
-    for event in sorted(events, key=lambda event: event["sequence"]):
+    for event in events:
         if event["event"] == "submit_started":
             active += 1; peak = max(peak, active)
         elif event["event"] == "submit_completed":
             active -= 1
-    return starts, qa, peak
+    # The command runner measures each subprocess separately.  It has no
+    # shared admission timestamp with the worker's monotonic clock, so queue
+    # wait cannot be derived across process clock domains.  Keep it explicit
+    # rather than publishing the worker's absolute monotonic uptime as wait.
+    if active != 0:
+        raise AssertionError("public CLI fixture submissions do not balance")
+    return {scene: None for scene in sorted(starts)}, starts, qa, peak, next(iter(tempdirs))
 
 
 def _public_cli_sample(root: Path, packet: Path, concurrency: int) -> dict[str, Any]:
     workspace, scratch = root / "workspace", root / "scratch"
     workspace.mkdir(parents=True); scratch.mkdir(parents=True)
-    environment = {**os.environ, "PYTHONPATH": "", "TMP": str(scratch), "TEMP": str(scratch), "TMPDIR": str(scratch), "HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON": json.dumps(_PUBLIC_CLI_LATENCIES, sort_keys=True)}
+    worker_run_id = uuid.uuid4().hex
+    environment = {**os.environ, "PYTHONPATH": "", "TMP": str(scratch), "TEMP": str(scratch), "TMPDIR": str(scratch), "HERMES_HOME": str(scratch / "hermes-home"), "HERMES_TEST_BENCHMARK_WORKER_RUN_ID": worker_run_id, "HYBRID_TEST_FIXTURE_LATENCY_BY_SCENE_JSON": json.dumps(_PUBLIC_CLI_LATENCIES, sort_keys=True)}
     commands: dict[str, dict[str, Any]] = {}
     commands["start"] = _public_cli_command(["start", "--workspace", str(workspace), "--compiled-input", str(packet), "--concurrency", str(concurrency)], environment)
     request_id = commands["start"]["result"]["request_id"]
@@ -379,15 +439,26 @@ def _public_cli_sample(root: Path, packet: Path, concurrency: int) -> dict[str, 
         raise AssertionError(commands)
     provider = workspace / "TC" / request_id[:16] / "provider"
     initial_posts = json.loads((provider / "fixture-post-count.json").read_text(encoding="utf-8"))["posts"]
-    queue_wait, qa_durations, peak = _public_cli_events(workspace, request_id)
+    worker_pid = commands["worker"]["result"].get("worker_pid")
+    if type(worker_pid) is not int or worker_pid <= 0:
+        raise AssertionError("public CLI worker did not report its process identity")
+    queue_wait, worker_elapsed, qa_durations, peak, child_tempdir = _public_cli_events(
+        workspace, request_id, worker_run_id=worker_run_id,
+        worker_pid=worker_pid,
+    )
+    child_tempdir_verified = Path(child_tempdir).resolve() == scratch.resolve()
+    if not child_tempdir_verified:
+        raise AssertionError("public CLI child did not honor the explicit scratch tempdir")
     runner = json.loads((workspace / "TC" / request_id[:16] / "runner" / "runner.json").read_text(encoding="utf-8"))
     Path(next(provider.glob("*.TEST.png"))).write_bytes(b"tampered-public-cli-benchmark")
     commands["tamper_resume"] = _public_cli_command(["resume", "--workspace", str(workspace), "--request-id", request_id, "--concurrency", str(concurrency)], environment)
     posts_after = json.loads((provider / "fixture-post-count.json").read_text(encoding="utf-8"))["posts"]
-    return {"concurrency": concurrency, "request_id": request_id, "commands": commands, "worker_wall_time_s": commands["worker"]["wall_time_s"], "queue_wait_s": queue_wait, "qa_durations_s": qa_durations, "peak_inflight": peak, "initial_submit_count": initial_posts, "fresh_resume_submit_count": 0, "cache_hits": len(runner["qa"]), "status_snapshot": commands["status"]["result"]["queue"].get("snapshot"), "tamper_cache_rejected": commands["tamper_resume"]["exit_code"] == 1, "tamper_submit_count": posts_after - initial_posts}
+    return {"concurrency": concurrency, "request_id": request_id, "commands": commands, "worker_wall_time_s": commands["worker"]["wall_time_s"], "queue_wait_s": queue_wait, "queue_wait_status": "UNKNOWN_CROSS_PROCESS_CLOCK_DOMAIN", "worker_elapsed_to_submit_s": worker_elapsed, "fixture_event_clock_domain": "fixture-process-monotonic-relative/v1", "fixture_latency_kind": "TEST_FAKE_LATENCY", "child_tempdir": child_tempdir, "child_tempdir_verified": child_tempdir_verified, "qa_durations_s": qa_durations, "peak_inflight": peak, "initial_submit_count": initial_posts, "fresh_resume_submit_count": 0, "cache_hits": len(runner["qa"]), "status_snapshot": commands["status"]["result"]["queue"].get("snapshot"), "tamper_cache_rejected": commands["tamper_resume"]["exit_code"] == 1, "tamper_submit_count": posts_after - initial_posts}
 
 
-def run_public_cli_benchmark(root: Path, *, repeats: int = 3) -> dict[str, Any]:
+def run_public_cli_benchmark(
+    root: Path, *, repeats: int = 3, scratch_root: Path | None = None
+) -> dict[str, Any]:
     """Measure public CLI subprocesses; never claim a production speedup."""
     if type(repeats) is not int or not 1 <= repeats <= 10:
         raise ValueError("repeats must be a bounded integer from 1 through 10")
@@ -396,7 +467,10 @@ def run_public_cli_benchmark(root: Path, *, repeats: int = 3) -> dict[str, Any]:
         raise ValueError("benchmark rejects the production root")
     # Keep subprocess workspace below Windows' legacy path limit; the requested
     # output root receives only the final JSON artifact.
-    scratch_root = Path(os.environ.get("TMPDIR", root / ".work")).resolve()
+    scratch_root = (root / ".work" if scratch_root is None else scratch_root).resolve()
+    if str(scratch_root).replace("\\", "/").casefold().startswith("c:/hermesstudio/production"):
+        raise ValueError("benchmark rejects the production scratch root")
+    scratch_root.mkdir(parents=True, exist_ok=True)
     work = scratch_root / ("public-cli-" + sha256(str(root).encode()).hexdigest()[:16])
     if work.exists(): shutil.rmtree(work)
     packet = _public_cli_packet(work / "same-hash-packet")
@@ -413,8 +487,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("benchmarks/public_cli_benchmark"))
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--scratch-root", type=Path)
     args = parser.parse_args()
-    result = run_public_cli_benchmark(args.output_dir, repeats=args.repeats)
+    result = run_public_cli_benchmark(
+        args.output_dir, repeats=args.repeats, scratch_root=args.scratch_root
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
