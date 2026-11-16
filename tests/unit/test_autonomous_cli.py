@@ -87,12 +87,15 @@ def test_cli_start_resume_status_and_test_only_publish_are_hash_bound(tmp_path):
     )
     assert code == 0 and ready["state"] == "READY_TO_PUBLISH"
     code, published = run_cli(
-        "publish",
+        "approve",
         "--workspace",
         str(workspace),
         "--request-id",
         request_id,
-        "--test-publish",
+        "--kind",
+        "video",
+        "--test-approval",
+        "--approve-and-publish",
     )
     assert code == 0 and published["state"] == "PUBLISHED"
     assert published["publication"]["mode"] == "TEST"

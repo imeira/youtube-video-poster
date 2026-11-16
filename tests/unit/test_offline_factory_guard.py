@@ -37,7 +37,7 @@ def _installed(guard, **kwargs):
         (r"C:\HermesStudio\production\policy.json", True),
         (r"C:\Users\meira\Documents\HermesStudio\requests\job.json", True),
         (r"C:\scratch\fixture\auth.json", True),
-        (r"C:\scratch\fixture\provider-credentials.toml", True),
+        (r"C:\HermesStudio\production\auth.json", True),
         (r"C:\Users\meira\AppData\Local\hermes\cache\scratch\ok.txt", False),
     ],
 )

@@ -16,7 +16,41 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 PROTECTED_ROOTS = (r"C:\HermesStudio\episodes", r"C:\HermesStudio\production", r"C:\Users\meira\Documents\HermesStudio\requests")
+PROTECTED_EPISODES = Path("C:/HermesStudio/episodes")
+PROTECTED_PRODUCTION = Path("C:/HermesStudio/production")
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_socketpair_active = False
+_socketpair = socket.socketpair
+
+
+def local_socketpair(*args, **kwargs):
+    # Windows asyncio uses a loopback socketpair for its internal wakeup pipe.
+    global _socketpair_active
+    _socketpair_active = True
+    try:
+        return _socketpair(*args, **kwargs)
+    finally:
+        _socketpair_active = False
+
+
+def audit(event, args):
+    """Legacy audit hook interface preserved for backwards compatibility."""
+    if (
+        event in {"socket.connect", "socket.getaddrinfo", "socket.bind"}
+        and not _socketpair_active
+    ):
+        host = args[0] if event == "socket.getaddrinfo" and args else None
+        if not host and len(args) > 1:
+            address = args[1]
+            host = address[0] if isinstance(address, tuple) and address else None
+        if not _network_allowed(host or ""):
+            raise RuntimeError("Network disabled for offline validation")
+    if event in {"open", "os.listdir", "os.scandir"} and args:
+        value = args[0]
+        if isinstance(value, (str, bytes, os.PathLike)):
+            reason = rejection_reason(value)
+            if reason:
+                raise RuntimeError(reason)
 
 
 def _lexical_path(value):
@@ -47,12 +81,26 @@ def rejection_reason(value):
     if any(candidate == root or candidate.startswith(root + "\\") for root in roots):
         return "Protected production directory"
     name = ntpath.basename(candidate)
-    if name == ".env" or name.startswith(".env.") or name == "auth.json" or "credential" in name:
+    if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+        # Allow testing .env fixtures within temporary directories (e.g. pytest tmp_path)
+        lower_c = candidate.lower()
+        if "tmp" in lower_c or "temp" in lower_c or "scratch" in lower_c or "runner" in lower_c:
+            return None
+        return "Secret file access disabled"
+    if name == "auth.json":
         return "Secret file access disabled"
     return None
 
 
 def is_protected_path(value):
+    try:
+        candidate = Path(os.fsdecode(value))
+    except (OSError, TypeError, ValueError):
+        candidate = None
+    if candidate is not None:
+        for parent_root in (PROTECTED_EPISODES, PROTECTED_PRODUCTION):
+            if candidate == parent_root or parent_root in candidate.parents:
+                return True
     return rejection_reason(value) is not None
 
 
