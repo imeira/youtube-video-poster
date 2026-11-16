@@ -29,6 +29,7 @@ from src.hybrid.artifacts import FrozenAsset, Manifest
 from src.hybrid.cas import content_key
 from src.hybrid.execution import Executor, Job
 from src.hybrid.locks import file_lock, file_slot, reject_reparse_path
+from src.hybrid.publication_plan import validate_plan
 from src.hybrid.standing_budget import BudgetDenied, StandingBudgetLedger
 
 
@@ -2003,6 +2004,281 @@ class AutonomousTwoGateRunner:
             document["state"] = "READY_TO_PUBLISH"
         return self._save(document)
 
+    def stage_publication_package(
+        self, plan: dict, *, metadata: Path, captions: Path,
+        ownership: RunnerOwnership | None = None,
+    ) -> dict[str, Any]:
+        """Bind the closed v2 destination and all delivery bytes before either gate."""
+        self._assert_ownership(ownership)
+        with file_lock(self.lock_path):
+            self._assert_ownership(ownership)
+            document = self._load()
+            if not self.policy.publication_enabled:
+                raise PolicyError("publication is disabled by policy")
+            if document.get("state") != "WAITING_THUMBNAIL_APPROVAL":
+                raise ValueError("publication package must be staged before either human gate")
+            checked_plan = validate_plan(
+                plan, episode_id=self.episode_id, channel=self.policy.publication["channel"]
+            )
+            artifacts = {}
+            for kind, path in {
+                "thumbnail": document.get("media", {}).get("thumbnail", {}).get("path"),
+                "video": document.get("media", {}).get("video", {}).get("path"),
+                "metadata": metadata,
+                "captions": captions,
+            }.items():
+                artifact = Path(path) if path is not None else Path()
+                if not artifact.is_file():
+                    raise ValueError("publication package artifact is missing")
+                digest = sha256(artifact.read_bytes()).hexdigest()
+                staged = document.get("media", {}).get(kind)
+                if staged is not None and (
+                    str(artifact.resolve()) != staged.get("path")
+                    or digest != staged.get("sha256")
+                ):
+                    raise ValueError("publication package media does not match staged delivery")
+                artifacts[kind] = {"path": str(artifact.resolve()), "sha256": digest}
+            package = {
+                "schema": "two-gate-publication-package/v2",
+                "episode_id": self.episode_id,
+                "mode": "TEST",
+                "policy_sha256": self.policy.digest,
+                "plan": checked_plan,
+                "artifacts": artifacts,
+            }
+            package["receipt_sha256"] = _digest_json(package)
+            existing = document.get("publication_package")
+            if existing is not None:
+                if existing != package:
+                    raise ValueError("publication package is immutable once staged")
+                return document
+            document["publication_package"] = package
+            # runner.json is mutable operational state.  Keep the accepted
+            # package in a separate, write-once receipt so a re-digested runner
+            # document cannot redirect a terminal TEST publication.
+            receipt_path = self.root / "publication-package-receipt.json"
+            receipt = {
+                "schema": "two-gate-publication-package-receipt/v1",
+                "episode_id": self.episode_id,
+                "policy_sha256": self.policy.digest,
+                "package": package,
+            }
+            if receipt_path.exists():
+                if json.loads(receipt_path.read_text(encoding="utf-8")) != receipt:
+                    raise ValueError("publication package receipt is immutable")
+            else:
+                _atomic_json(receipt_path, receipt)
+                if json.loads(receipt_path.read_text(encoding="utf-8")) != receipt:
+                    raise RuntimeError("publication package receipt readback mismatch")
+            return self._save(document)
+
+    def stage_publication_package_owned(
+        self, plan: dict, *, metadata: Path, captions: Path, ownership: RunnerOwnership
+    ) -> dict[str, Any]:
+        return self.stage_publication_package(
+            plan, metadata=metadata, captions=captions, ownership=ownership
+        )
+
+    def _verified_publication_package(self, document: dict[str, Any]) -> dict[str, Any]:
+        package = document.get("publication_package")
+        if not isinstance(package, dict):
+            raise PolicyError("explicit publication package is required")
+        receipt = package.get("receipt_sha256")
+        unsigned = {key: value for key, value in package.items() if key != "receipt_sha256"}
+        if receipt != _digest_json(unsigned):
+            raise PolicyError("publication package receipt is tampered")
+        receipt_path = self.root / "publication-package-receipt.json"
+        if not receipt_path.is_file():
+            raise PolicyError("independent publication package receipt is required")
+        try:
+            external = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise PolicyError("independent publication package receipt is unreadable") from error
+        if external != {
+            "schema": "two-gate-publication-package-receipt/v1",
+            "episode_id": self.episode_id,
+            "policy_sha256": self.policy.digest,
+            "package": package,
+        }:
+            raise PolicyError("independent publication package receipt does not bind runner package")
+        if (
+            package.get("episode_id") != self.episode_id
+            or package.get("mode") != "TEST"
+            or package.get("policy_sha256") != self.policy.digest
+        ):
+            raise PolicyError("publication package binding is invalid")
+        plan = validate_plan(
+            package.get("plan"),
+            episode_id=self.episode_id,
+            channel=self.policy.publication["channel"],
+        )
+        if plan != package.get("plan"):
+            raise PolicyError("publication package plan is not canonical")
+        artifacts = package.get("artifacts")
+        if not isinstance(artifacts, dict) or set(artifacts) != {
+            "thumbnail", "video", "metadata", "captions"
+        }:
+            raise PolicyError("publication package artifacts are invalid")
+        for binding in artifacts.values():
+            if not isinstance(binding, dict):
+                raise PolicyError("publication package artifact binding is invalid")
+            artifact = Path(binding.get("path", ""))
+            if not artifact.is_file() or sha256(artifact.read_bytes()).hexdigest() != binding.get("sha256"):
+                raise PolicyError("publication package artifact bytes changed")
+        return package
+
+    @staticmethod
+    def _verify_approved_publication_gates(document: dict[str, Any]) -> None:
+        """Terminal reentry must revalidate both durable gate bindings."""
+        for kind in ("thumbnail", "video"):
+            gate = document.get("gates", {}).get(kind)
+            media = document.get("media", {}).get(kind)
+            if (
+                not isinstance(gate, dict)
+                or not isinstance(media, dict)
+                or gate.get("approved") is not True
+                or gate.get("artifact_path") != media.get("path")
+                or gate.get("artifact_sha256") != media.get("sha256")
+            ):
+                raise PolicyError("publication requires two current approved gates")
+            artifact = Path(media.get("path", ""))
+            if not artifact.is_file() or sha256(artifact.read_bytes()).hexdigest() != media.get("sha256"):
+                raise PolicyError("approved publication gate artifact bytes changed")
+
+    @staticmethod
+    def _publication_receipt(value: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise TypeError("publisher protocol methods must return dictionaries")
+        return {"result": value, "receipt_sha256": _digest_json(value)}
+
+    @staticmethod
+    def _is_http_400(value: dict[str, Any]) -> bool:
+        return value.get("http_status") == 400 or value.get("status") == 400
+
+    @staticmethod
+    def _validate_publication_readback(
+        value: dict[str, Any], video_id: str, package: dict[str, Any], *, released: bool
+    ) -> None:
+        """Validate observed transport state; never synthesize it from the package."""
+        if not isinstance(value, dict) or value.get("video_id") != video_id:
+            raise RuntimeError("publisher readback does not bind the recovered video")
+        plan = package["plan"]
+        expected = {
+            "mode": "TEST", "channel": plan["channel"], "playlist_id": plan["playlist_id"],
+            "final_visibility": plan["visibility"], "publish_at": plan["publish_at"],
+            "timezone": plan["timezone"],
+            "artifacts": {key: item["sha256"] for key, item in package["artifacts"].items()},
+        }
+        if any(value.get(key) != expected_value for key, expected_value in expected.items()):
+            raise RuntimeError("publisher readback does not bind the exact TEST package")
+        if released:
+            if value.get("visibility") != plan["visibility"] or value.get("released") is not True:
+                raise RuntimeError("post-release readback does not confirm final publication state")
+        elif value.get("visibility") != "private":
+            raise RuntimeError("pre-release readback must confirm private visibility")
+
+    def approve_final_and_publish(
+        self, artifact: Path, *, reviewer: str, publisher, ownership: RunnerOwnership | None = None
+    ) -> dict[str, Any]:
+        """Perform the explicit second decision and TEST-only, recovery-safe release."""
+        self._assert_ownership(ownership)
+        with file_lock(self.lock_path):
+            self._assert_ownership(ownership)
+            document = self._load()
+            if getattr(publisher, "mode", None) != "TEST":
+                raise PolicyError("publication publisher must explicitly be TEST")
+            if not all(callable(getattr(publisher, name, None)) for name in (
+                "upload_private", "configure", "readback", "release", "recover_upload"
+            )):
+                raise TypeError("publisher does not implement the explicit publication protocol")
+            package = self._verified_publication_package(document)
+            if document["state"] == "PUBLISHED":
+                self._verify_approved_publication_gates(document)
+                publication = document.get("publication", {})
+                self._validate_publication_readback(
+                    publication.get("post_readback", {}).get("result", {}),
+                    publication.get("video_id"), package, released=True,
+                )
+                return document
+            if document["state"] == "WAITING_VIDEO_APPROVAL":
+                document = self._record_human_gate(
+                    "video", artifact, approved=True, reviewer=reviewer
+                )
+                document["state"] = "PUBLISH_UPLOAD_INTENT"
+                self._save(document)  # write-ahead: no upload before durable intent
+                try:
+                    upload = publisher.upload_private(package)
+                except Exception as error:
+                    raise RuntimeError("ambiguous upload requires recovery; upload will not replay") from error
+                if self._is_http_400(upload):
+                    recovered = publisher.recover_upload(package)
+                    if recovered is None:
+                        raise RuntimeError("ambiguous upload requires recovery; upload will not replay")
+                    upload = {"upload_response": upload, "recovered": recovered}
+                    video_id = recovered.get("video_id") if isinstance(recovered, dict) else None
+                else:
+                    video_id = upload.get("video_id") if isinstance(upload, dict) else None
+                if not isinstance(video_id, str) or not video_id:
+                    raise RuntimeError("upload did not return a recoverable video_id")
+                document["publication"] = {"video_id": video_id, "upload": self._publication_receipt(upload)}
+                document["state"] = "PUBLISH_UPLOAD_RECEIPT"
+                self._save(document)
+            elif document["state"] == "PUBLISH_UPLOAD_INTENT":
+                recovered = publisher.recover_upload(package)
+                if recovered is None or not isinstance(recovered.get("video_id"), str):
+                    raise RuntimeError("ambiguous upload requires recovery; upload will not replay")
+                video_id = recovered["video_id"]
+                document["publication"] = {"video_id": video_id, "upload": self._publication_receipt({"recovered": recovered})}
+                document["state"] = "PUBLISH_UPLOAD_RECEIPT"
+                self._save(document)
+            elif document["state"] == "PUBLISH_UPLOAD_RECEIPT":
+                video_id = document.get("publication", {}).get("video_id")
+                if not isinstance(video_id, str) or not video_id:
+                    raise RuntimeError("durable upload receipt lacks video_id")
+            else:
+                raise PolicyError("final publication approval is out of order")
+            self._verify_approved_publication_gates(document)
+            document["state"] = "PUBLISH_CONFIGURE_INTENT"
+            self._save(document)
+            try:
+                configured = publisher.configure(video_id, package)
+            except Exception as error:
+                raise RuntimeError("ambiguous configure requires readback; configure will not replay") from error
+            if not isinstance(configured, dict) or configured.get("video_id") != video_id:
+                raise RuntimeError("configure receipt does not bind the recovered video")
+            document["publication"]["configure"] = self._publication_receipt(configured)
+            document["state"] = "PUBLISH_CONFIGURE_RECEIPT"
+            self._save(document)
+            document["state"] = "PUBLISH_PRE_READBACK"
+            self._save(document)
+            try:
+                readback = publisher.readback(video_id)
+            except Exception as error:
+                raise RuntimeError("ambiguous pre-release readback blocks release") from error
+            self._validate_publication_readback(readback, video_id, package, released=False)
+            document["publication"]["pre_readback"] = self._publication_receipt(readback)
+            document["state"] = "PUBLISH_RELEASE_INTENT"
+            self._save(document)
+            try:
+                released = publisher.release(video_id, package)
+            except Exception as error:
+                raise RuntimeError("ambiguous release requires post-release readback; release will not replay") from error
+            if not isinstance(released, dict) or released.get("video_id") != video_id:
+                raise RuntimeError("release receipt does not bind the recovered video")
+            document["publication"]["release"] = self._publication_receipt(released)
+            document["state"] = "PUBLISH_RELEASE_RECEIPT"
+            self._save(document)
+            document["state"] = "PUBLISH_POST_READBACK"
+            self._save(document)
+            try:
+                post_readback = publisher.readback(video_id)
+            except Exception as error:
+                raise RuntimeError("ambiguous post-release readback blocks publication") from error
+            self._validate_publication_readback(post_readback, video_id, package, released=True)
+            document["publication"]["post_readback"] = self._publication_receipt(post_readback)
+            document["state"] = "PUBLISHED"
+            return self._save(document)
+
     def publish(self, publisher: Callable[[dict], dict]) -> dict[str, Any]:
         with file_lock(self.lock_path):
             return self._publish(publisher)
@@ -2221,6 +2497,22 @@ class AutonomousCompiledTestAdapter:
         """Record a compiled gate under the worker's existing fenced lease."""
         return self.runner.record_human_gate_owned(
             kind, artifact, approved=approved, reviewer=reviewer, ownership=ownership
+        )
+
+    def stage_publication_package_owned(
+        self, plan: dict, *, metadata: Path, captions: Path, ownership: RunnerOwnership
+    ) -> dict[str, Any]:
+        """Stage the v2 package only under the same worker fence as rendering."""
+        return self.runner.stage_publication_package_owned(
+            plan, metadata=metadata, captions=captions, ownership=ownership
+        )
+
+    def approve_final_and_publish_owned(
+        self, artifact: Path, *, reviewer: str, publisher, ownership: RunnerOwnership
+    ) -> dict[str, Any]:
+        """Execute the explicit terminal TEST decision under the active lease."""
+        return self.runner.approve_final_and_publish(
+            artifact, reviewer=reviewer, publisher=publisher, ownership=ownership
         )
 
     def _synchronize_runner_qa(

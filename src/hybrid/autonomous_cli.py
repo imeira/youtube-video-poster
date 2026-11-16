@@ -12,10 +12,12 @@ import subprocess
 import tempfile
 import time
 import uuid
+from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image, ImageDraw
 
@@ -112,6 +114,17 @@ def compiled_policy_document():
         "allowed_providers": [TEST_COMPILED_PROVIDER],
         "publication": {"enabled": False},
     }
+
+
+def compiled_publication_policy_document() -> dict:
+    """Fixed local TEST authority selected only by an admitted v2 plan."""
+    document = compiled_policy_document()
+    document["publication"] = {
+        "enabled": True,
+        "channel": "TEST-local-only",
+        "visibility": "private",
+    }
+    return document
 
 
 def compiled_policy():
@@ -421,6 +434,77 @@ def _compiled_json(path: Path) -> dict:
     return value
 
 
+def validate_publication_plan(plan: dict, *, episode_id: str) -> dict:
+    """Validate explicit v2 destination data before a runner is constructed.
+
+    This creates no publication authority.  The gates-owned package API must
+    revalidate the copied bytes together with completed media at final approval.
+    """
+    required = {
+        "schema", "episode_id", "channel", "playlist_id", "visibility",
+        "publish_at", "timezone",
+    }
+    if not isinstance(plan, dict) or set(plan) != required:
+        raise ValueError("publication plan schema is invalid")
+    if plan.get("schema") != "two-gate-publication/v2":
+        raise ValueError("publication plan v2 schema is required")
+    if plan.get("episode_id") != episode_id:
+        raise ValueError("publication plan episode_id does not bind compiled episode")
+    if not all(isinstance(plan.get(key), str) and plan[key].strip() for key in ("channel", "playlist_id", "timezone")):
+        raise ValueError("publication plan requires channel, playlist_id, and timezone")
+    try:
+        ZoneInfo(plan["timezone"])
+    except ZoneInfoNotFoundError as error:
+        raise ValueError("publication plan timezone is invalid") from error
+    visibility, publish_at = plan.get("visibility"), plan.get("publish_at")
+    if visibility == "public":
+        if publish_at is not None:
+            raise ValueError("public publication plan must not set publish_at")
+    elif visibility == "scheduled":
+        if not isinstance(publish_at, str) or not publish_at:
+            raise ValueError("scheduled publication plan requires publish_at")
+        try:
+            parsed = datetime.fromisoformat(publish_at)
+        except ValueError as error:
+            raise ValueError("publication plan publish_at must be ISO-8601") from error
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("publication plan publish_at must include timezone")
+    else:
+        raise ValueError("publication plan visibility must be public or scheduled")
+    return plan
+
+
+def _publication_plan_binding(raw: bytes, destination: Path, *, episode_id: str) -> dict:
+    try:
+        plan = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("publication plan must be UTF-8 JSON") from error
+    validate_publication_plan(plan, episode_id=episode_id)
+    return {
+        "schema": "two-gate-publication-binding/v1",
+        "path": str(Path(destination).resolve()),
+        "sha256": sha256(raw).hexdigest(),
+        "episode_id": episode_id,
+    }
+
+
+def bind_publication_plan(source: Path, destination: Path, *, episode_id: str) -> dict:
+    """Copy one explicit local plan exactly once and return its immutable binding."""
+    source = _reject_reparse_path(Path(source))
+    raw = _compiled_read_bytes(source)
+    destination = _reject_reparse_path(Path(destination))
+    binding = _publication_plan_binding(raw, destination, episode_id=episode_id)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        if _compiled_read_bytes(destination) != raw:
+            raise ValueError("publication plan copy conflicts with admitted binding")
+    else:
+        destination.write_bytes(raw)
+    if _compiled_read_bytes(destination) != raw:
+        raise ValueError("publication plan copy readback mismatch")
+    return binding
+
+
 def _packet_policy(path: Path):
     """Validate packet evidence, while internal allowlisted policy stays authoritative."""
     data = _compiled_json(path)
@@ -495,6 +579,7 @@ def _compiled_public(root: Path, adapter, document: dict) -> dict:
         "compiled_sha256": adapter.pipeline.episode.checksum,
         "source_manifest_sha256": adapter.pipeline.run.source_manifest.checksum,
         "artifacts": {key: {"path": value["path"], "sha256": value["sha256"]} for key, value in media.items()},
+        "publication": document.get("publication"),
         "operational_metrics": adapter.runner.metrics.report(),
         "note": "Local TEST compiled evidence only; TEST assertions and gates are not human approval or a production delivery.",
     }
@@ -559,7 +644,26 @@ def _load_compiled(workspace: Path, rid: str, *, ownership_assertion=None, provi
     director = DirectorAgent.__new__(DirectorAgent)
     director.config = SimpleNamespace(episodes_dir=workspace / "episodes")
     # Never pass packet bytes as authority into the factory after validation.
-    factory_args = (pipeline, runner_workspace, compiled_policy_document())
+    # An explicit admitted v2 plan selects only a fixed local TEST publisher
+    # policy; packet bytes never provide publisher authority.
+    plan_path = root / "publication-plan.json"
+    if plan_path.is_file():
+        intent_path = root / "start-intent.json"
+        if not intent_path.is_file():
+            raise ValueError("publication plan exists without start-intent")
+        intent = _compiled_json(_reject_reparse_path(intent_path))
+        expected_plan = intent.get("publication_plan")
+        if not isinstance(expected_plan, dict):
+            raise ValueError("start-intent does not bind publication plan")
+        observed_sha = sha256(_compiled_read_bytes(_reject_reparse_path(plan_path))).hexdigest()
+        if observed_sha != expected_plan.get("sha256"):
+            raise ValueError("admitted publication plan has been tampered with")
+    policy_document = (
+        compiled_publication_policy_document()
+        if plan_path.is_file()
+        else compiled_policy_document()
+    )
+    factory_args = (pipeline, runner_workspace, policy_document)
     if ownership_assertion is None:
         if provider_concurrency == 1:
             adapter = director.create_autonomous_compiled_test_adapter(*factory_args)
@@ -605,6 +709,93 @@ def _compiled_media_qa(evidence):
     return {"approved": True, "mode": "TEST", "reviewer": "TEST local media assertion (not human)", "reviewer_identity": {"subject": "TEST-local-media-qa", "issuer": "TEST assertion, not human approval"}, "manifest_sha256": evidence["manifest_sha256"], "thumbnail_sha256": evidence["thumbnail_sha256"], "video_sha256": evidence["video_sha256"], "sidecars_sha256": {kind: item["sha256"] for kind, item in evidence["sidecars"].items()}}
 
 
+class _PersistentTestPublisher:
+    """Closed local transport boundary with durable call evidence, never LIVE."""
+
+    mode = "TEST"
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.path = self.root / "publication-transport.json"
+
+    def _mutate(self, method: str, package: dict, *, video_id: str | None = None, release: bool = False) -> dict:
+        self.root.mkdir(parents=True, exist_ok=True)
+        with file_lock(self.root / "publication-transport.lock"):
+            prior = _compiled_json(self.path) if self.path.is_file() else {"schema": "test-publication-transport/v2", "calls": [], "videos": {}}
+            if (prior.get("schema") != "test-publication-transport/v2" or not isinstance(prior.get("calls"), list)
+                    or not isinstance(prior.get("videos"), dict)):
+                raise RuntimeError("TEST publication transport telemetry is malformed")
+            video_id = video_id or "TEST-" + package["artifacts"]["video"]["sha256"][:16]
+            record = prior["videos"].get(video_id)
+            if record is None:
+                record = {"video_id": video_id, "mode": "TEST", "visibility": "private", "released": False}
+                prior["videos"][video_id] = record
+            plan = package["plan"]
+            record.update({
+                "channel": plan["channel"], "playlist_id": plan["playlist_id"],
+                "final_visibility": plan["visibility"], "publish_at": plan["publish_at"],
+                "timezone": plan["timezone"],
+                "artifacts": {key: item["sha256"] for key, item in package["artifacts"].items()},
+            })
+            if release:
+                record.update({"released": True, "visibility": plan["visibility"]})
+            prior["calls"].append({
+                "method": method,
+                "package_sha256": sha256(
+                    json.dumps(package, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                ).hexdigest(),
+            })
+            _atomic_json(self.path, prior)
+            return dict(record)
+
+    def upload_private(self, package):
+        return self._mutate("upload_private", package)
+
+    def recover_upload(self, package):
+        if not self.path.is_file():
+            return None
+        prior = _compiled_json(self.path)
+        video_id = "TEST-" + package["artifacts"]["video"]["sha256"][:16]
+        value = prior.get("videos", {}).get(video_id)
+        return dict(value) if isinstance(value, dict) else None
+
+    def configure(self, video_id, package):
+        return self._mutate("configure", package, video_id=video_id)
+
+    def readback(self, video_id):
+        if not self.path.is_file():
+            raise RuntimeError("TEST publication transport has no persisted upload")
+        with file_lock(self.root / "publication-transport.lock"):
+            prior = _compiled_json(self.path)
+            value = prior.get("videos", {}).get(video_id)
+            if not isinstance(value, dict):
+                raise TypeError("TEST publication transport does not know video_id")
+            prior["calls"].append({"method": "readback", "video_id": video_id})
+            _atomic_json(self.path, prior)
+            return dict(value)
+
+    def release(self, video_id, package):
+        return self._mutate("release", package, video_id=video_id, release=True)
+
+
+def _stage_compiled_publication_package(root: Path, adapter, ownership) -> None:
+    """Derive deterministic TEST metadata and bind it with renderer sidecars."""
+    plan = _compiled_json(_reject_reparse_path(root / "publication-plan.json"))
+    delivery = adapter.pipeline.workspace / "delivery"
+    evidence = _compiled_json(_reject_reparse_path(delivery / "evidence.json"))
+    captions = Path(evidence["sidecars"]["vtt"]["path"])
+    metadata = delivery / "metadata.TEST.json"
+    value = {"mode": "TEST", "episode_id": adapter.runner.episode_id, "channel": plan["channel"], "playlist_id": plan["playlist_id"]}
+    if metadata.exists():
+        if _compiled_json(metadata) != value:
+            raise RuntimeError("TEST publication metadata is immutable")
+    else:
+        _atomic_json(metadata, value)
+    adapter.stage_publication_package_owned(
+        plan, metadata=metadata, captions=captions, ownership=ownership
+    )
+
+
 def _stage_compiled(adapter, document):
     """Never revive the legacy unowned compiled renderer from the CLI."""
     raise ValueError(
@@ -620,14 +811,25 @@ def _compiled_start_paths(root: Path, rid: str) -> tuple[Path, Path]:
     )
 
 
-def _compiled_start_intent(root: Path, rid: str, seed: bytes, reject_scene: str | None, concurrency: int) -> dict:
-    return {
+def _compiled_start_intent(
+    root: Path,
+    rid: str,
+    seed: bytes,
+    reject_scene: str | None,
+    concurrency: int,
+    *,
+    publication_plan: dict | None = None,
+) -> dict:
+    intent = {
         "schema": "compiled-start-intent/v2",
         "request_id": rid,
         "seed_sha256": sha256(seed).hexdigest(),
         "reject_scene": reject_scene,
         "provider_concurrency": concurrency,
     }
+    if publication_plan is not None:
+        intent["publication_plan"] = publication_plan
+    return intent
 
 
 def _read_exact_start_intent(path: Path, expected: dict) -> dict:
@@ -648,6 +850,10 @@ def _finalize_compiled_start_locked(root: Path, rid: str, *, provider_concurrenc
     _lock_path, parent_intent = _compiled_start_paths(root, rid)
     parent = _compiled_json(parent_intent)
     root_document = _compiled_json(_reject_reparse_path(root / "start-intent.json"))
+    parent_binding = {key: value for key, value in parent.items() if key != "phase"}
+    root_binding = {key: value for key, value in root_document.items() if key != "phase"}
+    if parent_binding != root_binding:
+        raise ValueError("start intent copies disagree about the admitted publication binding")
     for document in (parent, root_document):
         if (document.get("schema"), document.get("request_id"), document.get("reject_scene"), document.get("provider_concurrency")) != (
             "compiled-start-intent/v2", rid, reject_scene, provider_concurrency
@@ -665,19 +871,34 @@ def finalize_compiled_start(workspace: Path, rid: str, *, provider_concurrency: 
         _finalize_compiled_start_locked(root, rid, provider_concurrency=provider_concurrency, reject_scene=reject_scene)
 
 
-def start_compiled(workspace: Path, packet: Path, reject_scene: str | None, *, provider_concurrency: int = 1, on_admission=None):
+def start_compiled(workspace: Path, packet: Path, reject_scene: str | None, *, provider_concurrency: int = 1, on_admission=None, publication_plan_file: Path | None = None):
     """Recover one exact TEST admission in its final namespace under one lock."""
     from src.hybrid.compiled import CompiledEpisode
 
     packet = _reject_reparse_path(Path(packet))
     packet_files = tuple(_reject_reparse_path(packet / name) for name in COMPILED_PACKET_FILES)
-    CompiledEpisode.load(packet_files[0])
+    episode = CompiledEpisode.load(packet_files[0])
+    plan_raw = None
+    if publication_plan_file is not None:
+        plan_raw = _compiled_read_bytes(_reject_reparse_path(Path(publication_plan_file)))
+        # Validate before any TEST executor, queue, ledger, or runner is opened.
+        _publication_plan_binding(plan_raw, Path("publication-plan.json"), episode_id=episode.episode_id)
     seed = b"autonomous-compiled-test-v1\0" + b"".join(path.read_bytes() for path in packet_files)
+    if plan_raw is not None:
+        seed += b"\0two-gate-publication-plan\0" + plan_raw
     rid = sha256(seed).hexdigest()
     workspace = _reject_reparse_path(Path(workspace))
     root = _compiled_root(workspace, rid)
+    publication_binding = (
+        _publication_plan_binding(plan_raw, root / "publication-plan.json", episode_id=episode.episode_id)
+        if plan_raw is not None
+        else None
+    )
     lock_path, parent_intent = _compiled_start_paths(root, rid)
-    admission = _compiled_start_intent(root, rid, seed, reject_scene, provider_concurrency)
+    admission = _compiled_start_intent(
+        root, rid, seed, reject_scene, provider_concurrency,
+        publication_plan=publication_binding,
+    )
     with file_lock(lock_path):
         if parent_intent.exists():
             _read_exact_start_intent(parent_intent, admission)
@@ -695,6 +916,13 @@ def start_compiled(workspace: Path, packet: Path, reject_scene: str | None, *, p
             raise ValueError("existing partial legacy namespace requires explicit quarantine or reconciliation")
         else:
             _write_start_intent(root_intent, admission, "ADMITTING")
+        if publication_plan_file is not None:
+            copied_binding = bind_publication_plan(
+                publication_plan_file, root / "publication-plan.json",
+                episode_id=episode.episode_id,
+            )
+            if copied_binding != publication_binding:
+                raise ValueError("publication plan changed during admission")
         harness = root / "compiled-harness.json"
         if not harness.exists():
             snapshot, compiled_sha = _snapshot_compiled_input(packet, root / "inputs")
@@ -843,6 +1071,10 @@ async def _fixture_worker_handler(_task: dict) -> dict:
             document = adapter.stage_director_delivery_owned(
                 _compiled_media_qa, ownership=ownership,
             )
+            if (root / "publication-plan.json").is_file():
+                _task["_lease_assertion"](ownership)
+                _stage_compiled_publication_package(root, adapter, ownership)
+                document = adapter.runner._load()
     elif _task["kind"] == "fixture":
         root = Path(_task["root"])
         ownership = RunnerOwnership(_task["episode_id"], _task["_worker_id"], _task["fencing_token"])
@@ -944,7 +1176,7 @@ def _write_compiled_gate_receipt(root: Path, request_id: str, document: dict, ki
 def validate_compiled_gate_receipts(workspace: Path, request_id: str, document: dict) -> None:
     """Require independently persisted leased gate receipts for terminal TEST state."""
     root = _compiled_root(_reject_reparse_path(Path(workspace)), request_id)
-    if document.get("state") != "READY_TO_PUBLISH":
+    if document.get("state") not in {"READY_TO_PUBLISH", "PUBLISHED"}:
         return
     for kind in ("thumbnail", "video"):
         receipt = _compiled_json(_reject_reparse_path(_compiled_gate_receipt_path(root, kind)))
@@ -970,7 +1202,9 @@ def validate_compiled_gate_receipts(workspace: Path, request_id: str, document: 
             raise ValueError("ready TEST terminal gate receipt artifact bytes do not match")
 
 
-def _approve_compiled_gate(workspace: Path, request_id: str, kind: str):
+def _approve_compiled_gate(
+    workspace: Path, request_id: str, kind: str, *, approve_and_publish: bool = False
+):
     """Mutate one gate only under the queue's existing episode lease."""
     from src.hybrid.autonomous import RunnerOwnership
     from src.hybrid.worker import EpisodeTaskQueue
@@ -1007,17 +1241,22 @@ def _approve_compiled_gate(workspace: Path, request_id: str, kind: str):
             raise RuntimeError("compiled runner episode identity does not match queue lease")
         artifact = Path(document["media"][kind]["path"])
         assert_current(ownership)
-        document = adapter.record_human_gate_owned(
-            kind, artifact, approved=True,
-            reviewer="TEST gate assertion (not human approval)", ownership=ownership,
-        )
-        gate = document.get("gates", {}).get(kind, {})
-        digest = gate.get("artifact_sha256")
-        artifact = _reject_reparse_path(Path(gate.get("artifact_path", "")))
-        if not isinstance(digest, str) or sha256(_compiled_read_bytes(artifact)).hexdigest() != digest:
-            raise RuntimeError("approval receipt is not bound to the current durable artifact")
-        assert_current(ownership)
-        _write_compiled_gate_receipt(root, request_id, document, kind)
+        if approve_and_publish:
+            if kind != "video":
+                raise ValueError("approve-and-publish requires the video gate")
+            document = adapter.approve_final_and_publish_owned(
+                artifact,
+                reviewer="TEST gate assertion (not human approval)",
+                publisher=_PersistentTestPublisher(root),
+                ownership=ownership,
+            )
+            _write_compiled_gate_receipt(root, request_id, document, kind)
+        else:
+            document = adapter.record_human_gate_owned(
+                kind, artifact, approved=True,
+                reviewer="TEST gate assertion (not human approval)", ownership=ownership,
+            )
+            _write_compiled_gate_receipt(root, request_id, document, kind)
         assert_current(ownership)
         queue.wake_gate(episode_id, kind)
         return root, adapter, document
@@ -1069,10 +1308,12 @@ def main(argv=None):
     p.add_argument("--manifest-file", type=Path)
     p.add_argument("--mode", choices=("TEST", "PREPRODUCTION"))
     p.add_argument("--compiled-input", type=Path)
+    p.add_argument("--publication-plan-file", type=Path, help="explicit local two-gate-publication/v2 destination plan for compiled TEST start")
     p.add_argument("--request-id")
     p.add_argument("--policy-status-snapshot", type=Path, help="prepublished canonical read-only episode policy status JSON")
     p.add_argument("--kind", choices=("thumbnail", "video"))
     p.add_argument("--test-approval", action="store_true")
+    p.add_argument("--approve-and-publish", action="store_true")
     p.add_argument("--test-publish", action="store_true")
     p.add_argument("--test-reject-scene")
     p.add_argument("--correction", action="append", default=[])
@@ -1208,8 +1449,13 @@ def main(argv=None):
             if a.compiled_input is not None:
                 if a.prompt_file is not None:
                     p.error("compiled TEST start does not accept --prompt-file")
-                result = start_compiled(a.workspace, a.compiled_input, a.test_reject_scene)
+                result = start_compiled(
+                    a.workspace, a.compiled_input, a.test_reject_scene,
+                    publication_plan_file=a.publication_plan_file,
+                )
             else:
+                if a.publication_plan_file is not None:
+                    p.error("--publication-plan-file requires --compiled-input")
                 if a.prompt_file is None:
                     p.error("--prompt-file required for start")
                 result = start(a.workspace, a.prompt_file)
@@ -1255,6 +1501,30 @@ def main(argv=None):
                     doc = asyncio.run(adapter.run_heroes(TEST_COMPILED_COST, TEST_COMPILED_PROVIDER, FixtureProvider(root.parent / "provider"), _compiled_image_qa()))
                     doc = _stage_compiled(adapter, doc)
                 elif a.action == "approve":
+                    has_publication_plan = (root / "publication-plan.json").is_file()
+                    if has_publication_plan:
+                        if a.kind == "video" and not (
+                            a.test_approval and a.approve_and_publish
+                        ):
+                            raise ValueError(
+                                "v2 final video approval requires --test-approval --approve-and-publish"
+                            )
+                        if a.kind != "video" and a.approve_and_publish:
+                            raise ValueError(
+                                "--approve-and-publish is valid only for the v2 video gate"
+                            )
+                        if a.kind == "video":
+                            root, adapter, doc = _approve_compiled_gate(
+                                a.workspace, a.request_id, a.kind,
+                                approve_and_publish=True,
+                            )
+                            result = _compiled_public(root, adapter, doc)
+                            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+                            return 0
+                    elif a.approve_and_publish:
+                        raise ValueError(
+                            "--approve-and-publish requires a v2 publication plan staged at start"
+                        )
                     if not a.test_approval or not a.kind:
                         raise ValueError("only explicit --test-approval can label a TEST compiled gate decision")
                     root, adapter, doc = _approve_compiled_gate(a.workspace, a.request_id, a.kind)
