@@ -16,7 +16,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.hybrid.artifacts import FrozenAsset, atomic_json, sha256
+from src.hybrid.artifacts import FrozenAsset, atomic_json, digest, sha256
+from src.hybrid.locks import file_lock
 
 
 def command(args, *, cwd=None):
@@ -97,6 +98,24 @@ def _publish_new(source, output):
     source, output = Path(source), Path(output)
     os.link(source, output)
     source.unlink()
+
+
+def _copy_new(source, output, *, expected_sha256):
+    """Copy verified cache bytes and reject a validation-to-copy race."""
+    source, output = Path(source), Path(output)
+    if sha256(source) != expected_sha256:
+        raise ValueError("cache artifact changed before copy")
+    descriptor, temporary = tempfile.mkstemp(dir=output.parent, suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as stream, source.open("rb") as original:
+            shutil.copyfileobj(original, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if sha256(temporary) != expected_sha256:
+            raise ValueError("cache artifact changed before copy")
+        _publish_new(temporary, output)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _canonical_json(value):
@@ -231,6 +250,60 @@ def timing(scenes, *, hold=4, fps=None):
     }
 
 
+def _ffmpeg_identity():
+    return command(["ffmpeg", "-version"]).splitlines()[0]
+
+
+def _renderer_identity():
+    """Bind reusable bytes to this renderer implementation, not FFmpeg alone."""
+    return {"implementation_sha256": sha256(Path(__file__))}
+
+
+def _verified_cache_output(receipt_path, *, root, binding):
+    """Return only a same-root, rehashed artifact and its pinned digest."""
+    try:
+        receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
+        candidate = Path(receipt["output"]).resolve()
+        candidate.relative_to(Path(root).resolve())
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if receipt.get("binding") != binding or not candidate.is_file():
+        return None
+    try:
+        if receipt.get("output_sha256") != sha256(candidate):
+            return None
+    except OSError:
+        return None
+    return candidate, receipt["output_sha256"]
+
+
+def _store_cache_output(receipt_path, source, binding):
+    """Publish one cache artifact and receipt under a crash-released key lock."""
+    receipt_path, source = Path(receipt_path), Path(source)
+    cache_root = receipt_path.parent.parent
+    output = receipt_path.with_suffix(source.suffix)
+    with file_lock(receipt_path.with_suffix(".lock")):
+        cached = _verified_cache_output(receipt_path, root=cache_root, binding=binding)
+        if cached is not None:
+            return cached[0]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(dir=output.parent, suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "wb") as stream, source.open("rb") as original:
+                shutil.copyfileobj(original, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, output)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        atomic_json(
+            receipt_path,
+            {"schema": "local-render-cache-v1", "binding": binding,
+             "output": str(output.resolve()), "output_sha256": sha256(output)},
+        )
+    return output
+
+
 def validate_srt(path, duration):
     text = Path(path).read_text(encoding="utf-8-sig").strip()
     blocks = re.split(r"\r?\n\s*\r?\n", text)
@@ -296,6 +369,7 @@ class LocalRenderer:
         render_intent_sha256=None,
         render_contract_sha256=None,
         canonical_episode_root=None,
+        cache_dir=None,
     ):
         """Render only after the compiled control plane has immutable QA receipts."""
         if not production.render_ready():
@@ -314,6 +388,7 @@ class LocalRenderer:
             render_intent_sha256=render_intent_sha256,
             render_contract_sha256=render_contract_sha256,
             canonical_episode_root=canonical_episode_root,
+            cache_dir=cache_dir,
         )
 
     def render(
@@ -329,6 +404,7 @@ class LocalRenderer:
         render_intent_sha256=None,
         render_contract_sha256=None,
         canonical_episode_root=None,
+        cache_dir=None,
     ):
         timeline = timing(scenes, hold=hold, fps=self.fps)
         mode = manifest.mode
@@ -358,6 +434,74 @@ class LocalRenderer:
             )
         output.parent.mkdir(parents=True, exist_ok=True)
         render_seconds = timeline["render_seconds"]
+        cache_root = Path(cache_dir).resolve() if cache_dir is not None else None
+        cache_tool = _ffmpeg_identity() if cache_root is not None else None
+        cache_renderer = _renderer_identity() if cache_root is not None else None
+        scene_bindings = []
+        cached_scenes = {}
+        if cache_root is not None:
+            for index, (scene, seconds) in enumerate(zip(scenes, render_seconds)):
+                binding = {
+                    "kind": "scene", "image_sha256": scene.image.sha256,
+                    "clip_sha256": scene.clip.sha256 if scene.clip else None,
+                    "seconds": seconds, "width": self.width, "height": self.height,
+                    "fps": self.fps, "encoder_threads": self.encoder_threads,
+                    "filter_complex_threads": self.filter_complex_threads,
+                    "output_format": "mp4", "ffmpeg": cache_tool,
+                    "renderer": cache_renderer,
+                }
+                key = digest(binding)
+                cached = _verified_cache_output(
+                    cache_root / "scenes" / f"{key}.json", root=cache_root, binding=binding
+                )
+                scene_bindings.append((key, binding))
+                if cached is not None:
+                    cached_scenes[index] = cached[0]
+        cached_scene_hits = len(cached_scenes)
+
+        def render_receipt(*, master_hit, scene_hits):
+            return {
+                "output": str(output), "output_sha256": sha256(output), "mode": mode,
+                "manifest_sha256": manifest.checksum, "audio_sha256": audio.sha256,
+                "subtitles_sha256": srt.sha256 if srt is not None else None,
+                "api_cost": 0, "transition_seconds": 0.25,
+                "scene_render_seconds": render_seconds, "hold_seconds": hold,
+                "audio_operation": "derived_master" if output.suffix.lower() == ".mp4" else "stream_copy",
+                "hero_sha256": [s.clip.sha256 for s in scenes if s.clip is not None],
+                "filter_complex_threads": self.filter_complex_threads,
+                "scene_workers": self.scene_workers, "encoder_threads": self.encoder_threads,
+                "cache": {"enabled": cache_root is not None, "scene_hits": scene_hits,
+                          "master_hit": master_hit},
+            }
+
+        if cache_root is not None and len(cached_scenes) == len(scenes):
+            master_binding = {
+                "kind": "master", "scene_outputs": [sha256(cached_scenes[i]) for i in range(len(scenes))],
+                "audio_sha256": audio.sha256, "srt_sha256": srt.sha256 if srt else None,
+                "hold": hold, "output_format": output.suffix.lower(), "ffmpeg": cache_tool,
+                "renderer": cache_renderer,
+                "width": self.width, "height": self.height, "fps": self.fps,
+                "encoder_threads": self.encoder_threads,
+                "filter_complex_threads": self.filter_complex_threads,
+            }
+            master_key = digest(master_binding)
+            cached_master = _verified_cache_output(
+                cache_root / "masters" / f"{master_key}.json", root=cache_root, binding=master_binding
+            )
+            if cached_master is not None:
+                cached_master, cached_master_sha256 = cached_master
+                _copy_new(
+                    cached_master,
+                    output,
+                    expected_sha256=cached_master_sha256,
+                )
+                receipt = render_receipt(master_hit=True, scene_hits=len(scenes))
+                atomic_json(output.with_name(output.name + ".receipt.json"), receipt)
+                if completion_receipt_path is not None:
+                    commit_renderer_completion(completion_receipt_path, intent_sha256=render_intent_sha256,
+                        render_contract_sha256=render_contract_sha256, receipt=receipt,
+                        canonical_episode_root=canonical_episode_root)
+                return receipt
         with tempfile.TemporaryDirectory(
             prefix="hybrid-render-", dir=output.parent
         ) as directory:
@@ -373,6 +517,9 @@ class LocalRenderer:
                 raise ValueError("audio snapshot hash mismatch")
             scene_commands = []
             for index, (scene, seconds) in enumerate(zip(scenes, render_seconds)):
+                if index in cached_scenes:
+                    shutil.copyfile(cached_scenes[index], root / f"scene{index}.mp4")
+                    continue
                 if scene.clip is not None:
                     source = root / f"hero{index}{scene.clip.path.suffix}"
                     shutil.copyfile(scene.clip.path, source)
@@ -461,6 +608,28 @@ class LocalRenderer:
                 futures = [pool.submit(command, args) for args in scene_commands]
                 for future in futures:
                     future.result()
+            if cache_root is not None:
+                for index, (key, binding) in enumerate(scene_bindings):
+                    if index in cached_scenes:
+                        continue
+                    cached_scenes[index] = _store_cache_output(
+                        cache_root / "scenes" / f"{key}.json",
+                        root / f"scene{index}.mp4",
+                        binding,
+                    )
+            master_binding = None
+            master_key = None
+            if cache_root is not None:
+                master_binding = {
+                    "kind": "master", "scene_outputs": [sha256(cached_scenes[i]) for i in range(len(scenes))],
+                    "audio_sha256": audio.sha256, "srt_sha256": srt.sha256 if srt else None,
+                    "hold": hold, "output_format": output.suffix.lower(), "ffmpeg": cache_tool,
+                    "renderer": cache_renderer,
+                    "width": self.width, "height": self.height, "fps": self.fps,
+                    "encoder_threads": self.encoder_threads,
+                    "filter_complex_threads": self.filter_complex_threads,
+                }
+                master_key = digest(master_binding)
             args = [
                 "ffmpeg",
                 "-v",
@@ -512,7 +681,6 @@ class LocalRenderer:
             ]
             command(args, cwd=root)
             master = root / ("master" + output.suffix)
-            audio_operation = "stream_copy"
             master_args = [
                 "ffmpeg",
                 "-v",
@@ -535,7 +703,6 @@ class LocalRenderer:
             if output.suffix.lower() == ".mp4":
                 # Preserve approved narration bytes separately and derive the
                 # delivery-only AAC master required by the MP4 contract.
-                audio_operation = "derived_master"
                 master_args += [
                     "-filter_threads",
                     str(self.filter_complex_threads),
@@ -562,24 +729,14 @@ class LocalRenderer:
             audio.verify(mode)
             if srt is not None:
                 srt.verify(mode)
+            if cache_root is not None:
+                _store_cache_output(
+                    cache_root / "masters" / f"{master_key}.json",
+                    master,
+                    master_binding,
+                )
             _publish_new(master, output)
-        receipt = {
-            "output": str(output),
-            "output_sha256": sha256(output),
-            "mode": mode,
-            "manifest_sha256": manifest.checksum,
-            "audio_sha256": audio.sha256,
-            "subtitles_sha256": srt.sha256 if srt is not None else None,
-            "api_cost": 0,
-            "transition_seconds": 0.25,
-            "scene_render_seconds": render_seconds,
-            "hold_seconds": hold,
-            "audio_operation": audio_operation,
-            "hero_sha256": [s.clip.sha256 for s in scenes if s.clip is not None],
-            "filter_complex_threads": self.filter_complex_threads,
-            "scene_workers": self.scene_workers,
-            "encoder_threads": self.encoder_threads,
-        }
+        receipt = render_receipt(master_hit=False, scene_hits=cached_scene_hits)
         atomic_json(output.with_name(output.name + ".receipt.json"), receipt)
         if completion_receipt_path is not None:
             commit_renderer_completion(

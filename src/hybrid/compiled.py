@@ -30,7 +30,7 @@ from src.hybrid.quality_first_motion import (
     select_motion_inventory,
     validate_quality_first_motion_inventory,
 )
-from src.hybrid.technical_qa import inspect_clip, inspect_image
+from src.hybrid.technical_qa import inspect_clip, inspect_image_cached
 from src.hybrid.throughput import DurableQueue, run_bounded_wave
 from src.storage.episode_id import validate_episode_id
 
@@ -801,7 +801,16 @@ class OperationalPipeline:
             result_sha256 = receipt.get("result_sha256")
             if not source.is_file() or sha256(source) != result_sha256:
                 raise ValueError("candidate bytes changed after receipt")
-            packet = inspect_image(source)
+            packet = inspect_image_cached(
+                source,
+                cache_path=self.workspace / "technical_cache" / f"{job.request_id}.json",
+                contract={
+                    "compilation": self.episode.checksum,
+                    "request_id": job.request_id,
+                    "category": job.category,
+                    "predecessor": job.predecessor,
+                },
+            )
             packet.update(scene_id=scene_id, compilation=self.episode.checksum)
             atomic_json(
                 self.workspace / "qa_packets" / f"{job.request_id}.json", packet

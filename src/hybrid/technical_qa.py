@@ -5,18 +5,24 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+from importlib.metadata import version
 from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-from src.hybrid.artifacts import sha256
+from src.hybrid.artifacts import atomic_json, digest, sha256
 
 REQUIRED_FORMAT = "PNG"
 REQUIRED_MODE = "RGB"
 REQUIRED_SIZE = (1280, 720)
 
 
-def inspect_image(path: Path) -> dict:
+def _image_tool_identity() -> dict:
+    """Versioned decoder identity is part of a reusable technical verdict."""
+    return {"decoder": "Pillow", "version": version("Pillow")}
+
+
+def _inspect_image_uncached(path: Path) -> dict:
     """Return immutable technical facts without granting visual approval."""
     candidate = Path(path)
     packet = {
@@ -48,6 +54,77 @@ def inspect_image(path: Path) -> dict:
         packet["errors"].append("dimensions must be 1280x720")
     packet["technical_pass"] = not packet["errors"]
     return packet
+
+
+def _valid_cached_packet(packet: object, *, result_sha256: str) -> bool:
+    """Accept a closed, digest-bound technical packet only."""
+    required = {
+        "result_sha256", "format", "mode", "dimensions", "technical_pass",
+        "promotion_authorized", "errors",
+    }
+    return (
+        isinstance(packet, dict)
+        and set(packet) == required
+        and packet.get("result_sha256") == result_sha256
+        and (packet["format"] is None or isinstance(packet["format"], str))
+        and (packet["mode"] is None or isinstance(packet["mode"], str))
+        and (packet["dimensions"] is None or (
+            isinstance(packet["dimensions"], list)
+            and len(packet["dimensions"]) == 2
+            and all(type(value) is int for value in packet["dimensions"])
+        ))
+        and type(packet["technical_pass"]) is bool
+        and packet["promotion_authorized"] is False
+        and isinstance(packet["errors"], list)
+        and all(isinstance(error, str) for error in packet["errors"])
+    )
+
+
+def inspect_image_cached(path: Path, *, cache_path: Path, contract: dict | None = None) -> dict:
+    """Reuse only an exact technical inspection, never independent visual QA."""
+    candidate = Path(path)
+    result_sha256 = sha256(candidate)
+    contract = dict(contract or {})
+    contract.update(
+        required_format=REQUIRED_FORMAT,
+        required_mode=REQUIRED_MODE,
+        required_size=list(REQUIRED_SIZE),
+    )
+    binding = {
+        "schema": "technical-image-cache-v1",
+        "result_sha256": result_sha256,
+        "contract_sha256": digest(contract),
+        "tool": _image_tool_identity(),
+    }
+    cache_path = Path(cache_path)
+    if cache_path.exists() and not cache_path.is_file():
+        raise ValueError("technical cache path must be a file")
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        cached = None
+    expected_keys = {*binding, "contract", "packet", "packet_sha256"}
+    if (
+        isinstance(cached, dict)
+        and set(cached) == expected_keys
+        and all(cached.get(key) == value for key, value in binding.items())
+        and cached.get("contract") == contract
+        and _valid_cached_packet(cached.get("packet"), result_sha256=result_sha256)
+        and cached.get("packet_sha256") == digest(cached["packet"])
+    ):
+        return cached["packet"]
+    packet = _inspect_image_uncached(candidate)
+    packet["promotion_authorized"] = False
+    atomic_json(cache_path, {
+        **binding, "contract": contract, "packet": packet,
+        "packet_sha256": digest(packet),
+    })
+    return packet
+
+
+def inspect_image(path: Path) -> dict:
+    """Return immutable technical facts without granting visual approval."""
+    return _inspect_image_uncached(path)
 
 
 def inspect_clip(path: Path, *, expected_sha256: str, geometry: dict, duration_s: float,
