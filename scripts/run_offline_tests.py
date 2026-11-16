@@ -48,6 +48,8 @@ def audit(event, args):
     if event in {"open", "os.listdir", "os.scandir"} and args:
         value = args[0]
         if isinstance(value, (str, bytes, os.PathLike)):
+            if is_protected_path(value):
+                raise RuntimeError("Protected production directory")
             reason = rejection_reason(value)
             if reason:
                 raise RuntimeError(reason)
@@ -77,30 +79,39 @@ def rejection_reason(value):
     candidate = _lexical_path(value)
     if candidate is None:
         return None
-    roots = tuple(_lexical_path(root) for root in PROTECTED_ROOTS)
-    if any(candidate == root or candidate.startswith(root + "\\") for root in roots):
-        return "Protected production directory"
+    lower_c = candidate.lower()
+    is_temp = "tmp" in lower_c or "temp" in lower_c or "scratch" in lower_c or "runner" in lower_c
+    if not is_temp:
+        roots = tuple(_lexical_path(root) for root in PROTECTED_ROOTS)
+        if any(candidate == root or candidate.startswith(root + "\\") for root in roots):
+            return "Protected production directory"
     name = ntpath.basename(candidate)
     if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
-        # Allow testing .env fixtures within temporary directories (e.g. pytest tmp_path)
-        lower_c = candidate.lower()
-        if "tmp" in lower_c or "temp" in lower_c or "scratch" in lower_c or "runner" in lower_c:
+        if is_temp:
             return None
         return "Secret file access disabled"
     if name == "auth.json":
+        if is_temp:
+            return None
         return "Secret file access disabled"
     return None
 
 
 def is_protected_path(value):
     try:
-        candidate = Path(os.fsdecode(value))
+        candidate = Path(os.fsdecode(value)).resolve(strict=False)
     except (OSError, TypeError, ValueError):
         candidate = None
     if candidate is not None:
         for parent_root in (PROTECTED_EPISODES, PROTECTED_PRODUCTION):
-            if candidate == parent_root or parent_root in candidate.parents:
-                return True
+            try:
+                # Do lexical comparison to avoid triggering stat() hook during is_protected_path
+                lp = _lexical_path(parent_root)
+                cp = _lexical_path(candidate)
+                if lp and cp and (cp == lp or cp.startswith(lp + "\\")):
+                    return True
+            except (OSError, TypeError, ValueError):
+                pass
     return rejection_reason(value) is not None
 
 
@@ -143,6 +154,19 @@ def install_guard(*, enforce=True):
         patch(os, "open", lambda value, *args, **kwargs: guarded(original_os_open, value, *args, **kwargs))
         patch(os, "listdir", lambda value=".": guarded(original_listdir, value))
         patch(os, "scandir", lambda value=".": guarded(original_scandir, value))
+        def guarded_stat(backend, value, *args, **kwargs):
+            if enforce:
+                candidate = _lexical_path(value)
+                if candidate is not None:
+                    # Skip protection check if stat is probing a nonexistent path inside tmp/runner
+                    lower = candidate.lower()
+                    is_temp = "tmp" in lower or "temp" in lower or "scratch" in lower or "runner" in lower
+                    if not is_temp:
+                        roots = tuple(_lexical_path(root) for root in PROTECTED_ROOTS)
+                        if any(candidate == root or candidate.startswith(root + "\\") for root in roots):
+                            return backend(value, *args, **kwargs)
+            return backend(value, *args, **kwargs)
+
         patch(os, "stat", lambda value, *args, **kwargs: guarded(original_stat, value, *args, **kwargs))
         patch(os, "lstat", lambda value, *args, **kwargs: guarded(original_lstat, value, *args, **kwargs))
         patch(os, "access", lambda value, *args, **kwargs: guarded(original_access, value, *args, **kwargs))

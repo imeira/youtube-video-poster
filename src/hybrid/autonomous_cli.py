@@ -1559,9 +1559,9 @@ def main(argv=None):
                                 raise RuntimeError("approval receipt is not bound to the current durable artifact")
                             queue.wake_gate(run.episode_id, a.kind)
                 elif a.action == "publish":
-                    raise ValueError(
-                        "standalone publish is disabled; publication requires explicit --approve-and-publish under a v2 plan"
-                    )
+                    if not a.test_publish:
+                        raise ValueError("only explicit --test-publish can publish TEST fixture media")
+                    doc = run.publish(lambda x: {"mode": "TEST", "video_id": "TEST-" + x["video_sha256"][:16], "readback": {"video_id": "TEST-" + x["video_sha256"][:16], "mode": "TEST", "local_only": True}})
                 else:
                     raise ValueError("fixture harness has no compiled remediation or hero operation")
                 result = public(root, a.request_id, doc)
